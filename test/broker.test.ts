@@ -3120,22 +3120,6 @@ describe('quiet error paths and shared waits', () => {
     expect(await first).toMatchObject({ conditionMet: true, timedOut: false });
   });
 
-  it('resolves two waiters on one thread from a single reply', async () => {
-    const stack = await buildStack();
-    const alice = await connectAdapter(stack, 'alice', 5203);
-    const second = await connectPeer(stack, { handle: 'alice' });
-    const bob = await connectPeer(stack, { handle: 'bob' });
-    const ask = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'both wait' });
-    const one = req<WaitResult>(alice.client, { type: 'wait', threadId: ask.threadId, until: 'any_replied', timeoutMs: 20000 });
-    const two = req<WaitResult>(second.client, { type: 'wait', threadId: ask.threadId, until: 'any_replied', timeoutMs: 20000 });
-    await yieldTurn();
-    await yieldTurn();
-    await req<ReplyResult>(bob.client, { type: 'reply', messageId: ask.messageId, body: 'for both' });
-    expect(await one).toMatchObject({ conditionMet: true });
-    expect(await two).toMatchObject({ conditionMet: true });
-    expect((stack.broker as unknown as { waiters: Map<number, unknown> }).waiters.size).toBe(0);
-  });
-
   it('survives a failed push of replies held for a wait whose connection closed', async () => {
     const stack = await buildStack();
     const alice = await connectAdapter(stack, 'alice', 5202);
@@ -3157,5 +3141,36 @@ describe('quiet error paths and shared waits', () => {
       pushQueued.mockRestore();
     }
     await expect(req<StatusResult>(bob.client, { type: 'status' })).resolves.toBeDefined();
+  });
+});
+
+describe('one reply resolving two waits', () => {
+  it('answers each wait exactly once', async () => {
+    // The reply resolves one wait, whose handover re-enters checkWaiters and resolves the other.
+    const stack = await buildStack();
+    const alice = await connectAdapter(stack, 'alice', 5204);
+    const second = await connectPeer(stack, { handle: 'alice' });
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    const ask = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'both wait' });
+    const replyOk = vi.spyOn(stack.broker as unknown as { replyOk(socket: Socket, id: number, result: unknown): void }, 'replyOk');
+    try {
+      const one = req<WaitResult>(alice.client, { type: 'wait', threadId: ask.threadId, until: 'any_replied', timeoutMs: 20000 });
+      const two = req<WaitResult>(second.client, { type: 'wait', threadId: ask.threadId, until: 'any_replied', timeoutMs: 20000 });
+      await yieldTurn();
+      await yieldTurn();
+      await req<ReplyResult>(bob.client, { type: 'reply', messageId: ask.messageId, body: 'for both' });
+      expect(await one).toMatchObject({ conditionMet: true });
+      expect(await two).toMatchObject({ conditionMet: true });
+      expect((stack.broker as unknown as { waiters: Map<number, unknown> }).waiters.size).toBe(0);
+      const perSocket = new Map<Socket, number>();
+      for (const [socket, , result] of replyOk.mock.calls) {
+        if ((result as { conditionMet?: boolean }).conditionMet === true) {
+          perSocket.set(socket, (perSocket.get(socket) ?? 0) + 1);
+        }
+      }
+      expect([...perSocket.values()]).toEqual([1, 1]);
+    } finally {
+      replyOk.mockRestore();
+    }
   });
 });

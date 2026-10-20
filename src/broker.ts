@@ -1193,7 +1193,8 @@ export class Broker {
       if (this.stopped) {
         return;
       }
-      if (!this.conditionHolds(threadId, waiter.until)) {
+      // A handover below re-enters checkWaiters and may already have answered this waiter.
+      if (!set.has(waiter) || !this.conditionHolds(threadId, waiter.until)) {
         continue;
       }
       this.removeWaiter(waiter);
@@ -1226,13 +1227,13 @@ export class Broker {
     }
   }
 
+  // Only called for a registered waiter: checkWaiters checks set.has, a close
+  // walks conn.waiters, and a timeout fires only while the timer was never cleared.
   private removeWaiter(waiter: Waiter): void {
-    const set = this.waiters.get(waiter.threadId);
-    if (set !== undefined) {
-      set.delete(waiter);
-      if (set.size === 0) {
-        this.waiters.delete(waiter.threadId);
-      }
+    const set = this.waiters.get(waiter.threadId) as Set<Waiter>;
+    set.delete(waiter);
+    if (set.size === 0) {
+      this.waiters.delete(waiter.threadId);
     }
     waiter.conn.waiters.delete(waiter);
   }

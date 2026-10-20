@@ -9,6 +9,10 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 - Requires Node 22 or newer (`engines` was `>=20`). Node 20 reached end of life on 2026-04-30, and vitest 5 needs Node 22.12 to run the tests, so CI now runs on Node 22 and 24 instead of 20 and 22.
 - Dependencies: zod 4 (runtime), and for development TypeScript 7, `@types/node` 26, vitest and `@vitest/coverage-v8` 5 and `actions/setup-node` 7.1.0.
 
+### Fixed
+
+- One reply that resolves two waits on the same thread answers each wait once. Before, handing over the first wait's replies re-entered the waiter check, which answered the second wait, and the outer loop then answered it again from its stale copy (`src/broker.ts` `checkWaiters`).
+
 ### Security
 
 - vitest 5 drops the vulnerable test-only dependencies `npm audit` reported (tinypool GHSA-5gmw-xhrv-c9v3 and GHSA-85c8-ppgw-ccpr, critical; vitest and `@vitest/mocker` GHSA-82fw-gwwq-j7x9, moderate). The published package was not affected: `npm audit --omit=dev` found nothing.
