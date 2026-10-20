@@ -7,7 +7,7 @@ Releases are cut from a tag. `.github/workflows/release.yml` runs on tags `v*`.
 1. Update `version` in `package.json` and add a `## [x.y.z] - date` section to `CHANGELOG.md`.
 2. Merge to `master`, then tag and push: `git tag vx.y.z && git push origin vx.y.z`.
 3. The workflow runs, in order:
-    1. The same checks as CI (build and `npm run coverage` on ubuntu and macOS, Node 20 and 22).
+    1. The same checks as CI (build and `npm run coverage` on ubuntu and macOS, Node 22 and 24).
     2. A check that fails the run if `package.json` version differs from the tag.
     3. Build, then `npm pack --dry-run` to log the tarball contents.
     4. `npm publish` of the packed tarball with `--provenance`, through npm trusted publishing (GitHub OIDC, no token).

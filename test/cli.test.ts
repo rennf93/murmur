@@ -831,6 +831,22 @@ describe('serve', () => {
     }
   });
 
+  it('still exits cleanly when the broker stop rejects', async () => {
+    const serveHome = mkdtempSync(join(tmpdir(), 'murmur-cli-serve-'));
+    extraHomes.push(serveHome);
+    const realStop = Broker.prototype.stop;
+    const stop = vi.spyOn(Broker.prototype, 'stop').mockImplementationOnce(async function (this: Broker) {
+      await realStop.call(this);
+      throw new Error('stop failed');
+    });
+    try {
+      await serveOnce(serveHome, async () => {});
+      expect(stop).toHaveBeenCalledTimes(1);
+    } finally {
+      stop.mockRestore();
+    }
+  });
+
   it('keeps an existing owner peer when init already ran', async () => {
     const serveHome = mkdtempSync(join(tmpdir(), 'murmur-cli-serve-'));
     extraHomes.push(serveHome);

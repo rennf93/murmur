@@ -51,23 +51,21 @@ export class MurmurClient {
     const socket: Socket = createConnection(opts.socketPath);
     return new Promise<MurmurClient>((resolve, reject) => {
       let settled = false;
-      let timer: NodeJS.Timeout | null = null;
       const finish = (err: MurmurError | null, client: MurmurClient | null): void => {
         if (settled) {
           return;
         }
         settled = true;
-        if (timer !== null) {
-          clearTimeout(timer);
-        }
+        clearTimeout(timer);
         if (err !== null) {
           socket.destroy();
           reject(err);
-        } else if (client !== null) {
-          resolve(client);
+        } else {
+          // Every caller passes exactly one of err and client.
+          resolve(client as MurmurClient);
         }
       };
-      timer = setTimeout(() => {
+      const timer = setTimeout(() => {
         finish(new MurmurError('broker_down', 'connect to ' + opts.socketPath + ' timed out after ' + String(timeoutMs) + 'ms'), null);
       }, timeoutMs);
       socket.once('error', (err: Error) => {

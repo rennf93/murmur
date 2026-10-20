@@ -2,6 +2,17 @@
 
 All notable changes to murmur are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- Requires Node 22 or newer (`engines` was `>=20`). Node 20 reached end of life on 2026-04-30, and vitest 5 needs Node 22.12 to run the tests, so CI now runs on Node 22 and 24 instead of 20 and 22.
+- Dependencies: zod 4 (runtime), and for development TypeScript 7, `@types/node` 26, vitest and `@vitest/coverage-v8` 5 and `actions/setup-node` 7.1.0.
+
+### Security
+
+- vitest 5 drops the vulnerable test-only dependencies `npm audit` reported (tinypool GHSA-5gmw-xhrv-c9v3 and GHSA-85c8-ppgw-ccpr, critical; vitest and `@vitest/mocker` GHSA-82fw-gwwq-j7x9, moderate). The published package was not affected: `npm audit --omit=dev` found nothing.
+
 ## [0.2.3] - 2026-10-20
 
 ### Changed

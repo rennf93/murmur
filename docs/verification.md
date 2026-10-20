@@ -3,7 +3,7 @@
 ## Tests and coverage
 
 - `make test` builds and runs the suite.
-- `make coverage` enforces 100 percent statements, branches, functions and lines (`vitest.config.ts` sets the thresholds). CI runs it on ubuntu and macOS with Node 20 and 22.
+- `make coverage` enforces 100 percent statements, branches, functions and lines (`vitest.config.ts` sets the thresholds). CI runs it on ubuntu and macOS with Node 22 and 24.
 
 ## Benchmark
 
