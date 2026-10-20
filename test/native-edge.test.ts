@@ -15,9 +15,9 @@ vi.mock('node:net', async (importOriginal) => {
   class FakeSocket extends EventEmitter {
     writes: string[] = [];
     destroyed = false;
-    write(chunk: string | Uint8Array): boolean {
+    end(chunk: string | Uint8Array): this {
       this.writes.push(String(chunk));
-      return true;
+      return this;
     }
     destroy(): void {
       this.destroyed = true;
@@ -47,7 +47,7 @@ describe('nativeSend edge frames', () => {
     const pending = nativeSend('/tmp/murmur-native-partial.sock', 't', 'hello');
     const socket = lastFake();
     socket.emit('connect');
-    expect(socket.writes).toHaveLength(2);
+    expect(socket.writes).toHaveLength(1);
     // No newline anywhere: the reply loop never runs, the close decides.
     socket.emit('data', Buffer.from('a peer line that never terminates'));
     socket.emit('close', false);

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Broker } from '../src/broker.js';
 import { MurmurClient } from '../src/client.js';
+import { MurmurError } from '../src/protocol.js';
 import { ensureHome, getPaths, readToken } from '../src/config.js';
 import type { MurmurPaths } from '../src/config.js';
 import { MurmurCore } from '../src/core.js';
@@ -35,6 +36,14 @@ vi.mock('@modelcontextprotocol/sdk/server/stdio.js', () => ({
     async close(): Promise<void> {}
   },
 }));
+
+// runMcpServer's host identity comes from currentHost; each case sets it.
+const hostState = vi.hoisted(() => ({ host: null as unknown }));
+
+vi.mock('../src/proc.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/proc.js')>();
+  return { ...actual, currentHost: () => hostState.host };
+});
 
 // readToken only ever throws MurmurError for real, so the non-murmur branch
 // of the connect guard is reached through this pass-through fault switch.
@@ -92,6 +101,7 @@ function exitThrows(): { exits: number[]; stderr: string[] } {
 }
 
 afterEach(async () => {
+  hostState.host = null;
   configState.tokenFailure = null;
   for (const stack of stacks.splice(0)) {
     await stack.broker.stop();
@@ -121,27 +131,61 @@ describe('runMcpServer fault tolerance', () => {
     }
   });
 
-  it('exits 1 when the broker rejects the registration with a non-error', async () => {
+  // A register request that throws a non-MurmurError, under every identity
+  // shape: no retry applies without a host or without a wanted handle, and
+  // with both the retry without the handle fails the same way.
+  it.each([
+    ['no host, no handle', null, undefined],
+    ['no host, wanted handle', null, 'mcp-register-fault'],
+    ['host, no handle', { hostPid: 9001, hostStart: 'S1', ancestors: [9001] }, undefined],
+    ['host, wanted handle (retry fails too)', { hostPid: 9001, hostStart: 'S1', ancestors: [9001] }, 'mcp-register-fault'],
+  ])('exits 1 when the broker rejects the registration with a non-error: %s', async (_label, host, handle) => {
     const stack = await buildStack();
     process.env.MURMUR_HOME = stack.home;
-    process.env.MURMUR_HANDLE = 'mcp-register-fault';
+    if (handle === undefined) {
+      delete process.env.MURMUR_HANDLE;
+    } else {
+      process.env.MURMUR_HANDLE = handle;
+    }
+    hostState.host = host;
     const { exits, stderr } = exitThrows();
     const proto = MurmurClient.prototype as unknown as { request: unknown };
     const original = proto.request;
+    let calls = 0;
     proto.request = function () {
+      calls += 1;
       throw new Error('register exploded');
     };
     try {
       await expect(runMcpServer()).rejects.toThrow('process.exit(1)');
       expect(exits).toEqual([1]);
-      expect(stderr.join('')).toContain(
-        'murmur mcp: broker rejected registration of handle mcp-register-fault (internal): register exploded',
-      );
+      expect(stderr.join('')).toContain('murmur mcp: broker rejected registration (internal): register exploded');
+      expect(calls).toBe(host !== null && handle !== undefined ? 2 : 1);
       expect(fakeStdio.constructed).toBe(0);
     } finally {
       proto.request = original;
       delete process.env.MURMUR_HOME;
       delete process.env.MURMUR_HANDLE;
+    }
+  });
+
+  it('reports the wire code when the broker rejects the registration with a MurmurError', async () => {
+    const stack = await buildStack();
+    process.env.MURMUR_HOME = stack.home;
+    delete process.env.MURMUR_HANDLE;
+    const { exits, stderr } = exitThrows();
+    const proto = MurmurClient.prototype as unknown as { request: unknown };
+    const original = proto.request;
+    proto.request = function () {
+      throw new MurmurError('bad_request', 'refused by broker');
+    };
+    try {
+      await expect(runMcpServer()).rejects.toThrow('process.exit(1)');
+      expect(exits).toEqual([1]);
+      expect(stderr.join('')).toContain('murmur mcp: broker rejected registration (bad_request): refused by broker');
+    } finally {
+      proto.request = original;
+      delete process.env.MURMUR_HOME;
     }
   });
 

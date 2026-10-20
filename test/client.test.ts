@@ -5,7 +5,31 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LineReader, MurmurError, encodeLine } from '../src/protocol.js';
 import type { ServerEvent } from '../src/protocol.js';
-import { MurmurClient, isBrokerDown, isMurmurError } from '../src/client.js';
+import { MurmurClient, connectBroker, isBrokerDown, isMurmurError } from '../src/client.js';
+
+// connectBroker's autostart spawns a detached broker; the spawn is replaced
+// so a test can decide whether, and when, a broker appears.
+const spawnState = vi.hoisted(() => ({
+  calls: [] as Array<{ cmd: string; args: string[]; opts: Record<string, unknown> }>,
+  unrefs: 0,
+  onSpawn: () => {},
+}));
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawn: (cmd: string, args: string[], opts: Record<string, unknown>) => {
+      spawnState.calls.push({ cmd, args, opts });
+      spawnState.onSpawn();
+      return {
+        unref: () => {
+          spawnState.unrefs += 1;
+        },
+      };
+    },
+  };
+});
 
 type LineHandler = (conn: net.Socket, line: string) => void;
 
@@ -21,9 +45,9 @@ interface Broker {
 
 const brokers: Broker[] = [];
 
-async function startBroker(): Promise<Broker> {
-  const dir = mkdtempSync(join(tmpdir(), 'murmur-client-'));
-  const socketPath = join(dir, 'bus.sock');
+async function startBroker(at?: { dir: string; socketPath: string }): Promise<Broker> {
+  const dir = at?.dir ?? mkdtempSync(join(tmpdir(), 'murmur-client-'));
+  const socketPath = at?.socketPath ?? join(dir, 'bus.sock');
   const connections: net.Socket[] = [];
   let closed = false;
   let lineHandler: LineHandler = () => undefined;
@@ -79,7 +103,17 @@ async function startBroker(): Promise<Broker> {
   return broker;
 }
 
+const savedAutostart = process.env.MURMUR_AUTOSTART;
+
 afterEach(async () => {
+  if (savedAutostart === undefined) {
+    delete process.env.MURMUR_AUTOSTART;
+  } else {
+    process.env.MURMUR_AUTOSTART = savedAutostart;
+  }
+  spawnState.calls.length = 0;
+  spawnState.unrefs = 0;
+  spawnState.onSpawn = () => {};
   while (brokers.length > 0) {
     await brokers.pop()?.close();
   }
@@ -362,5 +396,126 @@ describe('MurmurClient', () => {
     internals.socket.write = realWrite as typeof internals.socket.write;
     await expect(client.request({ type: 'status' })).resolves.toEqual({ echoed: 'status' });
     client.close();
+  });
+});
+
+describe('onClosed', () => {
+  it('fires once, and pending requests fail, when the broker drops the connection', async () => {
+    const broker = await startBroker();
+    broker.setHandler(authThen(() => undefined));
+    const client = await connect(broker);
+    const order: string[] = [];
+    client.onClosed = () => {
+      order.push('closed');
+    };
+    const pending = client.request({ type: 'status' }).catch(() => order.push('rejected'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    broker.destroyConnections();
+    await pending;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(order.sort()).toEqual(['closed', 'rejected']);
+  });
+});
+
+describe('connectBroker', () => {
+  const downPath = (): { dir: string; socketPath: string } => {
+    const dir = mkdtempSync(join(tmpdir(), 'murmur-client-'));
+    return { dir, socketPath: join(dir, 'bus.sock') };
+  };
+
+  it('returns the connected client when a broker answers', async () => {
+    const broker = await startBroker();
+    broker.setHandler(echoBroker());
+    const client = await connectBroker({ socketPath: broker.socketPath, token: 'tok' });
+    await expect(client.request({ type: 'status' })).resolves.toEqual({ echoed: 'status' });
+    client.close();
+    expect(spawnState.calls).toEqual([]);
+  });
+
+  it('rethrows an error that is not broker_down, even with autostart on', async () => {
+    process.env.MURMUR_AUTOSTART = '1';
+    const broker = await startBroker();
+    broker.setHandler((conn, line) => {
+      const msg = JSON.parse(line) as { id: number };
+      conn.write(encodeLine({ v: 2, id: msg.id, ok: false, error: { code: 'unauthorized', message: 'bad token' } }));
+    });
+    await expect(connectBroker({ socketPath: broker.socketPath, token: 'nope' })).rejects.toMatchObject({ code: 'unauthorized' });
+    expect(spawnState.calls).toEqual([]);
+  });
+
+  it('rethrows a failure that is not a MurmurError untouched', async () => {
+    process.env.MURMUR_AUTOSTART = '1';
+    const odd = new Error('not a murmur error');
+    const spy = vi.spyOn(MurmurClient, 'connect').mockRejectedValueOnce(odd);
+    try {
+      await expect(connectBroker({ socketPath: '/tmp/none.sock', token: 'tok' })).rejects.toBe(odd);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(spawnState.calls).toEqual([]);
+  });
+
+  it('rethrows broker_down without spawning when autostart is off', async () => {
+    const at = downPath();
+    for (const value of [undefined, '0']) {
+      if (value === undefined) {
+        delete process.env.MURMUR_AUTOSTART;
+      } else {
+        process.env.MURMUR_AUTOSTART = value;
+      }
+      await expect(connectBroker({ socketPath: at.socketPath, token: 'tok' })).rejects.toMatchObject({ code: 'broker_down' });
+    }
+    expect(spawnState.calls).toEqual([]);
+    rmSync(at.dir, { recursive: true, force: true });
+  });
+
+  it('spawns one detached broker and retries until it appears', async () => {
+    process.env.MURMUR_AUTOSTART = '1';
+    const at = downPath();
+    spawnState.onSpawn = () => {
+      setTimeout(() => {
+        void startBroker(at).then((broker) => {
+          broker.setHandler(echoBroker());
+        });
+      }, 250);
+    };
+    const client = await connectBroker({ socketPath: at.socketPath, token: 'tok' });
+    await expect(client.request({ type: 'status' })).resolves.toEqual({ echoed: 'status' });
+    client.close();
+    expect(spawnState.calls).toEqual([
+      { cmd: process.execPath, args: [process.argv[1] ?? '', 'serve'], opts: { detached: true, stdio: 'ignore' } },
+    ]);
+    expect(spawnState.unrefs).toBe(1);
+  });
+
+  it('falls back to an empty entry path when argv[1] is unset', async () => {
+    process.env.MURMUR_AUTOSTART = '1';
+    const at = downPath();
+    spawnState.onSpawn = () => {
+      void startBroker(at).then((broker) => {
+        broker.setHandler(echoBroker());
+      });
+    };
+    const saved = process.argv[1];
+    process.argv[1] = undefined as unknown as string;
+    try {
+      (await connectBroker({ socketPath: at.socketPath, token: 'tok' })).close();
+    } finally {
+      process.argv[1] = saved as string;
+    }
+    expect(spawnState.calls[0]?.args).toEqual(['', 'serve']);
+  });
+
+  it('gives up with the original broker_down error after 30 attempts', async () => {
+    process.env.MURMUR_AUTOSTART = '1';
+    const at = downPath();
+    const started = Date.now();
+    await expect(connectBroker({ socketPath: at.socketPath, token: 'tok' })).rejects.toMatchObject({
+      code: 'broker_down',
+      message: expect.stringContaining(at.socketPath),
+    });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(2900);
+    expect(spawnState.calls).toHaveLength(1);
+    rmSync(at.dir, { recursive: true, force: true });
   });
 });

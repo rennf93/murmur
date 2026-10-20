@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { MurmurCore, percentile } from '../src/core.js';
+import { MurmurCore, fullOf, percentile } from '../src/core.js';
 import type { CoreEvents } from '../src/core.js';
 import {
   DUP_WINDOW_MS,
@@ -17,6 +17,7 @@ import {
 import type { Verdict } from '../src/protocol.js';
 import { Store } from '../src/store.js';
 import type { DeliveryRow } from '../src/store.js';
+import type { ProcInfo } from '../src/proc.js';
 
 let dir: string;
 let dbPath: string;
@@ -25,6 +26,8 @@ let now: number;
 let appends: Array<{ threadId: number; messageId: number; isReply: boolean; sender: string }>;
 let changes: Array<{ threadId: number; recipient: string; from: string; to: string }>;
 let core: MurmurCore;
+let procs: Map<number, ProcInfo>;
+let procThrows: boolean;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'murmur-core-'));
@@ -41,7 +44,14 @@ beforeEach(() => {
       changes.push({ ...arg });
     },
   };
-  core = new MurmurCore(store, events, () => now);
+  procs = new Map();
+  procThrows = false;
+  core = new MurmurCore(store, events, () => now, () => {
+    if (procThrows) {
+      throw new Error('ps failed');
+    }
+    return procs;
+  });
 });
 
 afterEach(() => {
@@ -55,6 +65,12 @@ function advance(ms: number): void {
 
 function setNow(ms: number): void {
   now = ms;
+}
+
+// Marks a host process alive in the fake process table; its start is 'S<pid>'.
+function alive(pid: number): { hostPid: number; hostStart: string } {
+  procs.set(pid, { ppid: 1, start: 'S' + String(pid), comm: 'agent' });
+  return { hostPid: pid, hostStart: 'S' + String(pid) };
 }
 
 function register(...handles: string[]): void {
@@ -251,8 +267,11 @@ describe('send', () => {
     expect(pushes[0]?.recipient).toBe('beta');
     expect(pushes[0]?.kind).toBe('connection');
     expect(pushes[0]?.message.body).toBe('hello');
-    expect(pushes[0]?.footer).toContain('thread ' + String(result.threadId) + ' seq 0');
-    expect(pushes[0]?.footer).toContain('murmur_reply in_reply_to ' + String(result.messageId));
+    expect(pushes[0]?.footer).toContain('murmur_reply messageId ' + String(result.messageId));
+    expect(pushes[0]?.footer).toContain('murmur_thread ' + String(result.threadId));
+    expect(pushes[0]?.text).toContain(
+      '[murmur m' + String(result.messageId) + ' t' + String(result.threadId) + ' s0 from sender to beta]\nhello\n',
+    );
     expect(appends).toEqual([
       { threadId: result.threadId, messageId: result.messageId, isReply: false, sender: 'sender' },
     ]);
@@ -642,6 +661,14 @@ describe('status', () => {
     expect(byHandle.get('stale-peer')).toMatchObject({ presence: 'offline' });
   });
 
+  it('reads presence from the newest live session of a handle with several', () => {
+    core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'old', host: { hostPid: 1001, hostStart: 'S1001' }, handle: 'twin' });
+    advance(1000);
+    core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'new', host: alive(1002), handle: 'twin' });
+    const twin = core.status(() => ({ online: false })).peers.find((p) => p.handle === 'twin');
+    expect(twin).toMatchObject({ presence: 'busy', client: 'claude' });
+  });
+
   it('refreshes presence through touchSeen and ignores unknown handles', () => {
     register('peer');
     advance(400_000);
@@ -730,7 +757,7 @@ describe('pendingPush', () => {
     expect(core.pendingPush('receiver', 10).messages).toEqual([]);
   });
 
-  it('includes sent state rows, respects the limit and skips non push modes', () => {
+  it('skips sent rows, respects the limit and skips non push modes', () => {
     register('sender', 'receiver');
     const m1 = core.send('sender', { threadId: null, to: ['receiver'], body: 'first' });
     core.send('sender', { threadId: null, to: ['receiver'], body: 'second' });
@@ -743,9 +770,9 @@ describe('pendingPush', () => {
     }
     const capped = core.pendingPush('receiver', 1);
     expect(capped.messages.map((m) => m.body)).toEqual(['second']);
-    const rest = core.pendingPush('receiver', 10);
-    expect(rest.messages.map((m) => m.body)).toEqual(['first']);
-    expect(changes.filter((c) => c.to === 'delivered')).toHaveLength(2);
+    // A sent delivery already left through a transport: never pulled again.
+    expect(core.pendingPush('receiver', 10).messages).toEqual([]);
+    expect(changes.filter((c) => c.to === 'delivered')).toHaveLength(1);
   });
 });
 
@@ -757,6 +784,8 @@ describe('default clock', () => {
     };
     const wallCore = new MurmurCore(store, events);
     expect(wallCore.groups('list')).toEqual([]);
+    // The default process table reads the real ps output.
+    expect(wallCore.sessionForAncestors([process.pid])).toBeNull();
   });
 });
 
@@ -869,5 +898,332 @@ describe('defensive store guards', () => {
     );
     flakyCore.groups('add', 'dev', ['alpha']);
     expect(core.groups('list')[0]?.members).toEqual(['alpha']);
+  });
+});
+
+describe('resolveRecipients bare names and groups', () => {
+  it('falls back to a group for a bare name no peer has', () => {
+    register('alpha', 'beta');
+    core.groups('create', 'team');
+    core.groups('add', 'team', ['alpha', 'beta']);
+    expect(core.resolveRecipients(['team'])).toEqual(['alpha', 'beta']);
+    expectCoreError(() => core.resolveRecipients(['ghost']), 'unknown_handle', 'ghost');
+  });
+
+  it('prefers the peer for a bare name but always uses the group for @name', () => {
+    register('alpha', 'team');
+    core.groups('create', 'team');
+    core.groups('add', 'team', ['alpha']);
+    expect(core.resolveRecipients(['team'])).toEqual(['team']);
+    expect(core.resolveRecipients(['@team'])).toEqual(['alpha']);
+    register('lonely');
+    expectCoreError(() => core.resolveRecipients(['@lonely']), 'unknown_group', 'lonely');
+  });
+});
+
+describe('reply fan-out', () => {
+  it('reaches every other participant with a rendered text and links the parent', () => {
+    register('alpha', 'beta', 'gamma');
+    const ask = core.send('alpha', { threadId: null, to: ['beta', 'gamma'], body: 'decide' });
+    const { result, pushes } = core.reply('beta', { messageId: ask.result.messageId, body: 'yes', verdict: 'agree', references: ['r1'] });
+    expect(pushes.map((p) => [p.recipient, p.kind]).sort()).toEqual([
+      ['alpha', 'connection'],
+      ['gamma', 'connection'],
+    ]);
+    expect(pushes[0]?.text).toContain(
+      'm' + String(result.messageId) + ' t' + String(result.threadId) + ' s1 from beta re m' + String(ask.result.messageId) + ' AGREE to gamma, alpha]',
+    );
+    expect(pushes[0]?.text).toContain('refs: r1');
+    expect(core.deliveriesOf(result.messageId).map((d) => [d.recipient, d.state])).toEqual([
+      ['alpha', 'queued'],
+      ['gamma', 'queued'],
+    ]);
+    expect(core.deliveriesOf(ask.result.messageId).find((d) => d.recipient === 'beta')?.state).toBe('replied');
+  });
+
+  it('includes later participants and drops handles that are no longer peers', () => {
+    register('alpha', 'beta', 'gamma');
+    const ask = core.send('alpha', { threadId: null, to: ['beta', 'gamma'], body: 'q' });
+    core.reply('gamma', { messageId: ask.result.messageId, body: 'one' });
+    store.deletePeer('beta');
+    const { pushes } = core.reply('alpha', { messageId: ask.result.messageId, body: 'two' });
+    expect(pushes.map((p) => p.recipient)).toEqual(['gamma']);
+  });
+
+  it('uses the parent mode, native transports and truncates the delivered body', () => {
+    register('alpha', 'beta');
+    core.registerNative({ handle: 'alpha', socketPath: join(dir, 'a.sock'), token: 't' });
+    const ask = core.send('alpha', { threadId: null, to: ['beta'], body: 'q', mode: 'notify' });
+    const body = 'y'.repeat(MAX_BODY_CHARS + 5);
+    const { result, pushes } = core.reply('beta', { messageId: ask.result.messageId, body });
+    expect(pushes.map((p) => p.kind)).toEqual(['queued']);
+    expect(pushes[0]?.text).toContain('[truncated');
+    expect(pushes[0]?.message.body).toBe(body);
+    expect(store.messageById(result.messageId)).toMatchObject({ mode: 'notify', truncated: true, body });
+    const push = core.send('alpha', { threadId: null, to: ['beta'], body: 'q2' });
+    expect(core.reply('beta', { messageId: push.result.messageId, body: 'r' }).pushes.map((p) => p.kind)).toEqual(['native']);
+  });
+
+  it('applies the send limits to replies', () => {
+    register('alpha', 'beta');
+    const ask = core.send('alpha', { threadId: null, to: ['beta'], body: 'q' });
+    core.reply('beta', { messageId: ask.result.messageId, body: 'same' });
+    expectCoreError(() => core.reply('beta', { messageId: ask.result.messageId, body: 'same' }), 'duplicate');
+    unreadDeliveries('alpha', UNREAD_CAP);
+    expectCoreError(() => core.reply('beta', { messageId: ask.result.messageId, body: 'other' }), 'cap_inbox', 'alpha');
+  });
+});
+
+describe('threadView digest', () => {
+  it('returns summaries without bodies when full is false', () => {
+    register('alpha', 'beta');
+    const { result } = core.send('alpha', { threadId: null, to: ['beta'], body: 'line one\nline two' });
+    const digest = core.threadView(result.threadId, null, false).messages[0];
+    expect(digest).toMatchObject({ firstLine: 'line one' });
+    expect(digest).not.toHaveProperty('body');
+    const full = core.threadView(result.threadId, null).messages[0];
+    expect(full).toEqual(fullOf(store.messageById(result.messageId) as never));
+    expect(full).toHaveProperty('body', 'line one\nline two');
+  });
+});
+
+describe('sessionEvent', () => {
+  it('creates a session with an allocated handle, a peer and an idle state', () => {
+    const host = alive(100);
+    const row = core.sessionEvent({
+      event: 'session-start', client: 'claude', cliSessionId: 'c1', host, transcriptPath: '/t.jsonl', cwd: '/home/me/My Proj!',
+    });
+    expect(row).toMatchObject({
+      client: 'claude', cliSessionId: 'c1', handle: 'claude-my-proj', hostPid: 100, hostStart: 'S100',
+      transcriptPath: '/t.jsonl', cwd: '/home/me/My Proj!', state: 'idle', stateAt: now,
+    });
+    expect(store.getPeer('claude-my-proj')).not.toBeNull();
+  });
+
+  it('maps prompt to busy and session-end to ended and drops the native transport', () => {
+    const host = alive(100);
+    const native = { socketPath: '/n.sock', token: 'tok' };
+    const start = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'c1', host, native });
+    expect(start.handle).toBe('claude');
+    expect(store.getNativeTransport('claude')).toEqual({ owner: 'claude', socketPath: '/n.sock', token: 'tok' });
+    advance(10);
+    expect(core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'c1', host })).toMatchObject({ state: 'busy', stateAt: now });
+    expect(store.getNativeTransport('claude')).not.toBeNull();
+    expect(core.sessionEvent({ event: 'stop', client: 'claude', cliSessionId: 'c1', host }).state).toBe('idle');
+    expect(core.sessionEvent({ event: 'session-end', client: 'claude', cliSessionId: 'c1', host }).state).toBe('ended');
+    expect(store.getNativeTransport('claude')).toBeNull();
+  });
+
+  it('finds a resumed session by its cli id and adopts the new host and fields', () => {
+    const first = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'c1', host: alive(100), cwd: '/a' });
+    const host2 = alive(200);
+    const resumed = core.sessionEvent({
+      event: 'session-start', client: 'claude', cliSessionId: 'c1', host: host2, transcriptPath: '/new.jsonl', cwd: '/b',
+    });
+    expect(resumed).toMatchObject({ id: first.id, handle: first.handle, hostPid: 200, hostStart: 'S200', transcriptPath: '/new.jsonl', cwd: '/b' });
+    expect(store.listSessions()).toHaveLength(1);
+  });
+
+  it('keeps the session across clear (new cli id, same host) and with a null id', () => {
+    const host = alive(100);
+    const first = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'c1', host, cwd: '/a', transcriptPath: '/t' });
+    const cleared = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'c2', host });
+    expect(cleared).toMatchObject({ id: first.id, cliSessionId: 'c2', cwd: '/a', transcriptPath: '/t' });
+    const nullId = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: null, host });
+    expect(nullId).toMatchObject({ id: first.id, cliSessionId: 'c2' });
+  });
+
+  it('honors a claimable explicit handle on create and falls back when it is not claimable', () => {
+    const owner = core.register({ handle: 'boss' });
+    store.upsertPeer('boss', null, null, true, now);
+    expect(owner.handle).toBe('boss');
+    const a = core.sessionEvent({ event: 'session-start', client: 'codex', cliSessionId: null, host: alive(1), handle: 'custom' });
+    expect(a.handle).toBe('custom');
+    const b = core.sessionEvent({ event: 'session-start', client: 'codex', cliSessionId: null, host: alive(2), handle: 'boss', cwd: '/x/repo' });
+    expect(b.handle).toBe('codex-repo');
+    const c = core.sessionEvent({ event: 'session-start', client: 'codex', cliSessionId: null, host: alive(3), handle: 'custom', cwd: '/x/repo' });
+    expect(c.handle).toBe('codex-repo-2');
+    const d = core.sessionEvent({ event: 'session-start', client: 'codex', cliSessionId: null, host: alive(4), handle: 'BAD' });
+    expect(d.handle).toBe('codex');
+  });
+
+  it('renames an existing session to an explicit claimable handle only', () => {
+    const host = alive(1);
+    const live2 = core.sessionEvent({ event: 'session-start', client: 'gemini', cliSessionId: 'g2', host: alive(2), handle: 'taken' });
+    const row = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'c1', host });
+    const same = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'c1', host, handle: row.handle });
+    expect(same.handle).toBe(row.handle);
+    const blocked = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'c1', host, handle: live2.handle });
+    expect(blocked.handle).toBe(row.handle);
+    const renamed = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'c1', host, handle: 'nice-name' });
+    expect(renamed.handle).toBe('nice-name');
+    expect(store.getPeer(row.handle)).toBeNull();
+  });
+});
+
+describe('renameSession', () => {
+  function session(pid: number, client: 'claude' | 'codex' = 'claude', cwd = '/p' + String(pid)): ReturnType<MurmurCore['sessionEvent']> {
+    return core.sessionEvent({ event: 'session-start', client, cliSessionId: 'id' + String(pid), host: alive(pid), cwd });
+  }
+
+  it('rejects invalid handles and returns the same handle untouched', () => {
+    const row = session(1);
+    expectCoreError(() => core.renameSession(row, 'BAD HANDLE'), 'bad_request', 'invalid handle');
+    expect(core.renameSession(row, row.handle)).toBe(row.handle);
+  });
+
+  it('renames onto a free name with the whole identity', () => {
+    const row = session(1);
+    expect(core.renameSession(row, 'brand-new')).toBe('brand-new');
+    expect(store.sessionById(row.id)?.handle).toBe('brand-new');
+    expect(store.getPeer(row.handle)).toBeNull();
+  });
+
+  it('refuses the owner handle and a handle held by a live session', () => {
+    const row = session(1);
+    const other = session(2, 'codex');
+    store.upsertPeer('boss', null, null, true, now);
+    expectCoreError(() => core.renameSession(row, 'boss'), 'bad_request', 'taken');
+    expectCoreError(() => core.renameSession(row, other.handle), 'bad_request', 'taken');
+  });
+
+  it('takes over a dead peer and deletes the abandoned peer when it has no history', () => {
+    const row = session(1);
+    const dead = session(2, 'codex');
+    procs.delete(2);
+    store.upsertNativeTransport(row.handle, '/r.sock', 'rt', now);
+    expect(core.renameSession(row, dead.handle)).toBe(dead.handle);
+    expect(store.sessionById(row.id)?.handle).toBe(dead.handle);
+    expect(store.getPeer('claude-p1')).toBeNull();
+    expect(store.getNativeTransport(dead.handle)?.token).toBe('rt');
+  });
+
+  it('keeps the abandoned peer when it has history or other sessions', () => {
+    const row = session(1);
+    const dead = session(2, 'codex');
+    procs.delete(2);
+    store.createGroup('grp', now);
+    store.addMember('grp', row.handle, now);
+    core.renameSession(row, dead.handle);
+    expect(store.getPeer('claude-p1')).not.toBeNull();
+
+    const row3 = session(3);
+    const sibling = alive(4);
+    store.insertSession({ client: 'claude', cliSessionId: 's4', handle: row3.handle, hostPid: sibling.hostPid, hostStart: sibling.hostStart, transcriptPath: null, cwd: null, now });
+    const dead2 = session(5, 'codex');
+    procs.delete(5);
+    core.renameSession(row3, dead2.handle);
+    expect(store.getPeer(row3.handle)).not.toBeNull();
+  });
+
+  it('can claim a registered peer that has no session at all', () => {
+    const row = session(1);
+    register('idle-peer');
+    expect(core.renameSession(row, 'idle-peer')).toBe('idle-peer');
+    expect(store.getPeer('claude-p1')).toBeNull();
+  });
+});
+
+describe('allocateHandle', () => {
+  const start = (pid: number, client: 'claude' | 'codex', cwd?: string): string =>
+    core.sessionEvent({
+      event: 'session-start', client, cliSessionId: 'x' + String(pid), host: alive(pid), ...(cwd !== undefined ? { cwd } : {}),
+    }).handle;
+
+  it('uses the client alone without a cwd or with an unusable one', () => {
+    expect(start(1, 'claude')).toBe('claude');
+    expect(start(2, 'claude', '/')).toBe('claude-2');
+    expect(start(3, 'claude', '/tmp/---')).toBe('claude-3');
+  });
+
+  it('sanitizes and truncates folder names without a trailing dash', () => {
+    expect(start(1, 'codex', '/w/__Weird..Name__')).toBe('codex-weird-name');
+    expect(start(2, 'claude', '/w/' + 'a'.repeat(20) + '-' + 'b'.repeat(10))).toBe('claude-' + 'a'.repeat(20));
+    expect(start(3, 'claude', '/w/' + 'c'.repeat(40))).toBe('claude-' + 'c'.repeat(21));
+  });
+
+  it('adds numeric suffixes while live sessions hold the name and reuses dead ones', () => {
+    expect(start(1, 'claude', '/w/app')).toBe('claude-app');
+    expect(start(2, 'claude', '/w/app')).toBe('claude-app-2');
+    expect(start(3, 'claude', '/w/app')).toBe('claude-app-3');
+    procs.delete(2);
+    expect(start(4, 'claude', '/w/app')).toBe('claude-app-2');
+  });
+});
+
+describe('sessionForHost and sessionForAncestors', () => {
+  it('finds a session by host and optionally creates one', () => {
+    const host = alive(10);
+    expect(core.sessionForHost(host)).toBeNull();
+    const created = core.sessionForHost(host, { client: 'zcode' });
+    expect(created).toMatchObject({ client: 'zcode', handle: 'zcode', state: 'idle', cwd: null });
+    expect(core.sessionForHost(host, { client: 'zcode' })?.id).toBe(created?.id);
+    expect(core.sessionForHost(alive(11), { client: 'codex', cwd: '/w/thing' })?.handle).toBe('codex-thing');
+  });
+
+  it('returns the nearest live session among the ancestors', () => {
+    const outer = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'o', host: alive(10) });
+    const inner = core.sessionEvent({ event: 'session-start', client: 'codex', cliSessionId: 'i', host: alive(20) });
+    expect(core.sessionForAncestors([20, 10])?.id).toBe(inner.id);
+    expect(core.sessionForAncestors([30, 10])?.id).toBe(outer.id);
+    expect(core.sessionForAncestors([30, 40])).toBeNull();
+    expect(core.sessionForAncestors([])).toBeNull();
+  });
+
+  it('skips ended and dead sessions and survives a failing process table', () => {
+    const a = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'a', host: alive(10) });
+    const b = core.sessionEvent({ event: 'session-start', client: 'codex', cliSessionId: 'b', host: alive(20) });
+    core.sessionEvent({ event: 'session-end', client: 'codex', cliSessionId: 'b', host: alive(20) });
+    expect(core.sessionForAncestors([20, 10])?.id).toBe(a.id);
+    procs.delete(10);
+    expect(core.sessionForAncestors([20, 10])).toBeNull();
+    alive(10);
+    expect(b.id).not.toBe(a.id);
+    procThrows = true;
+    expect(core.sessionForAncestors([10])).toBeNull();
+  });
+});
+
+describe('status from sessions', () => {
+  const peerOf = (handle: string): ReturnType<MurmurCore['status']>['peers'][number] => {
+    const found = core.status(() => ({ online: false })).peers.find((p) => p.handle === handle);
+    expect(found).toBeDefined();
+    return found as ReturnType<MurmurCore['status']>['peers'][number];
+  };
+
+  it('reports busy, idle and online from the live session state', () => {
+    const host = alive(1);
+    const row = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'c', host, handle: 'worker' });
+    expect(peerOf('worker')).toMatchObject({ presence: 'busy', busySince: now, idleSince: null, client: 'claude' });
+    advance(50);
+    core.sessionEvent({ event: 'stop', client: 'claude', cliSessionId: 'c', host });
+    expect(peerOf('worker')).toMatchObject({ presence: 'idle', idleSince: now, busySince: null, lastActivityAgeMs: 0 });
+    const raw = new Database(dbPath);
+    try {
+      raw.prepare('UPDATE sessions SET state = NULL, state_at = NULL WHERE id = ?').run(row.id);
+    } finally {
+      raw.close();
+    }
+    expect(peerOf('worker')).toMatchObject({ presence: 'online', busySince: null, idleSince: null });
+  });
+
+  it('ignores ended sessions, dead hosts and a failing process table', () => {
+    const host = alive(1);
+    core.sessionEvent({ event: 'prompt', client: 'codex', cliSessionId: 'c', host, handle: 'worker' });
+    core.sessionEvent({ event: 'session-end', client: 'codex', cliSessionId: 'c', host });
+    expect(peerOf('worker')).toMatchObject({ presence: 'presumed-offline', client: 'codex' });
+    core.sessionEvent({ event: 'prompt', client: 'codex', cliSessionId: 'c', host });
+    expect(peerOf('worker').presence).toBe('busy');
+    procs.delete(1);
+    expect(peerOf('worker').presence).toBe('presumed-offline');
+    procs.set(1, { ppid: 1, start: 'S1', comm: 'x' });
+    expect(peerOf('worker').presence).toBe('busy');
+    procThrows = true;
+    expect(peerOf('worker').presence).toBe('presumed-offline');
+  });
+
+  it('reports a null client for peers without sessions', () => {
+    register('plain');
+    expect(peerOf('plain').client).toBeNull();
   });
 });

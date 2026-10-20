@@ -22,6 +22,7 @@ type Script = (ctx: { socket: Socket; lines: string[] }) => void;
 
 const homes: string[] = [];
 const servers: Server[] = [];
+const peers: Socket[] = [];
 
 // Starts a server that collects complete lines per connection and invokes
 // the script once both the auth and the message line have arrived. A script
@@ -37,8 +38,10 @@ function scriptedServer(script: Script | null): Promise<Scripted> {
     connections: 0,
     close: () => Promise.resolve(),
   };
-  const server = createServer((socket: Socket) => {
+  // A silent peer must keep its half open, or it would hang up on the client's end().
+  const server = createServer({ allowHalfOpen: script === null }, (socket: Socket) => {
     state.connections += 1;
+    peers.push(socket);
     const reader = new LineReader();
     const lines: string[] = [];
     let fired = false;
@@ -69,6 +72,9 @@ function scriptedServer(script: Script | null): Promise<Scripted> {
 }
 
 afterEach(async () => {
+  for (const peer of peers.splice(0)) {
+    peer.destroy();
+  }
   for (const server of servers.splice(0)) {
     await new Promise<void>((resolve) => {
       server.close(() => resolve());
@@ -89,9 +95,9 @@ describe('framing builders', () => {
 
   it('buildMessageLine frames a newline-delimited message object and escapes newlines', () => {
     const line = buildMessageLine('hello\nworld');
-    expect(line).toBe('{"type":"message","message":"hello\\nworld"}\n');
+    expect(line).toBe('{"type":"user","message":{"role":"user","content":"hello\\nworld"}}\n');
     expect(line.split('\n')).toHaveLength(2);
-    expect(JSON.parse(line)).toEqual({ type: 'message', message: 'hello\nworld' });
+    expect(JSON.parse(line)).toEqual({ type: 'user', message: { role: 'user', content: 'hello\nworld' } });
   });
 });
 
@@ -189,7 +195,7 @@ describe('nativeSend against a scripted peer', () => {
   it('reports a synchronous write failure after connect', async () => {
     const peer = await scriptedServer(null);
     const writeSpy = vi
-      .spyOn(Socket.prototype, 'write')
+      .spyOn(Socket.prototype, 'end')
       .mockImplementationOnce(() => {
         throw new Error('pipe broke');
       });

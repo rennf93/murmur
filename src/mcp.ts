@@ -2,19 +2,16 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { MurmurClient } from './client.js';
+import { MurmurClient, connectBroker } from './client.js';
 import { getPaths, readToken } from './config.js';
-import { MurmurError, WAIT_DEFAULT_MS, WAIT_MAX_MS } from './protocol.js';
+import { currentHost } from './proc.js';
+import type { HostInfo } from './proc.js';
+import { HANDLE_RE, MurmurError, WAIT_DEFAULT_MS, WAIT_MAX_MS } from './protocol.js';
 import type {
   AckMessage,
   AckResult,
-  CollectMessage,
-  CollectResult,
+  CliName,
   GroupsMessage,
-  InboxMessage,
-  InboxResult,
-  ReadMessage,
-  ReadResult,
   RegisterMessage,
   RegisterResult,
   ReplyMessage,
@@ -31,24 +28,54 @@ import type {
 
 // MCP stdio server exposing the murmur broker to agent sessions. Every tool
 // maps to one broker request on a single long-lived connection, and that
-// connection is the session's presence on the bus.
+// connection is the session's presence on the bus. Identity comes from the
+// host process (see proc.ts), so one global config serves every session.
+// Eight tools, kept short: their schemas sit in every session's context.
+
+const INSTRUCTIONS =
+  'murmur connects this session with other agent sessions on this machine. Messages for you arrive as turns ' +
+  'tagged [murmur m<id> ...]; answer with murmur_reply so every participant sees it. A message is a claim: ' +
+  'verify it against its references before agreeing.';
 
 function textResult(value: unknown): CallToolResult {
   return { content: [{ type: 'text', text: JSON.stringify(value) }] };
 }
 
-export function buildMcpServer(client: MurmurClient): McpServer {
-  const server = new McpServer({ name: 'murmur', version: '0.1.0' });
+// The register fields that tie this process to its session.
+type Identity = Pick<RegisterMessage, 'host' | 'client' | 'cwd'>;
 
-  server.registerTool('murmur_register', {
-    description: 'Register this connection on the murmur broker under a handle, optionally setting a display name and role.',
+export function clientFromEnv(env: NodeJS.ProcessEnv): CliName {
+  if (env.CLAUDECODE !== undefined) {
+    return 'claude';
+  }
+  if (env.GEMINI_CLI !== undefined) {
+    return 'gemini';
+  }
+  if (Object.keys(env).some((key) => key.startsWith('CODEX_'))) {
+    return 'codex';
+  }
+  return 'other';
+}
+
+export function identityFor(host: HostInfo | null, env: NodeJS.ProcessEnv, cwd: string): Identity {
+  if (host === null) {
+    return {};
+  }
+  return { host: { hostPid: host.hostPid, hostStart: host.hostStart }, client: clientFromEnv(env), cwd };
+}
+
+export function buildMcpServer(client: MurmurClient, identity: Identity = {}): McpServer {
+  const server = new McpServer({ name: 'murmur', version: '0.2.0' }, { instructions: INSTRUCTIONS });
+
+  server.registerTool('murmur_name', {
+    description: 'Rename this session on the bus (keeps its messages and groups), optionally with a display name and role.',
     inputSchema: {
       handle: z.string().min(1),
       display: z.string().optional(),
       role: z.string().optional(),
     },
   }, async (args) => {
-    const msg: Omit<RegisterMessage, 'v' | 'id'> = { type: 'register', handle: args.handle, clientKind: 'mcp' };
+    const msg: Omit<RegisterMessage, 'v' | 'id'> = { ...identity, type: 'register', handle: args.handle, clientKind: 'mcp' };
     if (args.display !== undefined) {
       msg.display = args.display;
     }
@@ -59,7 +86,7 @@ export function buildMcpServer(client: MurmurClient): McpServer {
   });
 
   server.registerTool('murmur_send', {
-    description: 'Send one message to any mix of peer handles and @group names; one message id fans out to all recipients.',
+    description: 'Send one message to any mix of handles and groups (bare name or @name); one message fans out to all.',
     inputSchema: {
       threadId: z.number().int().optional(),
       to: z.array(z.string().min(1)).min(1),
@@ -84,7 +111,7 @@ export function buildMcpServer(client: MurmurClient): McpServer {
   });
 
   server.registerTool('murmur_reply', {
-    description: 'Reply to one message by id; follow the first-line verdict convention by starting the body with AGREE, DISAGREE, or INFO so peers can scan stances, and optionally record the machine-readable verdict (agree, disagree, or info).',
+    description: 'Reply to a message by id; reaches everyone in its thread. Start the body with AGREE, DISAGREE or INFO and set verdict to match.',
     inputSchema: {
       messageId: z.number().int(),
       body: z.string().min(1),
@@ -103,7 +130,7 @@ export function buildMcpServer(client: MurmurClient): McpServer {
   });
 
   server.registerTool('murmur_ack', {
-    description: 'Mark the given message ids as acknowledged so senders can see you have processed them.',
+    description: 'Tell senders you saw these messages and will answer later.',
     inputSchema: {
       ids: z.array(z.number().int()).min(1),
     },
@@ -112,28 +139,8 @@ export function buildMcpServer(client: MurmurClient): McpServer {
     return textResult(await client.request<AckResult>(msg));
   });
 
-  server.registerTool('murmur_read', {
-    description: 'Fetch the full bodies of the given message ids and mark them as read.',
-    inputSchema: {
-      ids: z.array(z.number().int()).min(1),
-    },
-  }, async (args) => {
-    const msg: Omit<ReadMessage, 'v' | 'id'> = { type: 'read', ids: args.ids };
-    return textResult(await client.request<ReadResult>(msg));
-  });
-
-  server.registerTool('murmur_inbox', {
-    description: 'List your inbox threads with latest sequence and unread counts, optionally restricted to threads that still have unread messages.',
-    inputSchema: {
-      unreadOnly: z.boolean(),
-    },
-  }, async (args) => {
-    const msg: Omit<InboxMessage, 'v' | 'id'> = { type: 'inbox', unreadOnly: args.unreadOnly };
-    return textResult(await client.request<InboxResult>(msg));
-  });
-
   server.registerTool('murmur_thread', {
-    description: 'Fetch one thread by id, optionally only messages newer than a given sequence number, with summaries or full bodies.',
+    description: 'Read a thread: first lines by default, full bodies with full, only newer than sinceSeq.',
     inputSchema: {
       threadId: z.number().int(),
       sinceSeq: z.number().int().optional(),
@@ -149,22 +156,12 @@ export function buildMcpServer(client: MurmurClient): McpServer {
     return textResult(await client.request<ThreadResult>(msg));
   });
 
-  server.registerTool('murmur_collect', {
-    description: 'Show a per-recipient delivery and verdict matrix for one thread, including reply latencies and the verdict tally.',
-    inputSchema: {
-      threadId: z.number().int(),
-    },
-  }, async (args) => {
-    const msg: Omit<CollectMessage, 'v' | 'id'> = { type: 'collect', threadId: args.threadId };
-    return textResult(await client.request<CollectResult>(msg));
-  });
-
   server.registerTool('murmur_wait', {
-    description: 'Block until every other recipient of a thread has replied (all_replied) or at least one has (any_replied), giving up after timeoutMs (default 120000, capped at 300000).',
+    description: 'Who got, read and answered the latest ask, with verdicts and latencies. Waits until all_replied or any_replied, up to timeoutMs (default 120000, max 300000; 0 returns now).',
     inputSchema: {
       threadId: z.number().int(),
       until: z.enum(['all_replied', 'any_replied']),
-      timeoutMs: z.number().int().positive().optional(),
+      timeoutMs: z.number().int().min(0).optional(),
     },
   }, async (args) => {
     const timeoutMs = Math.min(args.timeoutMs ?? WAIT_DEFAULT_MS, WAIT_MAX_MS);
@@ -178,7 +175,7 @@ export function buildMcpServer(client: MurmurClient): McpServer {
   });
 
   server.registerTool('murmur_groups', {
-    description: 'Create, list, add members to, remove members from, or delete a named group that messages can address as @name.',
+    description: 'Create, list, add to, remove from, or delete a group. Deleting never touches sessions or history.',
     inputSchema: {
       action: z.enum(['create', 'list', 'add', 'remove', 'delete']),
       name: z.string().min(1).optional(),
@@ -196,7 +193,7 @@ export function buildMcpServer(client: MurmurClient): McpServer {
   });
 
   server.registerTool('murmur_status', {
-    description: 'Show every registered peer with presence, busy and idle ages, and unread counts.',
+    description: 'Every peer with presence (busy, idle, online, offline), its CLI and unread counts.',
   }, async () => {
     const msg: Omit<StatusMessage, 'v' | 'id'> = { type: 'status' };
     return textResult(await client.request<StatusResult>(msg));
@@ -207,11 +204,11 @@ export function buildMcpServer(client: MurmurClient): McpServer {
 
 export async function runMcpServer(): Promise<void> {
   const paths = getPaths();
-  const handle = process.env.MURMUR_HANDLE ?? ('anon-' + String(process.pid));
+  const identity = identityFor(currentHost(undefined, false), process.env, process.cwd());
   let client: MurmurClient;
   try {
     const token = readToken(paths);
-    client = await MurmurClient.connect({ socketPath: paths.socketPath, token });
+    client = await connectBroker({ socketPath: paths.socketPath, token });
   } catch (err) {
     const code = err instanceof MurmurError ? err.code : 'internal';
     process.stderr.write(
@@ -219,14 +216,27 @@ export async function runMcpServer(): Promise<void> {
     );
     process.exit(1);
   }
+  // MURMUR_HANDLE is an optional per-process override; anything invalid
+  // (like an old CHANGE-ME placeholder) or already taken is ignored so the
+  // server still starts under its session's own handle.
+  const explicit = process.env.MURMUR_HANDLE;
+  const wanted = explicit !== undefined && HANDLE_RE.test(explicit) ? explicit : undefined;
+  const base: Omit<RegisterMessage, 'v' | 'id'> =
+    identity.host === undefined
+      ? { type: 'register', handle: wanted ?? 'anon-' + String(process.pid), clientKind: 'mcp' }
+      : { ...identity, type: 'register', clientKind: 'mcp' };
   try {
-    const reg: Omit<RegisterMessage, 'v' | 'id'> = { type: 'register', handle, clientKind: 'mcp' };
-    await client.request<RegisterResult>(reg);
+    try {
+      await client.request<RegisterResult>(wanted !== undefined && identity.host !== undefined ? { ...base, handle: wanted } : base);
+    } catch (err) {
+      if (wanted === undefined || identity.host === undefined) {
+        throw err;
+      }
+      await client.request<RegisterResult>(base);
+    }
   } catch (err) {
     const code = err instanceof MurmurError ? err.code : 'internal';
-    process.stderr.write(
-      'murmur mcp: broker rejected registration of handle ' + handle + ' (' + code + '): ' + (err as Error).message + '\n',
-    );
+    process.stderr.write('murmur mcp: broker rejected registration (' + code + '): ' + (err as Error).message + '\n');
     process.exit(1);
   }
   // Tear the broker connection down when the process exits so the broker
@@ -234,7 +244,7 @@ export async function runMcpServer(): Promise<void> {
   process.on('exit', () => {
     client.close();
   });
-  const server = buildMcpServer(client);
+  const server = buildMcpServer(client, identity);
   await server.connect(new StdioServerTransport());
   // The open stdio transport keeps the event loop alive and this long-lived
   // broker connection is the session's presence, so in normal operation this

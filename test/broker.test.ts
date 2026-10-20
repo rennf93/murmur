@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import type { Socket } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -12,13 +12,16 @@ import type { MurmurPaths } from '../src/config.js';
 import { MurmurCore } from '../src/core.js';
 import type { CoreEvents } from '../src/core.js';
 import type { NativeSendResult } from '../src/native.js';
+import type { ProcInfo } from '../src/proc.js';
 import {
   LineReader,
   MAX_BODY_CHARS,
   NOTIFY_BATCH_MS,
   PROTOCOL_VERSION,
   WAIT_MAX_MS,
+  deliveryTag,
   encodeLine,
+  renderDelivery,
 } from '../src/protocol.js';
 import type {
   AckResult,
@@ -35,6 +38,7 @@ import type {
   ReplyResult,
   SendResult,
   ServerEvent,
+  SessionResult,
   StatusResult,
   ThreadResult,
   WaitResult,
@@ -73,6 +77,8 @@ interface Stack {
   store: Store;
   core: MurmurCore;
   broker: Broker;
+  // The fake process table the core reads liveness from (see hostRef).
+  proc: Map<number, ProcInfo>;
   stateChanges: Array<{ threadId: number; recipient: string; from: string; to: string }>;
 }
 
@@ -81,7 +87,7 @@ interface Peer {
   events: ServerEvent[];
 }
 
-async function buildStack(nativeSend?: NativeSendFn): Promise<Stack> {
+async function buildStack(nativeSend?: NativeSendFn, extra: Partial<BrokerOptions> = {}): Promise<Stack> {
   const home = mkdtempSync(join(tmpdir(), 'murmur-broker-'));
   const paths = getPaths(home);
   ensureHome(paths);
@@ -93,15 +99,46 @@ async function buildStack(nativeSend?: NativeSendFn): Promise<Stack> {
       stateChanges.push(arg);
     },
   };
-  const core = new MurmurCore(store, events);
-  const opts: BrokerOptions = { paths, store, core };
+  const proc = new Map<number, ProcInfo>();
+  const core = new MurmurCore(store, events, undefined, () => proc);
+  const opts: BrokerOptions = { paths, store, core, ...extra };
   if (nativeSend !== undefined) {
     opts.nativeSend = nativeSend;
   }
   const broker = await Broker.start(opts);
-  const stack: Stack = { home, paths, token: readToken(paths), store, core, broker, stateChanges };
+  const stack: Stack = { home, paths, token: readToken(paths), store, core, broker, proc, stateChanges };
   stacks.push(stack);
   return stack;
+}
+
+const HOST_START = 'Mon Jan  1 00:00:00 2026';
+
+// A live host process for a session: the fake table reports it as running.
+function hostRef(stack: Stack, pid: number): { hostPid: number; hostStart: string } {
+  stack.proc.set(pid, { ppid: 1, start: HOST_START, comm: 'claude' });
+  return { hostPid: pid, hostStart: HOST_START };
+}
+
+// A connection that announces a session and listens for pushes, like an
+// adapter running inside the session's CLI.
+async function connectAdapter(
+  stack: Stack,
+  handle: string,
+  pid: number,
+  extra: Record<string, unknown> = {},
+): Promise<Peer> {
+  const peer = await connectPeer(stack);
+  await req<SessionResult>(peer.client, {
+    type: 'session',
+    event: 'session-start',
+    client: 'claude',
+    cliSessionId: 'cli-' + handle,
+    host: hostRef(stack, pid),
+    handle,
+    listen: true,
+    ...extra,
+  });
+  return peer;
 }
 
 async function connectPeer(
@@ -306,7 +343,7 @@ describe('auth', () => {
     raws.push(raw);
     raw.socket.write(encodeLine({ v: 1, id: 1, type: 'auth', token: 'wrong-token' }));
     const line = await raw.nextLine();
-    expect(JSON.parse(line)).toEqual({ v: 1, id: 1, ok: false, error: { code: 'bad_token', message: 'invalid token' } });
+    expect(JSON.parse(line)).toEqual({ v: PROTOCOL_VERSION, id: 1, ok: false, error: { code: 'bad_token', message: 'invalid token' } });
     await raw.closed;
   });
 
@@ -377,7 +414,7 @@ describe('register and presence', () => {
     const result = await req<RegisterResult>(alice.client, {
       type: 'register',
       handle: 'alice',
-      clientKind: 'cli',
+      clientKind: 'mcp',
       display: 'Alice',
       role: 'tester',
     });
@@ -397,7 +434,7 @@ describe('register and presence', () => {
   it('rebinds when one connection registers twice', async () => {
     const stack = await buildStack();
     const conn = await connectPeer(stack, { handle: 'alice' });
-    await req(conn.client, { type: 'register', handle: 'alice2', clientKind: 'hook' });
+    await req(conn.client, { type: 'register', handle: 'alice2', clientKind: 'mcp' });
     const watcher = await connectPeer(stack, { handle: 'watch' });
     const status = await statusOf(watcher.client);
     expect(status.peers.find((p) => p.handle === 'alice')?.presence).not.toBe('online');
@@ -421,7 +458,7 @@ describe('register and presence', () => {
     });
     await expect(req(conn.client, { type: 'register', handle: 'x', clientKind: 'robot' })).rejects.toMatchObject({
       code: 'bad_request',
-      message: 'clientKind must be one of: mcp, cli, hook',
+      message: 'clientKind must be one of: mcp, cli, hook, adapter',
     });
   });
 
@@ -446,10 +483,10 @@ describe('register and presence', () => {
 });
 
 describe('send and push', () => {
-  it('pushes over a live connection and marks the delivery sent', async () => {
+  it('pushes to a listening adapter and marks the delivery sent', async () => {
     const stack = await buildStack();
     const alice = await connectPeer(stack, { handle: 'alice' });
-    const bob = await connectPeer(stack, { handle: 'bob' });
+    const bob = await connectAdapter(stack, 'bob', 4001);
     const result = await req<SendResult>(alice.client, {
       type: 'send',
       threadId: null,
@@ -459,10 +496,10 @@ describe('send and push', () => {
     });
     expect(result.seq).toBe(0);
     expect(result.deliveries).toHaveLength(1);
-    // The reply carries the delivery snapshot taken when the message was
-    // appended (before the push ran), so it reads queued; the store holds
-    // the settled state.
-    expect(result.deliveries[0]).toMatchObject({ recipient: 'bob', state: 'queued', sentAt: null });
+    // Deliveries are re-read after the pushes ran, so the reply already
+    // shows the settled state.
+    expect(result.deliveries[0]).toMatchObject({ recipient: 'bob', state: 'sent' });
+    expect(result.deliveries[0]?.sentAt).not.toBeNull();
     await settle(() => pushesOf(bob).length > 0, 'push event');
     const push = pushesOf(bob)[0];
     expect(push.v).toBe(PROTOCOL_VERSION);
@@ -473,13 +510,26 @@ describe('send and push', () => {
     expect(push.payload.message.body).toBe('first line\nsecond line');
     expect(push.payload.message.references).toEqual(['carol']);
     expect(push.payload.footer).toBe(
-      'thread ' + String(result.threadId) + ' seq 0: reply with murmur_reply in_reply_to ' +
-        String(result.messageId) + '. The full thread is readable with murmur_thread ' + String(result.threadId) + '.',
+      '(reply: murmur_reply messageId ' + String(result.messageId) + ', or from a shell: murmur reply ' +
+        String(result.messageId) + ' <text>; whole thread: murmur_thread ' + String(result.threadId) + ')',
     );
+    expect(push.payload.text).toBe(
+      renderDelivery(push.payload.message, 'first line\nsecond line', ['bob']),
+    );
+    expect(push.payload.text).toContain(deliveryTag(result.messageId) + 't' + String(result.threadId) + ' s0 from alice to bob]');
     const row = stack.store.getDeliveries(result.messageId).find((d) => d.recipient === 'bob');
     expect(row?.state).toBe('sent');
     expect(row?.sentAt).not.toBeNull();
     expect(row?.deliveredAt).toBeNull();
+  });
+
+  it('leaves the delivery queued for a connected peer that is not listening', async () => {
+    const stack = await buildStack();
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    const result = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'mcp only' });
+    expect(result.deliveries[0]).toMatchObject({ recipient: 'bob', state: 'queued', sentAt: null });
+    expect(pushesOf(bob)).toHaveLength(0);
   });
 
   it('leaves the delivery queued for a registered peer with no live connection', async () => {
@@ -565,7 +615,7 @@ describe('send and push', () => {
 });
 
 describe('native transport sends', () => {
-  it('uses the injected nativeSend on the ok path and marks delivered', async () => {
+  it('uses the injected nativeSend on the ok path and marks sent, not delivered', async () => {
     const fake = fakeNative();
     const stack = await buildStack(fake.fn);
     const alice = await connectPeer(stack, { handle: 'alice' });
@@ -586,14 +636,15 @@ describe('native transport sends', () => {
     expect(fake.calls[0]?.socketPath).toBe('/tmp/fake-bob.sock');
     expect(fake.calls[0]?.token).toBe('bob-native-token');
     expect(fake.calls[0]?.text).toContain('via native');
-    expect(fake.calls[0]?.text).toContain('reply with murmur_reply in_reply_to ' + String(result.messageId));
+    expect(fake.calls[0]?.text).toContain(deliveryTag(result.messageId));
+    expect(fake.calls[0]?.text).toContain('murmur_reply messageId ' + String(result.messageId));
     // Native wins over the live connection: no push event arrives.
     expect(pushesOf(bob)).toHaveLength(0);
-    expect(result.deliveries[0]).toMatchObject({ recipient: 'bob', state: 'queued' });
+    expect(result.deliveries[0]).toMatchObject({ recipient: 'bob', state: 'sent' });
     const row = stack.store.getDeliveries(result.messageId).find((d) => d.recipient === 'bob');
-    expect(row?.state).toBe('delivered');
+    expect(row?.state).toBe('sent');
     expect(row?.sentAt).not.toBeNull();
-    expect(row?.deliveredAt).not.toBeNull();
+    expect(row?.deliveredAt).toBeNull();
     const transport = stack.store.getNativeTransport('bob');
     expect(transport).toEqual({ owner: 'bob', socketPath: '/tmp/fake-bob.sock', token: 'bob-native-token' });
   });
@@ -630,11 +681,12 @@ describe('native transport sends', () => {
     await req(bob.client, { type: 'native-register', handle: 'bob', socketPath: '/tmp/fake-bob.sock', token: 't' });
     const longBody = 'x'.repeat(MAX_BODY_CHARS + 50);
     const result = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: longBody });
-    expect(stack.store.getDeliveries(result.messageId)[0]).toMatchObject({ recipient: 'bob', state: 'delivered' });
+    expect(stack.store.getDeliveries(result.messageId)[0]).toMatchObject({ recipient: 'bob', state: 'sent' });
     expect(stack.store.messageById(result.messageId)?.truncated).toBe(true);
-    expect(
-      fake.calls[0]?.text.startsWith('x'.repeat(MAX_BODY_CHARS) + '\n[truncated: full body stored, read with murmur read]'),
-    ).toBe(true);
+    expect(fake.calls[0]?.text).toContain(
+      'x'.repeat(MAX_BODY_CHARS) + '\n[truncated: full body stored, read it with murmur_thread full: true]',
+    );
+    expect(fake.calls[0]?.text).not.toContain('x'.repeat(MAX_BODY_CHARS + 1));
   });
 
   it('validates native-register fields', async () => {
@@ -678,7 +730,7 @@ describe('reply, ack, read and inbox', () => {
     expect(stack.stateChanges).toContainEqual({
       threadId: ask.threadId,
       recipient: 'bob',
-      from: 'sent',
+      from: 'queued',
       to: 'replied',
     });
   });
@@ -713,6 +765,9 @@ describe('reply, ack, read and inbox', () => {
     const alice = await connectPeer(stack, { handle: 'alice' });
     const bob = await connectPeer(stack, { handle: 'bob' });
     const ask = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob', 'alice'], body: 'ack me' });
+    // A delivery that is still queued cannot be acknowledged.
+    expect(await req<AckResult>(bob.client, { type: 'ack', ids: [ask.messageId] })).toEqual({ acknowledged: [] });
+    await req<ReadResult>(bob.client, { type: 'read', ids: [ask.messageId] });
     const acked = await req<AckResult>(bob.client, { type: 'ack', ids: [ask.messageId, 987654] });
     expect(acked).toEqual({ acknowledged: [ask.messageId] });
     const bobRow = stack.store.getDeliveries(ask.messageId).find((d) => d.recipient === 'bob');
@@ -720,7 +775,7 @@ describe('reply, ack, read and inbox', () => {
     expect(stack.stateChanges).toContainEqual({
       threadId: ask.threadId,
       recipient: 'bob',
-      from: 'sent',
+      from: 'delivered',
       to: 'acknowledged',
     });
     // A second ack of the same id is no longer eligible.
@@ -751,7 +806,7 @@ describe('reply, ack, read and inbox', () => {
     expect(stack.stateChanges).toContainEqual({
       threadId: ask.threadId,
       recipient: 'bob',
-      from: 'sent',
+      from: 'queued',
       to: 'delivered',
     });
     await expect(req(bob.client, { type: 'read', ids: 'x' })).rejects.toMatchObject({
@@ -945,7 +1000,7 @@ describe('wait', () => {
       timeoutMs: 150,
     });
     expect(result).toMatchObject({ threadId: ask.threadId, conditionMet: false, timedOut: true });
-    expect(result.matrix[0]).toMatchObject({ recipient: 'bob', state: 'sent' });
+    expect(result.matrix[0]).toMatchObject({ recipient: 'bob', state: 'queued' });
   });
 
   it('times out on a thread without an ask and returns an empty matrix', async () => {
@@ -1150,7 +1205,7 @@ describe('notifications', () => {
     fakeWaitWindow();
     const stack = await buildStack();
     const alice = await connectPeer(stack, { handle: 'alice' });
-    const bob = await connectPeer(stack, { handle: 'bob' });
+    const bob = await connectAdapter(stack, 'bob', 4002);
     await req<SendResult>(alice.client, {
       type: 'send',
       threadId: null,
@@ -1189,33 +1244,32 @@ describe('notifications', () => {
     const stack = await buildStack();
     const alice = await connectPeer(stack, { handle: 'alice' });
     const bob = await connectPeer(stack, { handle: 'bob' });
-    const carol = await connectPeer(stack, { handle: 'carol' });
+    const carol = await connectAdapter(stack, 'carol', 4003);
     const ask = await req<SendResult>(alice.client, {
       type: 'send',
       threadId: null,
       to: ['bob', 'carol'],
       body: 'who agrees',
-      mode: 'silent',
+      mode: 'notify',
     });
     await req<ReplyResult>(bob.client, { type: 'reply', messageId: ask.messageId, body: 'me', verdict: 'agree' });
     await advanceUntil(() => notificationsOf(carol).length > 0, 'reply_arrived for carol');
     const payloads: NotificationPayload[] = notificationsOf(carol).flatMap((ev) => ev.payload);
-    expect(payloads).toHaveLength(1);
-    expect(payloads[0]).toMatchObject({
-      kind: 'reply_arrived',
-      threadId: ask.threadId,
-      fromHandle: 'bob',
-      detail: 'reply from bob in thread ' + String(ask.threadId),
-    });
-    // bob, as the sender, gets nothing; alice has no delivery row in the thread.
+    // One notice for the notify-mode ask, one for bob's reply; no push event.
+    expect(payloads.map((p) => p.detail)).toEqual([
+      'new message from alice in thread ' + String(ask.threadId),
+      'reply from bob in thread ' + String(ask.threadId),
+    ]);
+    expect(payloads[1]).toMatchObject({ kind: 'reply_arrived', threadId: ask.threadId, fromHandle: 'bob' });
+    expect(pushesOf(carol)).toHaveLength(0);
+    // bob, as the replier, gets nothing for his own reply.
     expect(notificationsOf(bob)).toHaveLength(0);
-    expect(notificationsOf(alice)).toHaveLength(0);
   });
 
   it('notifies the sender when a peer goes offline with pending deliveries, deduped per thread and sender', async () => {
     fakeWaitWindow();
     const stack = await buildStack();
-    const alice = await connectPeer(stack, { handle: 'alice' });
+    const alice = await connectAdapter(stack, 'alice', 4004);
     const bob = await connectPeer(stack, { handle: 'bob' });
     // Thread A: two pending messages from alice to bob (dedup to one notice).
     const p1 = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'p1', mode: 'silent' });
@@ -1244,7 +1298,7 @@ describe('notifications', () => {
     expect(payloads[0]?.threadId).not.toBe(consumed.threadId);
   });
 
-  it('falls back to the native transport for notifications when the peer has no live connection', async () => {
+  it('falls back to plain text over the native transport when the peer is not listening', async () => {
     const fake = fakeNative();
     fakeWaitWindow();
     const stack = await buildStack(fake.fn);
@@ -1256,28 +1310,38 @@ describe('notifications', () => {
       type: 'send',
       threadId: null,
       to: ['carol', 'dave'],
-      body: 'offline ping',
-      mode: 'silent',
+      body: 'notice me',
+      mode: 'notify',
     });
-    // carol and dave drop their connections; both have pending deliveries.
-    carol.client.close();
-    dave.client.close();
-    const watcher = await connectPeer(stack, { handle: 'watcher' });
-    await settle(async () => {
-      const status = await statusOf(watcher.client);
-      const carolPeer = status.peers.find((p) => p.handle === 'carol');
-      const davePeer = status.peers.find((p) => p.handle === 'dave');
-      return carolPeer?.presence !== 'online' && davePeer?.presence !== 'online';
-    }, 'carol and dave offline');
-    fake.calls.length = 0;
-    // A reply in the thread notifies the departed recipients.
-    await req<ReplyResult>(alice.client, { type: 'reply', messageId: ask.messageId, body: 'update' });
+    await req<ReplyResult>(alice.client, { type: 'reply', messageId: ask.messageId, body: 'second thought' });
+    expect(fake.calls).toHaveLength(0);
     await advanceUntil(() => fake.calls.length > 0, 'native notification fallback');
+    // carol has a native transport: one plain text with both notices joined.
+    // dave has none: his batch is dropped silently.
     expect(fake.calls).toHaveLength(1);
     expect(fake.calls[0]?.socketPath).toBe('/tmp/carol.sock');
-    const event = JSON.parse(fake.calls[0]?.text ?? '{}') as NotificationEvent;
-    expect(event.event).toBe('notification');
-    expect(event.payload[0]).toMatchObject({ kind: 'reply_arrived', fromHandle: 'alice' });
+    expect(fake.calls[0]?.token).toBe('ct');
+    expect(fake.calls[0]?.text).toBe(
+      '[murmur notice] new message from alice in thread ' + String(ask.threadId) +
+        '; reply from alice in thread ' + String(ask.threadId),
+    );
+    expect(pushesOf(carol)).toHaveLength(0);
+    expect(notificationsOf(dave)).toHaveLength(0);
+  });
+
+  it('drops a notification batch when the recipient has no listener and no native transport', async () => {
+    const fake = fakeNative();
+    fakeWaitWindow();
+    const stack = await buildStack(fake.fn);
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'unheard', mode: 'notify' });
+    await vi.advanceTimersByTimeAsync(NOTIFY_BATCH_MS);
+    await yieldTurn();
+    expect(bob.events).toHaveLength(0);
+    expect(fake.calls).toHaveLength(0);
+    const inbox = await req<InboxResult>(bob.client, { type: 'inbox', unreadOnly: true });
+    expect(inbox.unreadTotal).toBe(1);
   });
 
   it('swallows a rejecting native transport when flushing notifications', async () => {
@@ -1288,25 +1352,41 @@ describe('notifications', () => {
     const alice = await connectPeer(stack, { handle: 'alice' });
     const bob = await connectPeer(stack, { handle: 'bob' });
     await req(bob.client, { type: 'native-register', handle: 'bob', socketPath: '/tmp/bob.sock', token: 't' });
-    const ask = await req<SendResult>(alice.client, {
+    await req<SendResult>(alice.client, {
       type: 'send',
       threadId: null,
       to: ['bob'],
       body: 'then vanish',
-      mode: 'silent',
+      mode: 'notify',
     });
-    bob.client.close();
-    const watcher = await connectPeer(stack, { handle: 'watcher' });
-    await settle(async () => {
-      const status = await statusOf(watcher.client);
-      return status.peers.find((p) => p.handle === 'bob')?.presence !== 'online';
-    }, 'bob offline');
-    fake.calls.length = 0;
-    await req<ReplyResult>(alice.client, { type: 'reply', messageId: ask.messageId, body: 'late update' });
     await vi.advanceTimersByTimeAsync(NOTIFY_BATCH_MS);
     expect(fake.calls).toHaveLength(1);
     // No unhandled rejection: the broker still serves.
-    await expect(statusOf(watcher.client)).resolves.toBeDefined();
+    await expect(statusOf(alice.client)).resolves.toBeDefined();
+  });
+
+  it('only a live connection going away triggers peer_offline', async () => {
+    fakeWaitWindow();
+    const stack = await buildStack();
+    const alice = await connectAdapter(stack, 'alice', 4005);
+    const carol = await connectPeer(stack);
+    await req<RegisterResult>(carol.client, { type: 'register', handle: 'carol', clientKind: 'cli' });
+    const dave = await connectPeer(stack);
+    await req(dave.client, { type: 'hook', event: 'prompt', handle: 'dave' });
+    await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['carol', 'dave'], body: 'pending', mode: 'silent' });
+    carol.client.close();
+    dave.client.close();
+    await settle(() => carol.client.closed && dave.client.closed, 'short connections closed');
+    await yieldTurn();
+    await yieldTurn();
+    await vi.advanceTimersByTimeAsync(NOTIFY_BATCH_MS * 2);
+    expect(notificationsOf(alice)).toHaveLength(0);
+    // An mcp connection with the same pending delivery does notify.
+    const erin = await connectPeer(stack, { handle: 'erin' });
+    await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['erin'], body: 'pending', mode: 'silent' });
+    erin.client.close();
+    await advanceUntil(() => notificationsOf(alice).length > 0, 'peer_offline for alice');
+    expect(notificationsOf(alice).flatMap((ev) => ev.payload)).toHaveLength(1);
   });
 });
 
@@ -1314,7 +1394,7 @@ describe('dead peer and queued delivery', () => {
   it('keeps the offline peer queued, reports it via collect, then delivers with a queued_delivered notice', async () => {
     fakeWaitWindow();
     const stack = await buildStack();
-    const alice = await connectPeer(stack, { handle: 'alice' });
+    const alice = await connectAdapter(stack, 'alice', 4006);
     const bobSetup = await connectPeer(stack, { handle: 'bob' });
     bobSetup.client.close();
     const watcher = await connectPeer(stack, { handle: 'watcher' });
@@ -1328,9 +1408,8 @@ describe('dead peer and queued delivery', () => {
       to: ['alice', 'bob'],
       body: 'dead peer check',
     });
-    // The reply snapshot predates the push; the store carries the outcome:
-    // alice's live copy was pushed (sent), bob's stays queued.
-    expect(ask.deliveries.map((d) => d.state)).toEqual(['queued', 'queued']);
+    // alice's listening copy was pushed (sent), bob's stays queued.
+    expect(ask.deliveries.map((d) => d.state).sort()).toEqual(['queued', 'sent']);
     const rows = stack.store.getDeliveries(ask.messageId);
     expect(rows.find((d) => d.recipient === 'alice')).toMatchObject({ state: 'sent' });
     expect(rows.find((d) => d.recipient === 'bob')).toMatchObject({ state: 'queued' });
@@ -1524,7 +1603,7 @@ describe('groups and status over the wire', () => {
     const validator = await connectPeer(stack);
     await expect(req(validator.client, { type: 'hook', event: 'crash', handle: 'hooky' })).rejects.toMatchObject({
       code: 'bad_request',
-      message: 'event must be one of: session-start, prompt, stop',
+      message: 'event must be one of: session-start, prompt, stop, session-end',
     });
     await expect(req(validator.client, { type: 'hook', event: 'stop' })).rejects.toMatchObject({
       code: 'bad_request',
@@ -1709,58 +1788,8 @@ describe('native push fault tolerance', () => {
     const result = await pending;
     expect(calls).toHaveLength(1);
     const rows = stack.store.getDeliveries(result.messageId);
-    expect(rows.find((d) => d.recipient === 'bob')?.state).toBe('delivered');
+    expect(rows.find((d) => d.recipient === 'bob')?.state).toBe('sent');
     expect(rows.find((d) => d.recipient === 'carol')?.state).toBe('queued');
-  });
-
-  it('falls back to the stored full body when the message row is gone at push time', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'murmur-broker-'));
-    const paths = getPaths(home);
-    ensureHome(paths);
-    const store = Store.open(paths.dbPath);
-    const core = new MurmurCore(store, { onAppend: () => {}, onStateChange: () => {} });
-    let hideMessageId: number | null = null;
-    const proxiedStore = new Proxy(store, {
-      get(target, prop) {
-        if (prop === 'messageById') {
-          return (id: number) => (hideMessageId === id ? null : target.messageById(id));
-        }
-        const value = Reflect.get(target, prop) as unknown;
-        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
-      },
-    });
-    let release!: (result: NativeSendResult) => void;
-    const gate = new Promise<NativeSendResult>((resolve) => {
-      release = resolve;
-    });
-    const calls: string[] = [];
-    const stub: NativeSendFn = async (socketPath: string, token: string, text: string) => {
-      calls.push(text);
-      return gate;
-    };
-    const broker = await Broker.start({ paths, store: proxiedStore as unknown as Store, core, nativeSend: stub });
-    const stack: Stack = { home, paths, token: readToken(paths), store, core, broker, stateChanges: [] };
-    stacks.push(stack);
-    const alice = await connectPeer(stack, { handle: 'alice' });
-    const bob = await connectPeer(stack, { handle: 'bob' });
-    const carol = await connectPeer(stack, { handle: 'carol' });
-    await req(bob.client, { type: 'native-register', handle: 'bob', socketPath: '/tmp/fake-bob.sock', token: 'tb' });
-    await req(carol.client, { type: 'native-register', handle: 'carol', socketPath: '/tmp/fake-carol.sock', token: 'tc' });
-    const longBody = 'y'.repeat(MAX_BODY_CHARS + 50);
-    const pending = req<SendResult>(alice.client, {
-      type: 'send',
-      threadId: null,
-      to: ['bob', 'carol'],
-      body: longBody,
-    });
-    await settle(() => calls.length === 1, 'first native push started');
-    hideMessageId = stack.store.pendingPushFor('carol', 5)[0]?.message.id ?? null;
-    expect(hideMessageId).not.toBeNull();
-    release({ ok: true, error: null });
-    await pending;
-    const truncatedPrefix = longBody.slice(0, MAX_BODY_CHARS) + '\n[truncated: full body stored, read with murmur read]';
-    expect(calls[0]?.startsWith(truncatedPrefix)).toBe(true);
-    expect(calls[1]?.startsWith(longBody)).toBe(true);
   });
 });
 
@@ -1795,7 +1824,7 @@ describe('write failures on a peer socket', () => {
   it('keeps the send alive and marks the delivery sent when the peer write throws', async () => {
     const stack = await buildStack();
     const alice = await connectPeer(stack, { handle: 'alice' });
-    const bob = await connectPeer(stack, { handle: 'bob' });
+    const bob = await connectAdapter(stack, 'bob', 4007);
     const inner = stack.broker as unknown as { presence: Map<string, { socket: Socket }> };
     const bobSocket = inner.presence.get('bob')?.socket;
     expect(bobSocket).toBeDefined();
@@ -1940,5 +1969,744 @@ describe('shutdown and straggler guards', () => {
     inner.notifyQueue.set('bob', { payloads: [], timer: setTimeout(() => {}, 60_000) });
     inner.flushNotifications('bob');
     expect(inner.notifyQueue.size).toBe(0);
+  });
+});
+
+// v0.2: session identity, adapters, transports and delivery proof.
+
+async function announce(
+  stack: Stack,
+  peer: Peer,
+  pid: number,
+  extra: Record<string, unknown> = {},
+): Promise<SessionResult> {
+  return req<SessionResult>(peer.client, {
+    type: 'session',
+    event: 'session-start',
+    client: 'claude',
+    cliSessionId: 'cli-' + String(pid),
+    host: hostRef(stack, pid),
+    ...extra,
+  });
+}
+
+function senderOf(stack: Stack, threadId: number): string[] {
+  return stack.store.threadMessages(threadId, null).map((m) => m.sender);
+}
+
+function addOwner(stack: Stack, handle = 'boss'): void {
+  stack.store.upsertPeer(handle, null, null, true, Date.now());
+}
+
+describe('register modes', () => {
+  it('owner binds the owner handle and errors when no owner exists', async () => {
+    const stack = await buildStack();
+    const conn = await connectPeer(stack);
+    await expect(req(conn.client, { type: 'register', clientKind: 'cli', owner: true })).rejects.toMatchObject({
+      code: 'bad_request',
+      message: 'no owner peer; run murmur init',
+    });
+    addOwner(stack);
+    await expect(req<RegisterResult>(conn.client, { type: 'register', clientKind: 'cli', owner: true })).resolves.toEqual({
+      handle: 'boss',
+      owner: true,
+    });
+    // The cli connection speaks as the owner without taking presence.
+    const sent = await req<SendResult>(conn.client, { type: 'send', threadId: null, to: ['boss'], body: 'note' });
+    expect(senderOf(stack, sent.threadId)).toEqual(['boss']);
+    const other = await connectPeer(stack, { handle: 'watch' });
+    expect((await statusOf(other.client)).peers.find((p) => p.handle === 'boss')?.presence).not.toBe('online');
+  });
+
+  it('applies display and role after resolving, each on its own', async () => {
+    const stack = await buildStack();
+    addOwner(stack);
+    const conn = await connectPeer(stack);
+    await req(conn.client, { type: 'register', clientKind: 'cli', owner: true, display: 'The Boss' });
+    expect(stack.store.getPeer('boss')).toMatchObject({ display: 'The Boss', role: null, isOwner: true });
+    await req(conn.client, { type: 'register', clientKind: 'cli', owner: true, role: 'lead' });
+    expect(stack.store.getPeer('boss')).toMatchObject({ display: 'The Boss', role: 'lead', isOwner: true });
+    // A handle that has no row yet gets one with the display and role.
+    await req(conn.client, { type: 'register', clientKind: 'mcp', handle: 'fresh', display: 'Fresh', role: 'qa' });
+    expect(stack.store.getPeer('fresh')).toMatchObject({ display: 'Fresh', role: 'qa', isOwner: false });
+  });
+
+  it('binds a host that already announced its session and renames it on request', async () => {
+    const stack = await buildStack();
+    const hook = await connectPeer(stack);
+    await announce(stack, hook, 5001, { handle: 'sess-a' });
+    const mcp = await connectPeer(stack);
+    const same = await req<RegisterResult>(mcp.client, {
+      type: 'register',
+      clientKind: 'mcp',
+      host: { hostPid: 5001, hostStart: HOST_START },
+      client: 'claude',
+      display: 'Sess A',
+    });
+    expect(same).toEqual({ handle: 'sess-a', owner: false });
+    expect(stack.store.getPeer('sess-a')?.display).toBe('Sess A');
+    const status = await statusOf(hook.client);
+    expect(status.peers.find((p) => p.handle === 'sess-a')?.presence).toBe('idle');
+    const renamed = await req<RegisterResult>(mcp.client, {
+      type: 'register',
+      clientKind: 'mcp',
+      host: { hostPid: 5001, hostStart: HOST_START },
+      handle: 'renamed-a',
+    });
+    expect(renamed.handle).toBe('renamed-a');
+    expect(stack.store.getPeer('sess-a')).toBeNull();
+    expect(stack.store.getPeer('renamed-a')).not.toBeNull();
+    await expect(
+      req(mcp.client, { type: 'register', clientKind: 'mcp', host: { hostPid: 5001, hostStart: HOST_START }, handle: 'Bad Handle' }),
+    ).rejects.toMatchObject({ code: 'bad_request', message: 'invalid handle: Bad Handle' });
+  });
+
+  it('keeps a host pending until its session event arrives, then binds the waiting connection', async () => {
+    const stack = await buildStack();
+    const mcp = await connectPeer(stack);
+    const host = hostRef(stack, 5002);
+    await expect(
+      req<RegisterResult>(mcp.client, { type: 'register', clientKind: 'mcp', host, client: 'claude' }),
+    ).resolves.toEqual({ handle: '', owner: false });
+    // A second pending connection on a different host stays pending.
+    const other = await connectPeer(stack);
+    await req(other.client, { type: 'register', clientKind: 'mcp', host: { hostPid: 5002, hostStart: 'a later start' }, client: 'claude' });
+    const hook = await connectPeer(stack);
+    await announce(stack, hook, 5002, { handle: 'late-bound' });
+    const sent = await req<SendResult>(mcp.client, { type: 'send', threadId: null, to: ['late-bound'], body: 'hello' });
+    expect(senderOf(stack, sent.threadId)).toEqual(['late-bound']);
+    // The bound mcp connection is live: it holds the presence slot.
+    const status = await statusOf(hook.client);
+    expect(status.peers.find((p) => p.handle === 'late-bound')?.presence).toBe('idle');
+    // The other host still has no identity; first use creates it.
+    const created = await req<SendResult>(other.client, { type: 'send', threadId: null, to: ['late-bound'], body: 'hi' });
+    expect(senderOf(stack, created.threadId)).toEqual(['claude']);
+  });
+
+  it('creates the session on first identity use when no hook ever announced the host', async () => {
+    const stack = await buildStack();
+    const mcp = await connectPeer(stack);
+    await req(mcp.client, {
+      type: 'register',
+      clientKind: 'mcp',
+      host: hostRef(stack, 5003),
+      client: 'codex',
+      cwd: '/work/My Proj',
+    });
+    const bare = await connectPeer(stack);
+    await req(bare.client, { type: 'register', clientKind: 'adapter', host: hostRef(stack, 5004) });
+    const sent = await req<SendResult>(mcp.client, { type: 'send', threadId: null, to: ['codex-my-proj'], body: 'self' });
+    expect(senderOf(stack, sent.threadId)).toEqual(['codex-my-proj']);
+    expect(stack.store.sessionsForHandle('codex-my-proj')[0]).toMatchObject({ client: 'codex', cwd: '/work/My Proj' });
+    const sentBare = await req<SendResult>(bare.client, { type: 'send', threadId: null, to: ['other'], body: 'bare' });
+    expect(senderOf(stack, sentBare.threadId)).toEqual(['other']);
+    // Once resolved the connection keeps its handle.
+    const again = await req<SendResult>(mcp.client, { type: 'send', threadId: null, to: ['other'], body: 'again' });
+    expect(senderOf(stack, again.threadId)).toEqual(['codex-my-proj']);
+  });
+
+  it('resolves ancestors to the nearest live session, else the owner', async () => {
+    const stack = await buildStack();
+    const hook = await connectPeer(stack);
+    await announce(stack, hook, 5010, { handle: 'anc-a' });
+    const cli = await connectPeer(stack);
+    await expect(
+      req<RegisterResult>(cli.client, { type: 'register', clientKind: 'cli', ancestors: [1, 5010, 77] }),
+    ).resolves.toEqual({ handle: 'anc-a', owner: false });
+    // No owner and no matching session: nothing to speak as.
+    await expect(req(cli.client, { type: 'register', clientKind: 'cli', ancestors: [99999] })).rejects.toMatchObject({
+      code: 'bad_request',
+      message: 'no owner peer; run murmur init',
+    });
+    addOwner(stack);
+    await expect(req<RegisterResult>(cli.client, { type: 'register', clientKind: 'cli', ancestors: [99999] })).resolves.toEqual({
+      handle: 'boss',
+      owner: true,
+    });
+    // A session whose host is gone from the process table does not match.
+    stack.proc.delete(5010);
+    await expect(req<RegisterResult>(cli.client, { type: 'register', clientKind: 'cli', ancestors: [5010] })).resolves.toEqual({
+      handle: 'boss',
+      owner: true,
+    });
+    // An explicit handle beats ancestors.
+    await expect(
+      req<RegisterResult>(cli.client, { type: 'register', clientKind: 'cli', ancestors: [5010], handle: 'explicit-x' }),
+    ).resolves.toEqual({ handle: 'explicit-x', owner: false });
+  });
+
+  it('registers an explicit handle, and refuses a register that names nothing', async () => {
+    const stack = await buildStack();
+    const conn = await connectPeer(stack);
+    await expect(req<RegisterResult>(conn.client, { type: 'register', clientKind: 'adapter', handle: 'adp' })).resolves.toEqual({
+      handle: 'adp',
+      owner: false,
+    });
+    const watcher = await connectPeer(stack, { handle: 'watch' });
+    // adapter connections are long lived, so they hold presence.
+    expect((await statusOf(watcher.client)).peers.find((p) => p.handle === 'adp')?.presence).toBe('online');
+    await expect(req(conn.client, { type: 'register', clientKind: 'mcp' })).rejects.toMatchObject({
+      code: 'bad_request',
+      message: 'register needs a handle, a host, ancestors or owner',
+    });
+  });
+
+  it('validates the v0.2 register fields', async () => {
+    const stack = await buildStack();
+    const conn = await connectPeer(stack);
+    const bad = (extra: Record<string, unknown>, message: string): Promise<void> =>
+      expect(req(conn.client, { type: 'register', clientKind: 'mcp', handle: 'x', ...extra })).rejects.toMatchObject({
+        code: 'bad_request',
+        message,
+      });
+    await bad({ host: 5 }, 'host must be an object');
+    await bad({ host: null }, 'host must be an object');
+    await bad({ host: { hostPid: 'x', hostStart: 's' } }, 'hostPid must be a number');
+    await bad({ host: { hostPid: 1, hostStart: 2 } }, 'hostStart must be a string');
+    await bad({ client: 'nope' }, 'client must be one of: claude, codex, gemini, zcode, opencode, hummin, other');
+    await bad({ owner: 'yes' }, 'owner must be a boolean');
+    await bad({ cwd: 4 }, 'cwd must be a string');
+    await bad({ ancestors: 'a' }, 'ancestors must be an array of numbers');
+    await bad({ ancestors: ['a'] }, 'ancestors must be an array of numbers');
+  });
+});
+
+describe('session handler', () => {
+  it('walks every event and keeps native transports in step', async () => {
+    const stack = await buildStack();
+    const conn = await connectPeer(stack);
+    const host = hostRef(stack, 5020);
+    const native = { socketPath: '/tmp/s-native.sock', token: 'nt' };
+    const base = { type: 'session', client: 'gemini', cliSessionId: 'g-1', host };
+    const start = await req<SessionResult>(conn.client, {
+      ...base,
+      event: 'session-start',
+      native,
+      transcriptPath: '/tmp/none.jsonl',
+      cwd: '/home/dev/api',
+    });
+    expect(start).toEqual({ handle: 'gemini-api' });
+    expect(stack.store.getNativeTransport('gemini-api')).toMatchObject(native);
+    const state = (): string | undefined => stack.store.sessionsForHandle('gemini-api')[0]?.state;
+    expect(state()).toBe('idle');
+    await req(conn.client, { ...base, event: 'prompt' });
+    expect(state()).toBe('busy');
+    await req(conn.client, { ...base, event: 'stop' });
+    expect(state()).toBe('idle');
+    // cliSessionId null is allowed: the host finds the session.
+    await expect(req(conn.client, { ...base, cliSessionId: null, event: 'prompt' })).resolves.toEqual({ handle: 'gemini-api' });
+    await expect(req(conn.client, { ...base, event: 'session-end' })).resolves.toEqual({ handle: 'gemini-api' });
+    expect(state()).toBe('ended');
+    expect(stack.store.getNativeTransport('gemini-api')).toBeNull();
+  });
+
+  it('validates session fields', async () => {
+    const stack = await buildStack();
+    const conn = await connectPeer(stack);
+    const host = hostRef(stack, 5021);
+    const ok = { type: 'session', event: 'prompt', client: 'claude', cliSessionId: 's', host };
+    const bad = (extra: Record<string, unknown>, message: string): Promise<void> =>
+      expect(req(conn.client, { ...ok, ...extra })).rejects.toMatchObject({ code: 'bad_request', message });
+    await bad({ event: 'nap' }, 'event must be one of: session-start, prompt, stop, session-end');
+    await bad({ client: 'nope' }, 'client must be one of: claude, codex, gemini, zcode, opencode, hummin, other');
+    await bad({ cliSessionId: 4 }, 'cliSessionId must be a string');
+    await bad({ cliSessionId: undefined }, 'cliSessionId must be a string');
+    await bad({ host: 'h' }, 'host must be an object');
+    await bad({ transcriptPath: 4 }, 'transcriptPath must be a string');
+    await bad({ cwd: 4 }, 'cwd must be a string');
+    await bad({ handle: 4 }, 'handle must be a string');
+    await bad({ listen: 'yes' }, 'listen must be a boolean');
+    await bad({ native: 'x' }, 'native must be an object');
+    await bad({ native: null }, 'native must be an object');
+    await bad({ native: { socketPath: 1, token: 't' } }, 'socketPath must be a string');
+    await bad({ native: { socketPath: 's' } }, 'token must be a string');
+  });
+
+  it('pushes queued messages oldest first when a session starts listening', async () => {
+    const stack = await buildStack();
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    const carol = await connectPeer(stack, { handle: 'carol' });
+    const bobSetup = await connectPeer(stack, { handle: 'bob' });
+    bobSetup.client.close();
+    await settle(() => bobSetup.client.closed, 'bob gone');
+    const m1 = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob', 'carol'], body: 'first' });
+    const m2 = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'second' });
+    await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'quiet', mode: 'silent' });
+    expect(stack.store.getDeliveries(m1.messageId).find((d) => d.recipient === 'bob')?.state).toBe('queued');
+    const bob = await connectAdapter(stack, 'bob', 5030);
+    expect(pushesOf(bob).map((p) => p.payload.message.id)).toEqual([m1.messageId, m2.messageId]);
+    expect(pushesOf(bob)[0]?.payload.text).toBe(renderDelivery(pushesOf(bob)[0]!.payload.message, 'first', ['bob', 'carol']));
+    const states = (id: number): string | undefined => stack.store.getDeliveries(id).find((d) => d.recipient === 'bob')?.state;
+    expect(states(m1.messageId)).toBe('sent');
+    expect(states(m2.messageId)).toBe('sent');
+    // carol's copy of the first message is untouched, silent mail is never pushed.
+    expect(stack.store.getDeliveries(m1.messageId).find((d) => d.recipient === 'carol')?.state).toBe('queued');
+    expect(pushesOf(bob)).toHaveLength(2);
+    expect(carol.events).toHaveLength(0);
+  });
+
+  it('pushes queued messages on a listening prompt but not on a plain stop', async () => {
+    const stack = await buildStack();
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    const first = await connectPeer(stack);
+    await announce(stack, first, 5031, { handle: 'bob' });
+    const quiet = await connectPeer(stack);
+    const queued = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'waiting' });
+    // Not listening anywhere: still queued after a stop event.
+    await req(quiet.client, {
+      type: 'session',
+      event: 'stop',
+      client: 'claude',
+      cliSessionId: 'cli-5031',
+      host: hostRef(stack, 5031),
+    });
+    const stateOf = (): string | undefined => stack.store.getDeliveries(queued.messageId)[0]?.state;
+    expect(stateOf()).toBe('queued');
+    const listener = await connectPeer(stack);
+    await req(listener.client, {
+      type: 'session',
+      event: 'prompt',
+      client: 'claude',
+      cliSessionId: 'cli-5031',
+      host: hostRef(stack, 5031),
+      listen: true,
+    });
+    expect(pushesOf(listener).map((p) => p.payload.message.id)).toEqual([queued.messageId]);
+    expect(stateOf()).toBe('sent');
+  });
+
+  it('a session start with a native transport pushes the queued mail through it', async () => {
+    const fake = fakeNative();
+    const stack = await buildStack(fake.fn);
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    const bobSetup = await connectPeer(stack, { handle: 'bob' });
+    bobSetup.client.close();
+    await settle(() => bobSetup.client.closed, 'bob gone');
+    const queued = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'for native' });
+    expect(fake.calls).toHaveLength(0);
+    const hook = await connectPeer(stack);
+    await announce(stack, hook, 5032, { handle: 'bob', native: { socketPath: '/tmp/bob-n.sock', token: 'bn' } });
+    expect(fake.calls).toHaveLength(1);
+    expect(fake.calls[0]).toMatchObject({ socketPath: '/tmp/bob-n.sock', token: 'bn' });
+    expect(fake.calls[0]?.text).toContain(deliveryTag(queued.messageId));
+    expect(stack.store.getDeliveries(queued.messageId)[0]?.state).toBe('sent');
+  });
+
+  it('tells the senders a session went offline when it ends with unconsumed messages', async () => {
+    fakeWaitWindow();
+    const stack = await buildStack();
+    const alice = await connectAdapter(stack, 'alice', 5040);
+    const bob = await connectAdapter(stack, 'bob', 5041);
+    const sent = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'unread' });
+    expect(pushesOf(bob)).toHaveLength(1);
+    const end = await req<SessionResult>(bob.client, {
+      type: 'session',
+      event: 'session-end',
+      client: 'claude',
+      cliSessionId: 'cli-bob',
+      host: hostRef(stack, 5041),
+      listen: true,
+    });
+    expect(end).toEqual({ handle: 'bob' });
+    await advanceUntil(() => notificationsOf(alice).length > 0, 'peer_offline for alice');
+    expect(notificationsOf(alice).flatMap((ev) => ev.payload)).toEqual([
+      {
+        kind: 'peer_offline',
+        threadId: sent.threadId,
+        fromHandle: 'bob',
+        detail: 'peer bob went offline with undelivered messages in thread ' + String(sent.threadId),
+      },
+    ]);
+  });
+});
+
+describe('delivered acks', () => {
+  it('moves queued and sent deliveries to delivered and ignores everything else', async () => {
+    fakeWaitWindow();
+    const stack = await buildStack();
+    const alice = await connectAdapter(stack, 'alice', 5050);
+    const bob = await connectAdapter(stack, 'bob', 5051);
+    const sentMsg = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'pushed' });
+    const queuedMsg = await req<SendResult>(alice.client, {
+      type: 'send',
+      threadId: null,
+      to: ['bob'],
+      body: 'queued',
+      mode: 'silent',
+    });
+    const notBob = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['alice'], body: 'mine' });
+    const result = await req<{ delivered: number[] }>(bob.client, {
+      type: 'delivered',
+      ids: [sentMsg.messageId, queuedMsg.messageId, sentMsg.messageId, notBob.messageId, 987654],
+    });
+    expect(result.delivered).toEqual([sentMsg.messageId, queuedMsg.messageId]);
+    const stateOf = (id: number): string | undefined => stack.store.getDeliveries(id).find((d) => d.recipient === 'bob')?.state;
+    expect(stateOf(sentMsg.messageId)).toBe('delivered');
+    expect(stateOf(queuedMsg.messageId)).toBe('delivered');
+    // Only the delivery that had been waiting tells the sender.
+    await advanceUntil(() => notificationsOf(alice).length > 0, 'queued_delivered for alice');
+    const payloads = notificationsOf(alice).flatMap((ev) => ev.payload);
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]).toMatchObject({ kind: 'queued_delivered', fromHandle: 'bob', threadId: queuedMsg.threadId });
+    await expect(req(bob.client, { type: 'delivered', ids: 'x' })).rejects.toMatchObject({
+      code: 'bad_request',
+      message: 'ids must be an array of numbers',
+    });
+    const anon = await connectPeer(stack);
+    await expect(req(anon.client, { type: 'delivered', ids: [] })).rejects.toMatchObject({
+      code: 'bad_request',
+      message: 'no handle is registered on this connection',
+    });
+  });
+});
+
+describe('push routing', () => {
+  it('native ok marks sent, then transcript proof marks delivered', async () => {
+    const dir = mkdtempSync(join('/tmp', 'mm-'));
+    const transcript = join(dir, 'bob.jsonl');
+    writeFileSync(transcript, 'earlier line\n');
+    try {
+      const fake = fakeNative();
+      const stack = await buildStack(fake.fn, { proofPollMs: 20 });
+      const alice = await connectPeer(stack, { handle: 'alice' });
+      const hook = await connectPeer(stack);
+      await announce(stack, hook, 5060, {
+        handle: 'bob',
+        transcriptPath: transcript,
+        native: { socketPath: '/tmp/bob-p.sock', token: 'bp' },
+      });
+      const sent = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'prove me' });
+      expect(fake.calls).toHaveLength(1);
+      expect(sent.deliveries[0]?.state).toBe('sent');
+      await sleep(80);
+      expect(stack.store.getDeliveries(sent.messageId)[0]?.state).toBe('sent');
+      // The session writes the message into its transcript: delivery proven.
+      appendFileSync(transcript, (fake.calls[0]?.text ?? '') + '\n');
+      await settle(() => stack.store.getDeliveries(sent.messageId)[0]?.state === 'delivered', 'proof delivered');
+      expect(stack.store.getDeliveries(sent.messageId)[0]?.deliveredAt).not.toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a transcript written during the push is still found (offset taken before the push)', async () => {
+    const dir = mkdtempSync(join('/tmp', 'mm-'));
+    const transcript = join(dir, 'bob.jsonl');
+    writeFileSync(transcript, 'earlier line\n');
+    try {
+      const stack = await buildStack(
+        async (_socketPath, _token, text) => {
+          appendFileSync(transcript, text + '\n');
+          return { ok: true, error: null };
+        },
+        { proofPollMs: 20 },
+      );
+      const alice = await connectPeer(stack, { handle: 'alice' });
+      const hook = await connectPeer(stack);
+      await announce(stack, hook, 5061, {
+        handle: 'bob',
+        transcriptPath: transcript,
+        native: { socketPath: '/tmp/bob-q.sock', token: 'bq' },
+      });
+      const sent = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'fast session' });
+      await settle(() => stack.store.getDeliveries(sent.messageId)[0]?.state === 'delivered', 'proof delivered');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a session event rechecks the transcript past the polling window', async () => {
+    const dir = mkdtempSync(join('/tmp', 'mm-'));
+    const transcript = join(dir, 'bob.jsonl');
+    writeFileSync(transcript, '');
+    try {
+      const fake = fakeNative();
+      // The poll interval is longer than the test: only recheck can find it.
+      const stack = await buildStack(fake.fn, { proofPollMs: 3_600_000 });
+      const alice = await connectPeer(stack, { handle: 'alice' });
+      const hook = await connectPeer(stack);
+      await announce(stack, hook, 5062, {
+        handle: 'bob',
+        transcriptPath: transcript,
+        native: { socketPath: '/tmp/bob-r.sock', token: 'br' },
+      });
+      const sent = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'later' });
+      appendFileSync(transcript, (fake.calls[0]?.text ?? '') + '\n');
+      expect(stack.store.getDeliveries(sent.messageId)[0]?.state).toBe('sent');
+      await req(hook.client, {
+        type: 'session',
+        event: 'prompt',
+        client: 'claude',
+        cliSessionId: 'cli-5062',
+        host: hostRef(stack, 5062),
+      });
+      expect(stack.store.getDeliveries(sent.messageId)[0]?.state).toBe('delivered');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('wake accepts: marks sent for the live session, with proof when it has a transcript', async () => {
+    const dir = mkdtempSync(join('/tmp', 'mm-'));
+    const transcript = join(dir, 'cx.jsonl');
+    writeFileSync(transcript, '');
+    try {
+      const wake = vi.fn(async () => true);
+      const fake = fakeNative();
+      const stack = await buildStack(fake.fn, { wake, proofPollMs: 20 });
+      const alice = await connectPeer(stack, { handle: 'alice' });
+      const hook = await connectPeer(stack);
+      await announce(stack, hook, 5070, { handle: 'cx', client: 'codex', transcriptPath: transcript });
+      const sent = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['cx'], body: 'wake up' });
+      expect(wake).toHaveBeenCalledTimes(1);
+      const [session, text] = wake.mock.calls[0] as unknown as [{ handle: string; client: string }, string];
+      expect(session).toMatchObject({ handle: 'cx', client: 'codex' });
+      expect(text).toContain(deliveryTag(sent.messageId));
+      expect(fake.calls).toHaveLength(0);
+      expect(stack.store.getDeliveries(sent.messageId)[0]?.state).toBe('sent');
+      appendFileSync(transcript, text);
+      await settle(() => stack.store.getDeliveries(sent.messageId)[0]?.state === 'delivered', 'wake proof delivered');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('wake returning false or rejecting leaves the delivery queued', async () => {
+    let answer: 'false' | 'reject' = 'false';
+    const wake = vi.fn(async () => {
+      if (answer === 'reject') {
+        throw new Error('codex is gone');
+      }
+      return false;
+    });
+    const stack = await buildStack(undefined, { wake });
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    const hook = await connectPeer(stack);
+    await announce(stack, hook, 5071, { handle: 'cx2', client: 'codex' });
+    const first = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['cx2'], body: 'no' });
+    answer = 'reject';
+    const second = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['cx2'], body: 'nope' });
+    expect(wake).toHaveBeenCalledTimes(2);
+    expect(first.deliveries[0]?.state).toBe('queued');
+    expect(second.deliveries[0]?.state).toBe('queued');
+  });
+
+  it('does not wake an ended session or a peer without a session, and native beats wake', async () => {
+    const wake = vi.fn(async () => true);
+    const fake = fakeNative();
+    const stack = await buildStack(fake.fn, { wake });
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    await connectPeer(stack, { handle: 'plain' });
+    const hook = await connectPeer(stack);
+    await announce(stack, hook, 5072, { handle: 'gone-cx', client: 'codex' });
+    await req(hook.client, {
+      type: 'session',
+      event: 'session-end',
+      client: 'codex',
+      cliSessionId: 'cli-5072',
+      host: hostRef(stack, 5072),
+    });
+    const both = await connectPeer(stack);
+    await announce(stack, both, 5073, { handle: 'both', client: 'codex', native: { socketPath: '/tmp/both.sock', token: 'bt' } });
+    const sent = await req<SendResult>(alice.client, {
+      type: 'send',
+      threadId: null,
+      to: ['plain', 'gone-cx', 'both'],
+      body: 'who wakes',
+    });
+    expect(wake).not.toHaveBeenCalled();
+    expect(fake.calls).toHaveLength(1);
+    const states = Object.fromEntries(sent.deliveries.map((d) => [d.recipient, d.state]));
+    expect(states).toEqual({ plain: 'queued', 'gone-cx': 'queued', both: 'sent' });
+  });
+
+  it('a native failure or throw on a live session does not fall through to wake', async () => {
+    const wake = vi.fn(async () => true);
+    const fake = fakeNative();
+    fake.mode = 'fail';
+    const stack = await buildStack(fake.fn, { wake });
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    const hook = await connectPeer(stack);
+    await announce(stack, hook, 5074, { handle: 'nat', client: 'codex', native: { socketPath: '/tmp/nat.sock', token: 'nt' } });
+    const failed = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['nat'], body: 'x' });
+    fake.mode = 'throw';
+    const threw = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['nat'], body: 'y' });
+    expect(failed.deliveries[0]?.state).toBe('queued');
+    expect(threw.deliveries[0]?.state).toBe('queued');
+    expect(wake).not.toHaveBeenCalled();
+  });
+
+  it('keeps a native push queued when the broker stops while it is in flight', async () => {
+    let release!: (result: NativeSendResult) => void;
+    const gate = new Promise<NativeSendResult>((resolve) => {
+      release = resolve;
+    });
+    const stack = await buildStack(() => gate);
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    await req(bob.client, { type: 'native-register', handle: 'bob', socketPath: '/tmp/bob-s.sock', token: 't' });
+    const pending = req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'in flight' });
+    pending.catch(() => {});
+    await settle(() => stack.store.listPeers().length > 0 && stack.store.pendingPushFor('bob', 5).length > 0, 'message stored');
+    const stopping = stack.broker.stop();
+    release({ ok: true, error: null });
+    await stopping;
+    await expect(pending).rejects.toMatchObject({ code: 'broker_closed' });
+    const messageId = stack.store.pendingPushFor('bob', 5)[0]?.message.id as number;
+    expect(stack.store.getDeliveries(messageId)[0]?.state).toBe('queued');
+    // A proof that arrives after stop is ignored.
+    const inner = stack.broker as unknown as { onProof(messageId: number, recipient: string): void };
+    inner.onProof(messageId, 'bob');
+    expect(stack.store.getDeliveries(messageId)[0]?.state).toBe('queued');
+  });
+
+  it('never downgrades a delivery the recipient already pulled while the push was in flight', async () => {
+    let release!: (result: NativeSendResult) => void;
+    const gate = new Promise<NativeSendResult>((resolve) => {
+      release = resolve;
+    });
+    let started = false;
+    const stack = await buildStack(() => {
+      started = true;
+      return gate;
+    });
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    await req(bob.client, { type: 'native-register', handle: 'bob', socketPath: '/tmp/bob-d.sock', token: 't' });
+    const pending = req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'raced' });
+    await settle(() => started, 'native push started');
+    const fetched = await req<FetchPushResult>(bob.client, { type: 'fetch-push', handle: 'bob', limit: 5 });
+    expect(fetched.messages).toHaveLength(1);
+    release({ ok: true, error: null });
+    const sent = await pending;
+    expect(stack.store.getDeliveries(sent.messageId)[0]?.state).toBe('delivered');
+  });
+
+  it('pushes replies to the other participants as events', async () => {
+    const stack = await buildStack();
+    const alice = await connectAdapter(stack, 'alice', 5080);
+    const bob = await connectAdapter(stack, 'bob', 5081);
+    const carol = await connectAdapter(stack, 'carol', 5082);
+    const ask = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob', 'carol'], body: 'vote' });
+    const reply = await req<ReplyResult>(bob.client, {
+      type: 'reply',
+      messageId: ask.messageId,
+      body: 'ship it',
+      verdict: 'agree',
+      references: ['spec.md'],
+    });
+    const carolReply = pushesOf(carol).find((p) => p.payload.message.id === reply.messageId);
+    const aliceReply = pushesOf(alice).find((p) => p.payload.message.id === reply.messageId);
+    const recipients = stack.store.getDeliveries(reply.messageId).map((d) => d.recipient);
+    expect(recipients.sort()).toEqual(['alice', 'carol']);
+    expect(carolReply?.payload.text).toMatch(new RegExp(' re m' + String(ask.messageId) + ' AGREE to (alice, carol|carol, alice)\\]'));
+    expect(carolReply?.payload.text).toContain('refs: spec.md');
+    expect(aliceReply).toBeDefined();
+    expect(pushesOf(bob).some((p) => p.payload.message.id === reply.messageId)).toBe(false);
+    const rows = stack.store.getDeliveries(reply.messageId);
+    expect(rows.map((d) => [d.recipient, d.state]).sort()).toEqual([['alice', 'sent'], ['carol', 'sent']]);
+  });
+
+  it('notify-mode replies leave a note, not a push', async () => {
+    fakeWaitWindow();
+    const stack = await buildStack();
+    const alice = await connectAdapter(stack, 'alice', 5083);
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    const ask = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'fyi', mode: 'notify' });
+    await req<ReplyResult>(bob.client, { type: 'reply', messageId: ask.messageId, body: 'noted' });
+    await advanceUntil(() => notificationsOf(alice).length > 0, 'reply note for alice');
+    expect(notificationsOf(alice).flatMap((ev) => ev.payload)).toEqual([
+      {
+        kind: 'reply_arrived',
+        threadId: ask.threadId,
+        fromHandle: 'bob',
+        detail: 'reply from bob in thread ' + String(ask.threadId),
+      },
+    ]);
+    expect(pushesOf(alice)).toHaveLength(0);
+  });
+});
+
+describe('fetch-push texts', () => {
+  it('returns the rendered text of each message with every recipient listed', async () => {
+    const stack = await buildStack();
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    await connectPeer(stack, { handle: 'carol' });
+    const sent = await req<SendResult>(alice.client, {
+      type: 'send',
+      threadId: null,
+      to: ['bob', 'carol'],
+      body: 'long ' + 'z'.repeat(MAX_BODY_CHARS),
+      references: ['x', 'y'],
+    });
+    const fetched = await req<FetchPushResult>(bob.client, { type: 'fetch-push', handle: 'bob', limit: 5 });
+    expect(fetched.messages).toHaveLength(1);
+    expect(fetched.texts).toHaveLength(1);
+    const text = fetched.texts?.[0] ?? '';
+    expect(text.startsWith(deliveryTag(sent.messageId) + 't' + String(sent.threadId) + ' s0 from alice to bob, carol]\n')).toBe(true);
+    expect(text).toContain('[truncated: full body stored, read it with murmur_thread full: true]');
+    expect(text).toContain('\nrefs: x, y\n');
+    expect(text.endsWith('murmur_thread ' + String(sent.threadId) + ')')).toBe(true);
+  });
+
+  it('tolerates a delivery that vanishes between listing and snapshot', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'murmur-broker-'));
+    const paths = getPaths(home);
+    ensureHome(paths);
+    const store = Store.open(paths.dbPath);
+    const proc = new Map<number, ProcInfo>();
+    const core = new MurmurCore(store, { onAppend: () => {}, onStateChange: () => {} }, undefined, () => proc);
+    let blindOnce = false;
+    const proxied = new Proxy(store, {
+      get(target, prop) {
+        if (prop === 'getDeliveries') {
+          return (id: number) => {
+            if (blindOnce) {
+              blindOnce = false;
+              return [];
+            }
+            return target.getDeliveries(id);
+          };
+        }
+        const value = Reflect.get(target, prop) as unknown;
+        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    const broker = await Broker.start({ paths, store: proxied as unknown as Store, core });
+    const stack: Stack = { home, paths, token: readToken(paths), store, core, broker, proc, stateChanges: [] };
+    stacks.push(stack);
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    const sent = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'once' });
+    blindOnce = true;
+    const fetched = await req<FetchPushResult>(bob.client, { type: 'fetch-push', handle: 'bob', limit: 5 });
+    expect(fetched.messages.map((m) => m.id)).toEqual([sent.messageId]);
+    expect(stack.store.getDeliveries(sent.messageId)[0]?.state).toBe('delivered');
+  });
+});
+
+describe('socket startup', () => {
+  it('removes a stale socket file nobody answers on', async () => {
+    const home = mkdtempSync(join('/tmp', 'mm-'));
+    const paths = getPaths(home);
+    ensureHome(paths);
+    writeFileSync(paths.socketPath, '');
+    const store = Store.open(paths.dbPath);
+    const core = new MurmurCore(store, { onAppend: () => {}, onStateChange: () => {} });
+    const broker = await Broker.start({ paths, store, core });
+    const stack: Stack = { home, paths, token: readToken(paths), store, core, broker, proc: new Map(), stateChanges: [] };
+    stacks.push(stack);
+    const peer = await connectPeer(stack, { handle: 'alice' });
+    expect(peer.client.closed).toBe(false);
+  });
+
+  it('refuses to start when a broker answers, and leaves that broker serving', async () => {
+    const stack = await buildStack();
+    await expect(Broker.start({ paths: stack.paths, store: stack.store, core: stack.core })).rejects.toThrow(
+      'murmur: a broker is already listening on ' + stack.paths.socketPath,
+    );
+    const peer = await connectPeer(stack, { handle: 'alice' });
+    await expect(statusOf(peer.client)).resolves.toBeDefined();
   });
 });

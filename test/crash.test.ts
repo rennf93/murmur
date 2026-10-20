@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import type { Server, Socket } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -234,11 +234,10 @@ describe('broker crash mid-fanout and WAL recovery', () => {
     expect(acknowledged.length).toBeLessThan(BURST);
     expect(acknowledged.length).toBeGreaterThanOrEqual(repliesAtKill);
 
-    // 6. The crashed process left its socket file behind: Broker.start does
-    // not unlink a stale path, so a restart on the same home must clear it
-    // first (otherwise listen fails with EADDRINUSE).
+    // 6. The crashed process left its socket file behind. Broker.start
+    // removes a stale socket nobody answers on, so the restart on the same
+    // home needs no manual cleanup.
     expect(existsSync(paths.socketPath)).toBe(true);
-    unlinkSync(paths.socketPath);
     const store = Store.open(paths.dbPath);
     cleanup.stores.push(store);
     const core = new MurmurCore(store, { onAppend: () => {}, onStateChange: () => {} });

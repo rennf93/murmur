@@ -9,8 +9,11 @@ test: build
 coverage: build
 	npm run coverage
 
+CLI ?= claude
+
+# One live check against a real CLI: make verify CLI=claude|codex|gemini|hummin|opencode|zcode
 verify: build
-	node scripts/e2e.mjs
+	node scripts/live/$(CLI).mjs
 
 clean:
 	rm -rf dist coverage

@@ -1,12 +1,16 @@
-import { chmodSync } from 'node:fs';
-import { Server, Socket, createServer } from 'node:net';
+import { chmodSync, existsSync, unlinkSync } from 'node:fs';
+import { Server, Socket, createConnection, createServer } from 'node:net';
 import { StringDecoder } from 'node:string_decoder';
 import { readToken } from './config.js';
 import type { MurmurPaths } from './config.js';
+import { fullOf } from './core.js';
 import type { MurmurCore, PushTarget } from './core.js';
 import { nativeSend } from './native.js';
 import type { NativeSendResult } from './native.js';
-import type { Store } from './store.js';
+import { ProofWatcher } from './proof.js';
+import type { SessionRow, Store } from './store.js';
+import { defaultWake } from './wake.js';
+import type { WakeFn } from './wake.js';
 import {
   LineReader,
   MurmurError,
@@ -14,17 +18,22 @@ import {
   PROTOCOL_VERSION,
   WAIT_MAX_MS,
   encodeLine,
+  renderDelivery,
+  replyFooter,
 } from './protocol.js';
 import type {
   AckResult,
+  CliName,
   ClientKind,
   CollectResult,
+  DeliveredResult,
   DeliveryMode,
   ErrorCode,
   FetchPushResult,
   GroupAction,
   GroupsResult,
   HookEvent,
+  HostRef,
   InboxResult,
   NotificationEvent,
   NotificationPayload,
@@ -35,6 +44,7 @@ import type {
   RegisterResult,
   ReplyResult,
   SendResult,
+  SessionResult,
   StatusResult,
   ThreadResult,
   Verdict,
@@ -51,6 +61,8 @@ export interface BrokerOptions {
   store: Store;
   core: MurmurCore;
   nativeSend?: (socketPath: string, token: string, text: string) => Promise<NativeSendResult>;
+  wake?: WakeFn;
+  proofPollMs?: number;
 }
 
 interface ConnState {
@@ -58,9 +70,17 @@ interface ConnState {
   decoder: StringDecoder;
   reader: LineReader;
   authenticated: boolean;
-  // Handle this connection is currently bound as in the presence map, or
-  // null. A second register (or hook) on one connection rebinds.
+  // Handle this connection speaks as, or null. A second register (or
+  // session) on one connection rebinds.
   handle: string | null;
+  // Long-lived connections (mcp, adapter) count as presence; cli and hook
+  // connections only carry an identity for their own requests.
+  live: boolean;
+  // An adapter that turns push events into user messages in its session.
+  listening: boolean;
+  // An MCP server whose session has not announced itself yet: bound as soon
+  // as a session event arrives for this host, or created on first use.
+  pendingHost: { host: HostRef; client: CliName; cwd?: string } | null;
   // Bytes of the not yet complete trailing line, for the 1 MiB line guard.
   pendingBytes: number;
   // Waiters registered by this connection, so close can clear their timers.
@@ -83,8 +103,9 @@ interface NotifyEntry {
   timer: NodeJS.Timeout;
 }
 
-const CLIENT_KINDS: readonly ClientKind[] = ['mcp', 'cli', 'hook'];
-const HOOK_EVENTS: readonly HookEvent[] = ['session-start', 'prompt', 'stop'];
+const CLIENT_KINDS: readonly ClientKind[] = ['mcp', 'cli', 'hook', 'adapter'];
+const HOOK_EVENTS: readonly HookEvent[] = ['session-start', 'prompt', 'stop', 'session-end'];
+const CLI_NAMES: readonly CliName[] = ['claude', 'codex', 'gemini', 'zcode', 'opencode', 'hummin', 'other'];
 const DELIVERY_MODES: readonly DeliveryMode[] = ['push', 'notify', 'silent'];
 const VERDICTS: readonly Verdict[] = ['agree', 'disagree', 'info'];
 const GROUP_ACTIONS: readonly GroupAction[] = ['create', 'list', 'add', 'remove', 'delete'];
@@ -169,6 +190,28 @@ function reqNumberArray(rec: Record<string, unknown>, key: string): number[] {
   return value;
 }
 
+function optNumberArray(rec: Record<string, unknown>, key: string): number[] | undefined {
+  if (rec[key] === undefined) {
+    return undefined;
+  }
+  return reqNumberArray(rec, key);
+}
+
+function optBool(rec: Record<string, unknown>, key: string): boolean | undefined {
+  if (rec[key] === undefined) {
+    return undefined;
+  }
+  return reqBool(rec, key);
+}
+
+function reqHost(value: unknown): HostRef {
+  if (typeof value !== 'object' || value === null) {
+    throw badRequest('host must be an object');
+  }
+  const rec = value as Record<string, unknown>;
+  return { hostPid: reqNumber(rec, 'hostPid'), hostStart: reqString(rec, 'hostStart') };
+}
+
 function reqEnum<T extends string>(rec: Record<string, unknown>, key: string, allowed: readonly T[]): T {
   const value = rec[key];
   if (typeof value !== 'string' || !allowed.includes(value as T)) {
@@ -190,7 +233,9 @@ export class Broker {
   private readonly store: Store;
   private readonly core: MurmurCore;
   private readonly nativeSendFn: (socketPath: string, token: string, text: string) => Promise<NativeSendResult>;
-  // Live bindings: handle to connection. register and hook both bind.
+  private readonly wakeFn: WakeFn;
+  private readonly proof: ProofWatcher;
+  // Live bindings: handle to its long-lived connection (mcp or adapter).
   private readonly presence = new Map<string, ConnState>();
   private readonly conns = new Set<ConnState>();
   // Recipient to pending notification payloads, one flush timer per recipient.
@@ -206,6 +251,8 @@ export class Broker {
     this.store = opts.store;
     this.core = opts.core;
     this.nativeSendFn = opts.nativeSend ?? nativeSend;
+    this.wakeFn = opts.wake ?? defaultWake;
+    this.proof = new ProofWatcher((messageId, recipient) => this.onProof(messageId, recipient), opts.proofPollMs);
   }
 
   static async start(opts: BrokerOptions): Promise<Broker> {
@@ -219,6 +266,7 @@ export class Broker {
       }
       broker.onConnection(socket);
     });
+    await clearStaleSocket(opts.paths.socketPath);
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject);
       server.listen(opts.paths.socketPath, () => resolve());
@@ -260,6 +308,7 @@ export class Broker {
 
   private async stopInner(): Promise<void> {
     this.stopped = true;
+    this.proof.stop();
     for (const set of this.waiters.values()) {
       for (const waiter of set) {
         clearTimeout(waiter.timer);
@@ -290,6 +339,9 @@ export class Broker {
       reader: new LineReader(),
       authenticated: false,
       handle: null,
+      live: false,
+      listening: false,
+      pendingHost: null,
       pendingBytes: 0,
       waiters: new Set<Waiter>(),
       chain: Promise.resolve(),
@@ -347,8 +399,9 @@ export class Broker {
     if (conn.handle !== null && this.presence.get(conn.handle) === conn) {
       this.presence.delete(conn.handle);
     }
-    // Stamp nothing on close; only register refreshes last_seen_at.
-    if (conn.handle !== null && !this.stopped) {
+    // Stamp nothing on close; only register refreshes last_seen_at. Only a
+    // long-lived connection going away means the peer went away.
+    if (conn.handle !== null && conn.live && !this.stopped) {
       this.notifyPeerOffline(conn.handle);
     }
   }
@@ -425,6 +478,14 @@ export class Broker {
       case 'hook':
         this.replyOk(conn.socket, id, this.handleHook(conn, rec));
         return;
+      case 'session': {
+        const result = await this.handleSession(conn, rec);
+        this.replyOk(conn.socket, id, result);
+        return;
+      }
+      case 'delivered':
+        this.replyOk(conn.socket, id, this.handleDelivered(conn, rec));
+        return;
       case 'native-register':
         this.replyOk(conn.socket, id, this.handleNativeRegister(rec));
         return;
@@ -433,9 +494,11 @@ export class Broker {
         this.replyOk(conn.socket, id, result);
         return;
       }
-      case 'reply':
-        this.replyOk(conn.socket, id, this.handleReply(conn, rec));
+      case 'reply': {
+        const result = await this.handleReply(conn, rec);
+        this.replyOk(conn.socket, id, result);
         return;
+      }
       case 'ack':
         this.replyOk(conn.socket, id, this.handleAck(conn, rec));
         return;
@@ -471,23 +534,55 @@ export class Broker {
 
   // Handlers.
 
+  // See RegisterMessage for the identity rules.
   private handleRegister(conn: ConnState, rec: Record<string, unknown>): RegisterResult {
-    const handle = reqString(rec, 'handle');
+    const kind = reqEnum<ClientKind>(rec, 'clientKind', CLIENT_KINDS);
+    const handle = optString(rec, 'handle');
     const display = optString(rec, 'display');
     const role = optString(rec, 'role');
-    // clientKind rides on the wire; core.register has no use for it.
-    reqEnum<ClientKind>(rec, 'clientKind', CLIENT_KINDS);
-    const arg: { handle: string; display?: string; role?: string } = { handle };
-    if (display !== undefined) {
-      arg.display = display;
+    const host = rec.host === undefined ? undefined : reqHost(rec.host);
+    const ancestors = optNumberArray(rec, 'ancestors');
+    const client = optEnum<CliName>(rec, 'client', CLI_NAMES) ?? 'other';
+    const cwd = optString(rec, 'cwd');
+    const owner = optBool(rec, 'owner') === true;
+    const live = kind === 'mcp' || kind === 'adapter';
+    let resolved: string;
+    if (owner) {
+      resolved = this.ownerHandle();
+    } else if (host !== undefined) {
+      const session = this.core.sessionForHost(host);
+      if (session === null) {
+        if (handle !== undefined) {
+          throw badRequest('this session has not announced itself yet (no hook has run); name it after its first prompt');
+        }
+        // No hook announced this host yet: bind when one does, or on first use.
+        conn.live = live;
+        conn.pendingHost = { host, client, ...(cwd !== undefined ? { cwd } : {}) };
+        return { handle: '', owner: false };
+      }
+      resolved = handle === undefined ? session.handle : this.core.renameSession(session, handle);
+    } else if (ancestors !== undefined && handle === undefined) {
+      resolved = this.core.sessionForAncestors(ancestors)?.handle ?? this.ownerHandle();
+    } else if (handle !== undefined) {
+      resolved = this.core.register({ handle }).handle;
+    } else {
+      throw badRequest('register needs a handle, a host, ancestors or owner');
     }
-    if (role !== undefined) {
-      arg.role = role;
+    if (display !== undefined || role !== undefined) {
+      const peer = this.store.getPeer(resolved);
+      this.store.upsertPeer(resolved, display ?? null, role ?? null, peer?.isOwner === true, Date.now());
     }
-    const result = this.core.register(arg);
-    this.bind(conn, handle);
-    this.core.touchSeen(handle);
-    return result;
+    this.bind(conn, resolved, live);
+    this.core.touchSeen(resolved);
+    return { handle: resolved, owner: this.store.getPeer(resolved)?.isOwner === true };
+  }
+
+  private ownerHandle(): string {
+    const owner = this.store.listPeers().find((peer) => peer.isOwner);
+    if (owner === undefined) {
+      throw badRequest('no owner peer; run murmur init');
+    }
+    return owner.handle;
   }
 
   private handleHook(conn: ConnState, rec: Record<string, unknown>): null {
@@ -497,8 +592,69 @@ export class Broker {
     optString(rec, 'sessionHint');
     // hookState creates the peer row when the handle is new (ensurePeer).
     this.core.hookState(handle, event);
-    this.bind(conn, handle);
+    this.bind(conn, handle, false);
     return null;
+  }
+
+  private async handleSession(conn: ConnState, rec: Record<string, unknown>): Promise<SessionResult> {
+    const event = reqEnum<HookEvent>(rec, 'event', HOOK_EVENTS);
+    const client = reqEnum<CliName>(rec, 'client', CLI_NAMES);
+    const cliSessionId = rec.cliSessionId === null ? null : reqString(rec, 'cliSessionId');
+    const host = reqHost(rec.host);
+    const transcriptPath = optString(rec, 'transcriptPath');
+    const cwd = optString(rec, 'cwd');
+    const handle = optString(rec, 'handle');
+    const listen = optBool(rec, 'listen') === true;
+    let native: { socketPath: string; token: string } | undefined;
+    if (rec.native !== undefined) {
+      if (typeof rec.native !== 'object' || rec.native === null) {
+        throw badRequest('native must be an object');
+      }
+      const nat = rec.native as Record<string, unknown>;
+      native = { socketPath: reqString(nat, 'socketPath'), token: reqString(nat, 'token') };
+    }
+    const session = this.core.sessionEvent({
+      event,
+      client,
+      cliSessionId,
+      host,
+      ...(transcriptPath !== undefined ? { transcriptPath } : {}),
+      ...(cwd !== undefined ? { cwd } : {}),
+      ...(handle !== undefined ? { handle } : {}),
+      ...(native !== undefined ? { native } : {}),
+    });
+    conn.listening = listen;
+    this.bind(conn, session.handle, listen);
+    // MCP servers of this session that registered before it announced itself.
+    for (const other of this.conns) {
+      const pending = other.pendingHost;
+      if (pending !== null && pending.host.hostPid === host.hostPid && pending.host.hostStart === host.hostStart) {
+        this.bind(other, session.handle, other.live);
+      }
+    }
+    if (event === 'session-end') {
+      this.notifyPeerOffline(session.handle);
+      return { handle: session.handle };
+    }
+    this.proof.recheck(session.handle);
+    if (event === 'session-start' || listen) {
+      // A session that comes (back) up gets what waited for it.
+      await this.pushQueued(session.handle);
+    }
+    return { handle: session.handle };
+  }
+
+  // An adapter reports that its session accepted these pushed messages.
+  private handleDelivered(conn: ConnState, rec: Record<string, unknown>): DeliveredResult {
+    const handle = this.requireBoundHandle(conn);
+    const ids = reqNumberArray(rec, 'ids');
+    const delivered: number[] = [];
+    for (const messageId of ids) {
+      if (this.markDeliveredHop(messageId, handle)) {
+        delivered.push(messageId);
+      }
+    }
+    return { delivered };
   }
 
   private handleNativeRegister(rec: Record<string, unknown>): null {
@@ -528,9 +684,9 @@ export class Broker {
       arg.mode = mode;
     }
     const { result, pushes } = this.core.send(sender, arg);
-    // Pushes run before the reply so delivery states are settled once the
-    // sender sees the ok.
+    // Pushes run before the reply so the sender sees the states they left.
     await this.executePushes(pushes);
+    result.deliveries = this.core.deliveriesOf(result.messageId);
     if (mode === 'notify') {
       for (const delivery of result.deliveries) {
         if (delivery.recipient === sender) {
@@ -548,7 +704,7 @@ export class Broker {
     return result;
   }
 
-  private handleReply(conn: ConnState, rec: Record<string, unknown>): ReplyResult {
+  private async handleReply(conn: ConnState, rec: Record<string, unknown>): Promise<ReplyResult> {
     const sender = this.requireBoundHandle(conn);
     const messageId = reqNumber(rec, 'messageId');
     const body = reqString(rec, 'body');
@@ -561,13 +717,13 @@ export class Broker {
     if (references !== undefined) {
       arg.references = references;
     }
-    const { result } = this.core.reply(sender, arg);
-    // reply_arrived to every other thread recipient.
-    for (const recipient of this.store.threadRecipientHandles(result.threadId)) {
-      if (recipient === sender) {
-        continue;
-      }
-      this.enqueueNotification(recipient, {
+    const { result, pushes } = this.core.reply(sender, arg);
+    // The reply itself travels to every participant; notify mode leaves
+    // them a small note instead.
+    await this.executePushes(pushes);
+    const notify = this.store.messageById(result.messageId)?.mode === 'notify';
+    for (const target of notify ? pushes : []) {
+      this.enqueueNotification(target.recipient, {
         kind: 'reply_arrived',
         threadId: result.threadId,
         fromHandle: sender,
@@ -624,10 +780,7 @@ export class Broker {
   private handleThread(rec: Record<string, unknown>): ThreadResult {
     const threadId = reqNumber(rec, 'threadId');
     const sinceSeq = reqNumberOrNull(rec, 'sinceSeq');
-    // full is part of the wire shape; core.threadView always returns full
-    // bodies, so it is validated and nothing more.
-    reqBool(rec, 'full');
-    return this.core.threadView(threadId, sinceSeq);
+    return this.core.threadView(threadId, sinceSeq, reqBool(rec, 'full'));
   }
 
   private handleCollect(rec: Record<string, unknown>): CollectResult {
@@ -658,36 +811,29 @@ export class Broker {
     if (!Number.isInteger(limit) || limit < 0) {
       throw badRequest('limit must be a non-negative integer');
     }
-    // Snapshot the pending delivery states so the moves from queued to
-    // delivered can be reported after core.pendingPush hands them out.
-    const before = new Map<number, string>();
-    for (const entry of this.store.pendingPushFor(handle, limit)) {
-      const delivery = this.store.getDeliveries(entry.message.id).find((d) => d.recipient === handle);
-      if (delivery !== undefined) {
-        before.set(entry.message.id, delivery.state);
-      }
-    }
+    // Everything the pull hands out was queued, so each one tells its
+    // sender it finally arrived.
     const result = this.core.pendingPush(handle, limit);
     for (const message of result.messages) {
-      if (before.get(message.id) === 'queued') {
-        this.enqueueNotification(message.sender, {
-          kind: 'queued_delivered',
-          threadId: message.threadId,
-          fromHandle: handle,
-          detail:
-            'queued message ' + String(message.id) + ' in thread ' + String(message.threadId) +
-            ' was delivered to ' + handle,
-        });
-      }
+      this.enqueueNotification(message.sender, {
+        kind: 'queued_delivered',
+        threadId: message.threadId,
+        fromHandle: handle,
+        detail:
+          'queued message ' + String(message.id) + ' in thread ' + String(message.threadId) +
+          ' was delivered to ' + handle,
+      });
       this.checkWaiters(message.threadId);
     }
     return result;
   }
 
-  // Push execution after core.send. core.pushKindFor only yields native or
-  // connection for push mode messages, so the payload mode is always push
-  // here; queued targets stay queued and surface through notifications or
-  // fetch-push.
+  // Push execution after core.send and core.reply, best transport first:
+  // an adapter listening in the recipient's session, then the session's
+  // native messaging socket, then the CLI's own command transport. A target
+  // no transport takes stays queued and surfaces through the hook pull.
+  // sent means a transport accepted it; delivered needs evidence from the
+  // receiving side (adapter ack, transcript proof, hook pull, read).
   private async executePushes(pushes: PushTarget[]): Promise<void> {
     for (const target of pushes) {
       if (this.stopped) {
@@ -696,48 +842,102 @@ export class Broker {
       if (target.kind === 'queued') {
         continue;
       }
-      const payload: PushPayload = { message: target.message, mode: 'push', footer: target.footer };
-      if (target.kind === 'native') {
-        // A vanished transport row skips silently: the delivery stays queued.
-        const transport = this.store.getNativeTransport(target.recipient);
-        if (transport === null) {
-          continue;
-        }
-        let outcome: NativeSendResult;
-        try {
-          outcome = await this.nativeSendFn(transport.socketPath, transport.token, this.nativeTextFor(target));
-        } catch {
-          // A throwing transport counts as a failed send: leave queued.
-          continue;
-        }
-        if (!outcome.ok) {
-          continue;
-        }
-        // queued -> sent -> delivered, waking thread waiters after each hop.
-        const now = Date.now();
-        this.store.updateDelivery(target.message.id, target.recipient, { state: 'sent', sentAt: now });
-        this.checkWaiters(target.message.threadId);
-        this.store.updateDelivery(target.message.id, target.recipient, { state: 'delivered', deliveredAt: now });
-        this.checkWaiters(target.message.threadId);
-      } else {
-        const peer = this.presence.get(target.recipient);
-        if (peer === undefined || peer.socket.destroyed) {
-          continue;
-        }
-        const event: PushEvent = { v: PROTOCOL_VERSION, type: 'event', event: 'push', payload };
-        this.writeLine(peer.socket, encodeLine(event));
-        this.store.updateDelivery(target.message.id, target.recipient, { state: 'sent', sentAt: Date.now() });
-        this.checkWaiters(target.message.threadId);
-      }
+      await this.pushOne(target.message.id, target.message.threadId, target.recipient, target.text, {
+        message: target.message,
+        mode: 'push',
+        footer: target.footer,
+        text: target.text,
+      });
     }
   }
 
-  private nativeTextFor(target: PushTarget): string {
-    // The delivered body carries the truncation notice when the stored body
-    // was over MAX_BODY_CHARS.
-    const row = this.store.messageById(target.message.id);
-    const body = row !== null ? row.deliveredBody : target.message.body;
-    return body + '\n\n' + target.footer;
+  private async pushOne(
+    messageId: number,
+    threadId: number,
+    recipient: string,
+    text: string,
+    payload: PushPayload,
+  ): Promise<void> {
+    const listener = this.presence.get(recipient);
+    if (listener !== undefined && listener.listening && !listener.socket.destroyed) {
+      const event: PushEvent = { v: PROTOCOL_VERSION, type: 'event', event: 'push', payload };
+      this.writeLine(listener.socket, encodeLine(event));
+      this.markSent(messageId, threadId, recipient);
+      return;
+    }
+    const session = this.liveSessionOf(recipient);
+    const transcript = session?.transcriptPath ?? null;
+    const offset = transcript === null ? 0 : ProofWatcher.offsetOf(transcript);
+    let accepted = false;
+    const transport = this.store.getNativeTransport(recipient);
+    if (transport !== null) {
+      try {
+        accepted = (await this.nativeSendFn(transport.socketPath, transport.token, text)).ok;
+      } catch {
+        // A throwing transport counts as a failed send: leave queued.
+      }
+    } else if (session !== null) {
+      accepted = await this.wakeFn(session, text).catch(() => false);
+    }
+    if (!accepted || this.stopped) {
+      return;
+    }
+    this.markSent(messageId, threadId, recipient);
+    if (transcript !== null) {
+      this.proof.watch(messageId, recipient, transcript, offset);
+    }
+  }
+
+  // Pushes every queued push-mode message waiting for this handle, oldest
+  // first, through whatever transport it has now.
+  private async pushQueued(handle: string): Promise<void> {
+    const waiting = this.store.pendingPushFor(handle, 50).reverse();
+    for (const { message } of waiting) {
+      const recipients = this.store.getDeliveries(message.id).map((d) => d.recipient);
+      const full = fullOf(message);
+      const text = renderDelivery(full, message.deliveredBody, recipients);
+      await this.pushOne(message.id, message.threadId, handle, text, { message: full, mode: 'push', footer: replyFooter(full), text });
+    }
+  }
+
+  private liveSessionOf(handle: string): SessionRow | null {
+    return this.store.sessionsForHandle(handle).find((row) => row.state !== 'ended') ?? null;
+  }
+
+  private markSent(messageId: number, threadId: number, recipient: string): void {
+    const delivery = this.store.getDeliveries(messageId).find((d) => d.recipient === recipient);
+    if (delivery === undefined || delivery.state !== 'queued') {
+      return;
+    }
+    this.store.updateDelivery(messageId, recipient, { state: 'sent', sentAt: Date.now() });
+    this.checkWaiters(threadId);
+  }
+
+  private onProof(messageId: number, recipient: string): void {
+    if (!this.stopped) {
+      this.markDeliveredHop(messageId, recipient);
+    }
+  }
+
+  // queued or sent to delivered, with the queued_delivered notice to the
+  // sender when the message had been waiting. False when not applicable.
+  private markDeliveredHop(messageId: number, recipient: string): boolean {
+    const message = this.store.messageById(messageId);
+    const delivery = this.store.getDeliveries(messageId).find((d) => d.recipient === recipient);
+    if (message === null || delivery === undefined || (delivery.state !== 'queued' && delivery.state !== 'sent')) {
+      return false;
+    }
+    this.store.markDelivered(messageId, recipient, Date.now());
+    if (delivery.state === 'queued') {
+      this.enqueueNotification(message.sender, {
+        kind: 'queued_delivered',
+        threadId: message.threadId,
+        fromHandle: recipient,
+        detail: 'queued message ' + String(messageId) + ' in thread ' + String(message.threadId) + ' was delivered to ' + recipient,
+      });
+    }
+    this.checkWaiters(message.threadId);
+    return true;
   }
 
   // Notifications.
@@ -774,17 +974,18 @@ export class Broker {
       payload: entry.payloads,
     };
     const peer = this.presence.get(recipient);
-    if (peer !== undefined && !peer.socket.destroyed) {
+    if (peer !== undefined && peer.listening && !peer.socket.destroyed) {
       this.writeLine(peer.socket, encodeLine(event));
       return;
     }
-    // No live connection: fall back to the native transport when one exists,
-    // otherwise drop the batch (the data stays in the DB).
+    // No listening adapter: fall back to the native transport as plain text
+    // when one exists, otherwise drop the batch (the data stays in the DB).
     const transport = this.store.getNativeTransport(recipient);
     if (transport === null) {
       return;
     }
-    this.nativeSendFn(transport.socketPath, transport.token, JSON.stringify(event)).catch(() => {
+    const text = '[murmur notice] ' + entry.payloads.map((p) => p.detail).join('; ');
+    this.nativeSendFn(transport.socketPath, transport.token, text).catch(() => {
       // Notifications are best effort; the data stays in the DB.
     });
   }
@@ -941,15 +1142,27 @@ export class Broker {
 
   // Presence and replies.
 
-  private bind(conn: ConnState, handle: string): void {
+  // Sets the connection's identity. Only long-lived connections take the
+  // presence slot, so a short CLI or hook connection never unseats a live
+  // session's MCP server or adapter.
+  private bind(conn: ConnState, handle: string, live: boolean): void {
     if (conn.handle !== null && this.presence.get(conn.handle) === conn) {
       this.presence.delete(conn.handle);
     }
     conn.handle = handle;
-    this.presence.set(handle, conn);
+    conn.live = live;
+    conn.pendingHost = null;
+    if (live) {
+      this.presence.set(handle, conn);
+    }
   }
 
   private requireBoundHandle(conn: ConnState): string {
+    if (conn.handle === null && conn.pendingHost !== null) {
+      const { host, client, cwd } = conn.pendingHost;
+      const session = this.core.sessionForHost(host, { client, ...(cwd !== undefined ? { cwd } : {}) }) as SessionRow;
+      this.bind(conn, session.handle, conn.live);
+    }
     if (conn.handle === null) {
       throw badRequest('no handle is registered on this connection');
     }
@@ -974,4 +1187,25 @@ export class Broker {
       // The socket died mid-write; the close handler finishes cleanup.
     }
   }
+}
+
+// A socket file left by a broker that died without cleanup blocks listen
+// with EADDRINUSE. Remove it when nothing answers on it; refuse when a live
+// broker does.
+async function clearStaleSocket(socketPath: string): Promise<void> {
+  if (!existsSync(socketPath)) {
+    return;
+  }
+  const answered = await new Promise<boolean>((resolve) => {
+    const probe = createConnection(socketPath);
+    probe.once('connect', () => {
+      probe.destroy();
+      resolve(true);
+    });
+    probe.once('error', () => resolve(false));
+  });
+  if (answered) {
+    throw new Error('murmur: a broker is already listening on ' + socketPath);
+  }
+  unlinkSync(socketPath);
 }

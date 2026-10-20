@@ -1,19 +1,53 @@
 {
-  "name": "murmur",
-  "version": "0.1.0",
+  "name": "murmur-it",
+  "version": "0.2.0",
   "description": "Local, client-agnostic message bus for AI CLI sessions with group threads",
+  "license": "MIT",
+  "author": "Renn F",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rennf93/murmur.git"
+  },
+  "homepage": "https://rennf93.github.io/murmur/",
+  "bugs": {
+    "url": "https://github.com/rennf93/murmur/issues"
+  },
+  "keywords": [
+    "ai",
+    "cli",
+    "agents",
+    "message-bus",
+    "mcp",
+    "claude-code",
+    "codex",
+    "gemini-cli",
+    "opencode",
+    "multi-agent"
+  ],
   "type": "module",
-  "private": true,
   "bin": {
     "murmur": "bin/murmur.js"
   },
+  "files": [
+    "dist",
+    "bin",
+    "adapters",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
   "engines": {
     "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
-    "coverage": "vitest run --coverage"
+    "coverage": "vitest run --coverage",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

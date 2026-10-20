@@ -1,0 +1,119 @@
+name: Release
+
+# Publishes on tags v*: checks, then npm via trusted publishing (GitHub Actions
+# OIDC, no token), then a GitHub release for the tag.
+#
+# The GitHub release is always created; the npm publish step is skipped until,
+# once:
+#   1. The package (package.json "name", murmur-it) exists on npm: publish the
+#      first version by hand with a user token.
+#   2. On npmjs.com, open the package > Settings > Trusted Publisher > GitHub
+#      Actions and register: organization or user rennf93, repository murmur,
+#      workflow filename release.yml, environment left empty.
+#   3. Set the repository variable MURMUR_TRUSTED_PUBLISH to true
+#      (Settings > Secrets and variables > Actions > Variables).
+#
+# A tag with a prerelease suffix (v1.2.3-rc.1) publishes with --tag next and
+# creates a GitHub prerelease.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  release:
+    needs: checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Upgrade npm for trusted publishing
+        if: vars.MURMUR_TRUSTED_PUBLISH == 'true'
+        run: |
+          npm install -g npm@11.16.0 --ignore-scripts
+          npm --version
+
+      - name: Verify package version matches tag
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          expected="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$expected" ]; then
+            echo "::error::package.json version $version does not match tag ${GITHUB_REF_NAME} (expected $expected)"
+            exit 1
+          fi
+
+      - name: Build
+        run: npm run build
+
+      - name: Pack
+        id: pack
+        run: |
+          echo "Tarball contents:"
+          npm pack --dry-run
+          tgz="$(npm pack --silent | tail -n 1)"
+          echo "tgz=$tgz" >> "$GITHUB_OUTPUT"
+          ls -l "$tgz"
+
+      - name: Publish to npm
+        if: vars.MURMUR_TRUSTED_PUBLISH == 'true'
+        env:
+          TGZ: ${{ steps.pack.outputs.tgz }}
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            npm publish "$TGZ" --provenance --tag next
+          else
+            npm publish "$TGZ" --provenance
+          fi
+
+      - name: Extract release notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "Release ${GITHUB_REF_NAME}" > release-notes.md
+          fi
+          cat release-notes.md
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TGZ: ${{ steps.pack.outputs.tgz }}
+        run: |
+          flags=()
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" "$TGZ" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            --verify-tag \
+            "${flags[@]}"

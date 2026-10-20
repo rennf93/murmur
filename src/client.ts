@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { Socket, createConnection } from 'node:net';
 import { StringDecoder } from 'node:string_decoder';
 import { LineReader, MurmurError, PROTOCOL_VERSION, encodeLine } from './protocol.js';
@@ -204,4 +205,27 @@ export function isMurmurError(e: unknown): e is MurmurError {
 
 export function isBrokerDown(e: unknown): boolean {
   return e instanceof MurmurError && (e.code === 'broker_down' || e.code === 'broker_closed');
+}
+
+// Connects, and when the broker is down and autostart is on (the murmur bin
+// sets MURMUR_AUTOSTART=1; tests and library callers never do), starts one
+// detached broker and retries for up to three seconds.
+export async function connectBroker(opts: MurmurClientOptions): Promise<MurmurClient> {
+  try {
+    return await MurmurClient.connect(opts);
+  } catch (err) {
+    if (process.env.MURMUR_AUTOSTART !== '1' || !(err instanceof MurmurError) || err.code !== 'broker_down') {
+      throw err;
+    }
+    spawn(process.execPath, [process.argv[1] ?? '', 'serve'], { detached: true, stdio: 'ignore' }).unref();
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      try {
+        return await MurmurClient.connect(opts);
+      } catch {
+        // Still starting.
+      }
+    }
+    throw err;
+  }
 }

@@ -10,14 +10,12 @@ import { MurmurClient } from '../src/client.js';
 import { ensureHome, getPaths, readToken } from '../src/config.js';
 import type { MurmurPaths } from '../src/config.js';
 import { MurmurCore } from '../src/core.js';
-import { buildMcpServer, runMcpServer } from '../src/mcp.js';
+import { buildMcpServer, clientFromEnv, identityFor, runMcpServer } from '../src/mcp.js';
+import type { HostInfo, ProcInfo } from '../src/proc.js';
 import type {
   AckResult,
   ClientMessage,
-  CollectResult,
   GroupsResult,
-  InboxResult,
-  ReadResult,
   RegisterResult,
   ReplyResult,
   SendResult,
@@ -53,15 +51,25 @@ vi.mock('@modelcontextprotocol/sdk/server/stdio.js', () => ({
   },
 }));
 
+// currentHost is what runMcpServer's identity comes from; the broker keeps
+// the real process helpers but reads a fixed table so announced sessions are
+// "alive" without real processes.
+const hostState = vi.hoisted(() => ({ host: null as unknown }));
+
+vi.mock('../src/proc.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/proc.js')>();
+  return { ...actual, currentHost: () => hostState.host };
+});
+
+const FAKE_TABLE = new Map<number, ProcInfo>([[9001, { ppid: 1, start: 'S1', comm: 'claude' }]]);
+const HOST: HostInfo = { hostPid: 9001, hostStart: 'S1', ancestors: [9001] };
+
 const TOOL_NAMES = [
-  'murmur_register',
+  'murmur_name',
   'murmur_send',
   'murmur_reply',
   'murmur_ack',
-  'murmur_read',
-  'murmur_inbox',
   'murmur_thread',
-  'murmur_collect',
   'murmur_wait',
   'murmur_groups',
   'murmur_status',
@@ -102,7 +110,7 @@ async function buildStack(): Promise<Stack> {
   const paths = getPaths(home);
   ensureHome(paths);
   const store = Store.open(paths.dbPath);
-  const core = new MurmurCore(store, { onAppend: () => {}, onStateChange: () => {} });
+  const core = new MurmurCore(store, { onAppend: () => {}, onStateChange: () => {} }, undefined, () => FAKE_TABLE);
   const broker = await Broker.start({ paths, store, core });
   const stack: Stack = { home, paths, token: readToken(paths), store, core, broker };
   stacks.push(stack);
@@ -127,7 +135,7 @@ function req<T>(client: MurmurClient, msg: Record<string, unknown>): Promise<T> 
   return client.request<T>(msg as unknown as Omit<ClientMessage, 'v' | 'id'>);
 }
 
-async function pair(stack: Stack): Promise<Pair> {
+async function pair(stack: Stack, identity?: Parameters<typeof buildMcpServer>[1]): Promise<Pair> {
   const events: ServerEvent[] = [];
   const murmur = await MurmurClient.connect({
     socketPath: stack.paths.socketPath,
@@ -136,7 +144,7 @@ async function pair(stack: Stack): Promise<Pair> {
       events.push(ev);
     },
   });
-  const server = buildMcpServer(murmur);
+  const server = buildMcpServer(murmur, identity);
   const sdk = new Client({ name: 'murmur-conformance-client', version: '0.0.1' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
@@ -167,6 +175,7 @@ async function settle(pred: () => boolean | Promise<boolean>, label: string): Pr
 }
 
 afterEach(async () => {
+  hostState.host = null;
   vi.restoreAllMocks();
   for (const made of pairs.splice(0)) {
     await made.sdk.close();
@@ -194,16 +203,34 @@ afterEach(async () => {
   }
 });
 
+describe('identity helpers', () => {
+  it('clientFromEnv picks the client from its marker, claude first', () => {
+    expect(clientFromEnv({ CLAUDECODE: '1', GEMINI_CLI: '1', CODEX_HOME: '/x' })).toBe('claude');
+    expect(clientFromEnv({ GEMINI_CLI: '1', CODEX_HOME: '/x' })).toBe('gemini');
+    expect(clientFromEnv({ CODEX_THREAD_ID: 't' })).toBe('codex');
+    expect(clientFromEnv({ PATH: '/bin' })).toBe('other');
+    expect(clientFromEnv({})).toBe('other');
+  });
+
+  it('identityFor is empty without a host and carries host, client and cwd with one', () => {
+    expect(identityFor(null, { CLAUDECODE: '1' }, '/work')).toEqual({});
+    expect(identityFor(HOST, { GEMINI_CLI: '1' }, '/work')).toEqual({
+      host: { hostPid: 9001, hostStart: 'S1' },
+      client: 'gemini',
+      cwd: '/work',
+    });
+  });
+});
+
 describe('SDK conformance over InMemoryTransport', () => {
-  it('completes initialize and lists the 11 murmur tools', async () => {
+  it('completes initialize and lists exactly the 8 murmur tools with instructions', async () => {
     const stack = await buildStack();
     const { sdk } = await pair(stack);
-    const info = sdk.getServerVersion();
-    expect(info).toMatchObject({ name: 'murmur', version: '0.1.0' });
+    expect(sdk.getServerVersion()).toMatchObject({ name: 'murmur', version: '0.2.0' });
+    expect(sdk.getInstructions()).toContain('murmur_reply');
     const listed = await sdk.listTools();
-    const names = listed.tools.map((t) => t.name).sort();
-    expect(names).toEqual([...TOOL_NAMES].sort());
-    expect(listed.tools).toHaveLength(11);
+    expect(listed.tools.map((t) => t.name).sort()).toEqual([...TOOL_NAMES].sort());
+    expect(listed.tools).toHaveLength(8);
     for (const tool of listed.tools) {
       expect(tool.description?.length ?? 0).toBeGreaterThan(0);
       expect(tool.inputSchema.type).toBe('object');
@@ -212,17 +239,33 @@ describe('SDK conformance over InMemoryTransport', () => {
     expect(send?.inputSchema.required).toEqual(expect.arrayContaining(['to', 'body']));
   });
 
-  it('registers, sends, times out a wait after 1 second and collects', async () => {
+  it('murmur_name registers a handle with display and role when there is no host identity', async () => {
     const stack = await buildStack();
     const { sdk } = await pair(stack);
-    const peer = await connectRaw(stack, 'peerone');
-    const registered = await call<RegisterResult>(sdk, 'murmur_register', {
-      handle: 'mcpagent',
-      display: 'MCP Agent',
-      role: 'tester',
-    });
-    expect(registered).toEqual({ handle: 'mcpagent', owner: false });
+    const named = await call<RegisterResult>(sdk, 'murmur_name', { handle: 'mcpagent', display: 'MCP Agent', role: 'tester' });
+    expect(named).toEqual({ handle: 'mcpagent', owner: false });
     expect(stack.store.getPeer('mcpagent')).toMatchObject({ display: 'MCP Agent', role: 'tester' });
+    const bare = await call<RegisterResult>(sdk, 'murmur_name', { handle: 'mcpagent' });
+    expect(bare.handle).toBe('mcpagent');
+  });
+
+  it('murmur_name renames the session of its host identity', async () => {
+    const stack = await buildStack();
+    const viewer = await connectRaw(stack, 'viewer');
+    await req(viewer.client, { type: 'session', event: 'session-start', client: 'claude', cliSessionId: null, host: { hostPid: 9001, hostStart: 'S1' }, handle: 'before-name' });
+    const { sdk } = await pair(stack, { host: { hostPid: 9001, hostStart: 'S1' }, client: 'claude', cwd: '/work' });
+    const named = await call<RegisterResult>(sdk, 'murmur_name', { handle: 'after-name', display: 'Renamed' });
+    expect(named).toEqual({ handle: 'after-name', owner: false });
+    expect(stack.store.sessionByHost(9001, 'S1')?.handle).toBe('after-name');
+    expect(stack.store.getPeer('after-name')?.display).toBe('Renamed');
+    expect(stack.store.getPeer('before-name')).toBeNull();
+  });
+
+  it('sends with options, and wait with timeoutMs 0 returns at once while one second times out', async () => {
+    const stack = await buildStack();
+    const { sdk } = await pair(stack);
+    await connectRaw(stack, 'peerone');
+    await call<RegisterResult>(sdk, 'murmur_name', { handle: 'mcpagent' });
     const sent = await call<SendResult>(sdk, 'murmur_send', {
       to: ['peerone'],
       body: 'hello from mcp',
@@ -231,50 +274,35 @@ describe('SDK conformance over InMemoryTransport', () => {
     });
     expect(sent.seq).toBe(0);
     expect(sent.deliveries.map((d) => d.recipient)).toEqual(['peerone']);
-    await settle(() => peer.events.some((ev) => ev.event === 'push'), 'push to peerone');
-    const pushed = peer.events.find((ev) => ev.event === 'push');
-    expect(pushed?.event === 'push' && pushed.payload.message.id === sent.messageId).toBe(true);
-    // A follow-up in the same thread covers the explicit threadId path.
     const again = await call<SendResult>(sdk, 'murmur_send', { threadId: sent.threadId, to: ['peerone'], body: 'again' });
-    expect(again.threadId).toBe(sent.threadId);
-    expect(again.seq).toBe(1);
+    expect(again).toMatchObject({ threadId: sent.threadId, seq: 1 });
+    const now = Date.now();
+    const instant = await call<WaitResult>(sdk, 'murmur_wait', { threadId: sent.threadId, until: 'all_replied', timeoutMs: 0 });
+    expect(Date.now() - now).toBeLessThan(500);
+    expect(instant).toMatchObject({ threadId: sent.threadId, conditionMet: false, timedOut: true });
+    expect(instant.matrix[0]).toMatchObject({ recipient: 'peerone', verdict: null });
     const started = Date.now();
-    const waited = await call<WaitResult>(sdk, 'murmur_wait', {
-      threadId: sent.threadId,
-      until: 'all_replied',
-      timeoutMs: 1000,
-    });
+    const waited = await call<WaitResult>(sdk, 'murmur_wait', { threadId: sent.threadId, until: 'all_replied', timeoutMs: 1000 });
     expect(Date.now() - started).toBeGreaterThanOrEqual(900);
-    expect(waited).toMatchObject({ threadId: sent.threadId, conditionMet: false, timedOut: true });
-    expect(waited.matrix[0]).toMatchObject({ recipient: 'peerone', state: 'sent' });
-    const collected = await call<CollectResult>(sdk, 'murmur_collect', { threadId: sent.threadId });
-    expect(collected.threadId).toBe(sent.threadId);
-    expect(collected.askMessageId).toBe(again.messageId);
-    expect(collected.recipients).toHaveLength(1);
-    expect(collected.recipients[0]).toMatchObject({ recipient: 'peerone', state: 'sent', verdict: null });
-    expect(collected.verdictTally).toEqual({ agree: 0, disagree: 0, info: 0 });
+    expect(waited).toMatchObject({ conditionMet: false, timedOut: true });
   });
 
-  it('exercises reply, ack, read, inbox, thread, groups, status and an immediate wait', async () => {
+  it('exercises reply, ack, thread digest vs full, groups, status and a default-timeout wait', async () => {
     const stack = await buildStack();
-    const { sdk, events } = await pair(stack);
+    const { sdk, murmur } = await pair(stack);
     const peer = await connectRaw(stack, 'peerone');
-    await call<RegisterResult>(sdk, 'murmur_register', { handle: 'mcpagent' });
+    await call<RegisterResult>(sdk, 'murmur_name', { handle: 'mcpagent' });
     const incoming = await req<SendResult>(peer.client, {
       type: 'send',
       threadId: null,
       to: ['mcpagent'],
       body: 'question for the agent\nwith a second line',
     });
-    await settle(() => events.some((ev) => ev.event === 'push'), 'push to mcpagent');
+    // Only a delivered (or sent) message can be acknowledged.
+    expect(await call<AckResult>(sdk, 'murmur_ack', { ids: [incoming.messageId] })).toEqual({ acknowledged: [] });
+    await req(murmur, { type: 'delivered', ids: [incoming.messageId] });
     const acked = await call<AckResult>(sdk, 'murmur_ack', { ids: [incoming.messageId] });
     expect(acked).toEqual({ acknowledged: [incoming.messageId] });
-    const read = await call<ReadResult>(sdk, 'murmur_read', { ids: [incoming.messageId] });
-    expect(read.messages).toHaveLength(1);
-    expect(read.messages[0]?.body).toBe('question for the agent\nwith a second line');
-    const inbox = await call<InboxResult>(sdk, 'murmur_inbox', { unreadOnly: false });
-    expect(inbox.handle).toBe('mcpagent');
-    expect(inbox.threads[0]?.threadId).toBe(incoming.threadId);
     const plain = await call<ReplyResult>(sdk, 'murmur_reply', { messageId: incoming.messageId, body: 'INFO: and more' });
     expect(plain).toMatchObject({ threadId: incoming.threadId, seq: 1 });
     const replied = await call<ReplyResult>(sdk, 'murmur_reply', {
@@ -286,53 +314,49 @@ describe('SDK conformance over InMemoryTransport', () => {
     expect(replied.seq).toBe(2);
     const digest = await call<ThreadResult>(sdk, 'murmur_thread', { threadId: incoming.threadId });
     expect(digest.messages.map((m) => m.seq)).toEqual([0, 1, 2]);
+    expect(digest.messages[0]?.firstLine).toBe('question for the agent');
+    expect(digest.messages.every((m) => m.body === undefined)).toBe(true);
     expect(digest.messages[1]?.verdict).toBeNull();
     expect(digest.messages[2]?.verdict).toBe('agree');
     expect(digest.messages[2]?.references).toEqual(['peerone']);
+    const full = await call<ThreadResult>(sdk, 'murmur_thread', { threadId: incoming.threadId, full: true });
+    expect(full.messages[0]?.body).toBe('question for the agent\nwith a second line');
     const since = await call<ThreadResult>(sdk, 'murmur_thread', { threadId: incoming.threadId, sinceSeq: 1, full: true });
     expect(since.messages.map((m) => m.seq)).toEqual([2]);
-    // The ask is fully replied, so a wait without timeoutMs returns at once;
-    // the matrix carries the latest reply's verdict.
-    const waited = await call<WaitResult>(sdk, 'murmur_wait', { threadId: incoming.threadId, until: 'any_replied' });
-    expect(waited).toMatchObject({ conditionMet: true, timedOut: false });
-    expect(waited.matrix[0]).toMatchObject({ recipient: 'mcpagent', state: 'replied', verdict: 'agree' });
+    expect(since.messages[0]?.body).toBe('AGREE: looks right');
+    // The ask is answered, so a wait without timeoutMs (and one past the cap)
+    // returns at once with the latest verdict.
+    for (const extra of [{}, { timeoutMs: 99999999 }]) {
+      const waited = await call<WaitResult>(sdk, 'murmur_wait', { threadId: incoming.threadId, until: 'any_replied', ...extra });
+      expect(waited).toMatchObject({ conditionMet: true, timedOut: false });
+      expect(waited.matrix[0]).toMatchObject({ recipient: 'mcpagent', state: 'replied', verdict: 'agree' });
+    }
     const created = await call<GroupsResult[]>(sdk, 'murmur_groups', { action: 'create', name: 'mcpgroup' });
     expect(created.map((g) => g.name)).toEqual(['mcpgroup']);
-    const added = await call<GroupsResult[]>(sdk, 'murmur_groups', {
-      action: 'add',
-      name: 'mcpgroup',
-      members: ['peerone', 'mcpagent'],
-    });
+    const added = await call<GroupsResult[]>(sdk, 'murmur_groups', { action: 'add', name: 'mcpgroup', members: ['peerone', 'mcpagent'] });
     expect(added[0]?.members).toEqual(['mcpagent', 'peerone']);
     const listed = await call<GroupsResult[]>(sdk, 'murmur_groups', { action: 'list' });
     expect(listed).toEqual(added);
     const status = await call<StatusResult>(sdk, 'murmur_status');
     expect(status.peers.find((p) => p.handle === 'mcpagent')).toMatchObject({ presence: 'online' });
-    expect(status.peers.find((p) => p.handle === 'peerone')).toMatchObject({ presence: 'online' });
+    // A cli connection carries identity but is not presence.
+    expect(status.peers.find((p) => p.handle === 'peerone')?.presence).not.toBe('online');
   });
 
   it('surfaces broker errors as tool errors and rejects invalid arguments', async () => {
     const stack = await buildStack();
     const { sdk } = await pair(stack);
-    await call<RegisterResult>(sdk, 'murmur_register', { handle: 'mcpagent' });
-    const failed = (await sdk.callTool({
-      name: 'murmur_send',
-      arguments: { to: ['nobody-here'], body: 'hi' },
-    })) as CallToolResult;
+    await call<RegisterResult>(sdk, 'murmur_name', { handle: 'mcpagent' });
+    const failed = (await sdk.callTool({ name: 'murmur_send', arguments: { to: ['nobody-here'], body: 'hi' } })) as CallToolResult;
     expect(failed.isError).toBe(true);
-    const text = (failed.content[0] as { type: 'text'; text: string }).text;
-    expect(text).toContain('unknown handle: nobody-here');
-    // Input validation failures come back as isError results from the SDK
-    // before the tool body runs.
+    expect((failed.content[0] as { type: 'text'; text: string }).text).toContain('unknown handle: nobody-here');
     const missingBody = (await sdk.callTool({ name: 'murmur_send', arguments: { to: ['x'] } })) as CallToolResult;
     expect(missingBody.isError).toBe(true);
     expect((missingBody.content[0] as { type: 'text'; text: string }).text).toContain('Input validation error');
-    const badUntil = (await sdk.callTool({
-      name: 'murmur_wait',
-      arguments: { threadId: 1, until: 'never' },
-    })) as CallToolResult;
+    const badUntil = (await sdk.callTool({ name: 'murmur_wait', arguments: { threadId: 1, until: 'never' } })) as CallToolResult;
     expect(badUntil.isError).toBe(true);
-    expect((badUntil.content[0] as { type: 'text'; text: string }).text).toContain('Input validation error');
+    const negative = (await sdk.callTool({ name: 'murmur_wait', arguments: { threadId: 1, until: 'any_replied', timeoutMs: -1 } })) as CallToolResult;
+    expect(negative.isError).toBe(true);
   });
 });
 
@@ -351,12 +375,49 @@ describe('runMcpServer', () => {
     return { exits, stderr };
   }
 
+  // Starts the server (it parks on the broker connection by design) and
+  // returns once stdio is up; stop() fires the exit teardown.
+  async function launch(stack: Stack): Promise<{ stop: () => Promise<void> }> {
+    process.env.MURMUR_HOME = stack.home;
+    const before = fakeStdio.started;
+    let failure: unknown = null;
+    const running = runMcpServer().catch((err: unknown) => {
+      failure = err;
+    });
+    await settle(() => fakeStdio.started === before + 1, 'stdio transport started');
+    expect(failure).toBeNull();
+    return {
+      stop: async () => {
+        process.emit('exit', 0);
+        await running;
+      },
+    };
+  }
+
+  async function announce(stack: Stack, handle: string): Promise<void> {
+    const viewer = await connectRaw(stack, 'announcer');
+    await req(viewer.client, {
+      type: 'session',
+      event: 'session-start',
+      client: 'claude',
+      cliSessionId: null,
+      host: { hostPid: 9001, hostStart: 'S1' },
+      handle,
+    });
+  }
+
+  async function presenceOf(stack: Stack, handle: string): Promise<string | undefined> {
+    const viewer = await MurmurClient.connect({ socketPath: stack.paths.socketPath, token: stack.token });
+    clients.push(viewer);
+    const status = await req<StatusResult>(viewer, { type: 'status' });
+    return status.peers.find((p) => p.handle === handle)?.presence;
+  }
+
   it('exits 1 with a diagnostic when the broker is down', async () => {
     const home = freshHome();
     const paths = getPaths(home);
     ensureHome(paths);
     process.env.MURMUR_HOME = home;
-    process.env.MURMUR_HANDLE = 'mcp-down';
     const { exits, stderr } = exitThrows();
     await expect(runMcpServer()).rejects.toThrow('process.exit(1)');
     expect(exits).toEqual([1]);
@@ -364,48 +425,65 @@ describe('runMcpServer', () => {
     expect(fakeStdio.constructed).toBe(0);
   });
 
-  it('exits 1 with a diagnostic when the broker rejects the handle', async () => {
+  it('with no host registers the anon handle and stays up', async () => {
     const stack = await buildStack();
-    process.env.MURMUR_HOME = stack.home;
-    process.env.MURMUR_HANDLE = 'Not A Valid Handle';
-    const { exits, stderr } = exitThrows();
-    await expect(runMcpServer()).rejects.toThrow('process.exit(1)');
-    expect(exits).toEqual([1]);
-    expect(stderr.join('')).toContain(
-      'murmur mcp: broker rejected registration of handle Not A Valid Handle (bad_request)',
-    );
-    expect(fakeStdio.constructed).toBe(0);
-  });
-
-  it('registers the anon handle, serves over stdio and stays up', async () => {
-    const stack = await buildStack();
-    process.env.MURMUR_HOME = stack.home;
     delete process.env.MURMUR_HANDLE;
     const handle = 'anon-' + String(process.pid);
     const exitSpy = vi.spyOn(process, 'exit');
-    // Never resolves by design; a rejection would surface here.
-    let failure: unknown = null;
-    void runMcpServer().catch((err: unknown) => {
-      failure = err;
-    });
-    await settle(() => stack.store.getPeer(handle) !== null, 'anon registration');
-    await settle(() => fakeStdio.started === 1, 'stdio transport started');
-    expect(fakeStdio.constructed).toBe(1);
-    expect(failure).toBeNull();
+    const up = await launch(stack);
+    expect(fakeStdio.constructed).toBeGreaterThanOrEqual(1);
+    expect(stack.store.getPeer(handle)).not.toBeNull();
     expect(exitSpy).not.toHaveBeenCalled();
-    const viewer = await MurmurClient.connect({ socketPath: stack.paths.socketPath, token: stack.token });
-    clients.push(viewer);
-    const status = await req<StatusResult>(viewer, { type: 'status' });
-    expect(status.peers.find((p) => p.handle === handle)).toMatchObject({ presence: 'online' });
-    // The exit teardown is registered for real process exit, which a test
-    // worker never performs; fire it directly so the broker connection is
-    // torn down the way production would. The only exit listeners in this
-    // worker are the ones runMcpServer registered.
-    expect(process.listenerCount('exit')).toBeGreaterThanOrEqual(1);
-    process.emit('exit', 0);
-    await settle(async () => {
-      const next = await req<StatusResult>(viewer, { type: 'status' });
-      return next.peers.find((p) => p.handle === handle)?.presence !== 'online';
-    }, 'anon handle offline after exit teardown');
+    expect(await presenceOf(stack, handle)).toBe('online');
+    await up.stop();
+    await settle(async () => (await presenceOf(stack, handle)) !== 'online', 'anon handle offline after exit teardown');
+  });
+
+  it('with no host uses a valid MURMUR_HANDLE and ignores an invalid one', async () => {
+    const stack = await buildStack();
+    process.env.MURMUR_HANDLE = 'explicit-one';
+    const first = await launch(stack);
+    expect(stack.store.getPeer('explicit-one')).not.toBeNull();
+    await first.stop();
+    process.env.MURMUR_HANDLE = 'Not A Valid Handle';
+    const second = await launch(stack);
+    expect(stack.store.getPeer('Not A Valid Handle')).toBeNull();
+    expect(stack.store.getPeer('anon-' + String(process.pid))).not.toBeNull();
+    await second.stop();
+  });
+
+  it('with a host registers by host identity: pending until the session announces itself', async () => {
+    const stack = await buildStack();
+    delete process.env.MURMUR_HANDLE;
+    hostState.host = HOST;
+    const up = await launch(stack);
+    expect(stack.store.getPeer('anon-' + String(process.pid))).toBeNull();
+    await announce(stack, 'late-session');
+    await settle(async () => (await presenceOf(stack, 'late-session')) === 'idle', 'late-session bound and idle');
+    await up.stop();
+  });
+
+  it('with a host and a wanted handle, renames the announced session to it', async () => {
+    const stack = await buildStack();
+    await announce(stack, 'old-name');
+    process.env.MURMUR_HANDLE = 'new-name';
+    hostState.host = HOST;
+    const up = await launch(stack);
+    expect(stack.store.sessionByHost(9001, 'S1')?.handle).toBe('new-name');
+    expect(stack.store.getPeer('old-name')).toBeNull();
+    await up.stop();
+  });
+
+  it('with a host, retries without the wanted handle when the broker rejects it', async () => {
+    const stack = await buildStack();
+    stack.store.upsertPeer('renn', null, null, true, Date.now());
+    await announce(stack, 'kept-name');
+    // The owner handle cannot be claimed by a session.
+    process.env.MURMUR_HANDLE = 'renn';
+    hostState.host = HOST;
+    const up = await launch(stack);
+    expect(stack.store.sessionByHost(9001, 'S1')?.handle).toBe('kept-name');
+    await settle(async () => (await presenceOf(stack, 'kept-name')) === 'idle', 'kept-name bound after retry');
+    await up.stop();
   });
 });
