@@ -38,6 +38,7 @@ import type {
   NotificationEvent,
   NotificationPayload,
   PushEvent,
+  PruneResult,
   PushPayload,
   ReadResult,
   RecipientMatrix,
@@ -73,6 +74,9 @@ interface ConnState {
   // Handle this connection speaks as, or null. A second register (or
   // session) on one connection rebinds.
   handle: string | null;
+  // The session the owner typed in, for an owner register that named its
+  // ancestors; stamped on every message this connection sends.
+  via: string | null;
   // Long-lived connections (mcp, adapter) count as presence; cli and hook
   // connections only carry an identity for their own requests.
   live: boolean;
@@ -339,6 +343,7 @@ export class Broker {
       reader: new LineReader(),
       authenticated: false,
       handle: null,
+      via: null,
       live: false,
       listening: false,
       pendingHost: null,
@@ -524,6 +529,9 @@ export class Broker {
       case 'status':
         this.replyOk(conn.socket, id, this.handleStatus());
         return;
+      case 'prune':
+        this.replyOk(conn.socket, id, this.handlePrune());
+        return;
       case 'fetch-push':
         this.replyOk(conn.socket, id, this.handleFetchPush(rec));
         return;
@@ -547,8 +555,12 @@ export class Broker {
     const owner = optBool(rec, 'owner') === true;
     const live = kind === 'mcp' || kind === 'adapter';
     let resolved: string;
+    conn.via = null;
     if (owner) {
       resolved = this.ownerHandle();
+      if (ancestors !== undefined) {
+        conn.via = this.core.sessionForAncestors(ancestors)?.handle ?? null;
+      }
     } else if (host !== undefined) {
       const session = this.core.sessionForHost(host);
       if (session === null) {
@@ -561,6 +573,7 @@ export class Broker {
         return { handle: '', owner: false };
       }
       resolved = handle === undefined ? session.handle : this.core.renameSession(session, handle);
+      this.rebind(session.handle, resolved);
     } else if (ancestors !== undefined && handle === undefined) {
       resolved = this.core.sessionForAncestors(ancestors)?.handle ?? this.ownerHandle();
     } else if (handle !== undefined) {
@@ -604,6 +617,7 @@ export class Broker {
     const transcriptPath = optString(rec, 'transcriptPath');
     const cwd = optString(rec, 'cwd');
     const handle = optString(rec, 'handle');
+    const title = optString(rec, 'title');
     const listen = optBool(rec, 'listen') === true;
     let native: { socketPath: string; token: string } | undefined;
     if (rec.native !== undefined) {
@@ -613,6 +627,8 @@ export class Broker {
       const nat = rec.native as Record<string, unknown>;
       native = { socketPath: reqString(nat, 'socketPath'), token: reqString(nat, 'token') };
     }
+    // A title can rename the session, so find the name it had before.
+    const before = (cliSessionId === null ? null : this.store.sessionByCliId(client, cliSessionId)) ?? this.store.sessionByHost(host.hostPid, host.hostStart);
     const session = this.core.sessionEvent({
       event,
       client,
@@ -620,9 +636,13 @@ export class Broker {
       host,
       ...(transcriptPath !== undefined ? { transcriptPath } : {}),
       ...(cwd !== undefined ? { cwd } : {}),
+      ...(title !== undefined ? { title } : {}),
       ...(handle !== undefined ? { handle } : {}),
       ...(native !== undefined ? { native } : {}),
     });
+    if (before !== null) {
+      this.rebind(before.handle, session.handle);
+    }
     conn.listening = listen;
     this.bind(conn, session.handle, listen);
     // MCP servers of this session that registered before it announced itself.
@@ -672,10 +692,11 @@ export class Broker {
     const body = reqString(rec, 'body');
     const references = optStringArray(rec, 'references');
     const mode = optEnum<DeliveryMode>(rec, 'mode', DELIVERY_MODES);
-    const arg: { threadId: number | null; to: string[]; body: string; references?: string[]; mode?: DeliveryMode } = {
+    const arg: { threadId: number | null; to: string[]; body: string; references?: string[]; mode?: DeliveryMode; via: string | null } = {
       threadId,
       to,
       body,
+      via: conn.via,
     };
     if (references !== undefined) {
       arg.references = references;
@@ -710,7 +731,11 @@ export class Broker {
     const body = reqString(rec, 'body');
     const verdict = optEnum<Verdict>(rec, 'verdict', VERDICTS);
     const references = optStringArray(rec, 'references');
-    const arg: { messageId: number; body: string; verdict?: Verdict; references?: string[] } = { messageId, body };
+    const arg: { messageId: number; body: string; verdict?: Verdict; references?: string[]; via: string | null } = {
+      messageId,
+      body,
+      via: conn.via,
+    };
     if (verdict !== undefined) {
       arg.verdict = verdict;
     }
@@ -803,6 +828,18 @@ export class Broker {
 
   private handleStatus(): StatusResult {
     return this.core.status((handle) => ({ online: this.presence.has(handle) }));
+  }
+
+  // Every handle with a connection, so a peer someone is talking through is
+  // never pruned.
+  private handlePrune(): PruneResult {
+    const connected = new Set<string>();
+    for (const conn of this.conns) {
+      if (conn.handle !== null) {
+        connected.add(conn.handle);
+      }
+    }
+    return { removed: this.core.prune(connected) };
   }
 
   private handleFetchPush(rec: Record<string, unknown>): FetchPushResult {
@@ -1154,6 +1191,20 @@ export class Broker {
     conn.pendingHost = null;
     if (live) {
       this.presence.set(handle, conn);
+    }
+  }
+
+  // A session's name changed: connections still bound to the old one (its MCP
+  // server, an adapter) follow it, unless another live session still holds
+  // it. Ended sessions left on the old name do not count.
+  private rebind(from: string, to: string): void {
+    if (from === to || !this.core.claimable(from, null)) {
+      return;
+    }
+    for (const conn of this.conns) {
+      if (conn.handle === from) {
+        this.bind(conn, to, conn.live);
+      }
     }
   }
 

@@ -566,7 +566,7 @@ describe('slash', () => {
     expect(cap.err).toEqual([]);
     expect(cap.out.join('')).toBe(
       [
-        '/murmur <group | handle[,more]> <message>   (run bare like this for peers and groups)',
+        '/murmur <group | handle[,more]> <message>   (sent as renn, via the session you type it in; run bare like this for peers and groups)',
         '',
         'peers:',
         ...peerLines,
@@ -1062,6 +1062,33 @@ describe('slash input forms', () => {
     }
   });
   let cap: Capture;
+});
+
+describe('slash via and prune', () => {
+  it('stamps the session the command was typed in as via, and none from a plain terminal', async () => {
+    await connectPeer('via-target');
+    await startSession('via-claude', hostOf(9002, 'S2'), 'codex');
+    const viaOf = async (host: HostInfo | null): Promise<string | null | undefined> => {
+      hostState.host = host;
+      const cap = capture();
+      expect(await runCli(['slash', 'via-target', 'hello', String(Math.random())], cap.io)).toBe(0);
+      return store.messageById(Number(/message (\d+) thread/.exec(cap.out.join(''))?.[1]))?.via;
+    };
+    expect(await viaOf(hostOf(9100, 'X', [9100, 9002, 1]))).toBe('via-claude');
+    expect(await viaOf(hostOf(9100, 'X', [9100, 9200]))).toBeNull();
+    expect(await viaOf(null)).toBeNull();
+  });
+
+  it('prune prints the removed handles one per line, then says there is nothing to prune', async () => {
+    store.upsertPeer('claude-deadbeef', null, null, false, 1);
+    const first = capture();
+    expect(await runCli(['prune'], first.io)).toBe(0);
+    expect(first.out.join('')).toContain('claude-deadbeef\n');
+    expect(first.out.join('')).not.toContain('nothing to prune');
+    const second = capture();
+    expect(await runCli(['prune'], second.io)).toBe(0);
+    expect(second.out.join('')).toBe('nothing to prune\n');
+  });
 });
 
 describe('broker down', () => {

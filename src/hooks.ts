@@ -1,3 +1,4 @@
+import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
 import { connectBroker } from './client.js';
 import { getPaths, readToken } from './config.js';
 import { currentHost } from './proc.js';
@@ -24,6 +25,10 @@ export const HOOK_CLIENTS: readonly HookClient[] = ['claude', 'codex', 'gemini',
 const HOOK_DEADLINE_MS = 10000;
 
 const FETCH_PUSH_LIMIT = 10;
+
+// Transcripts reach hundreds of MB and Claude repeats the session name as it
+// goes, so only the tail is read: the latest entry is in it.
+const TITLE_TAIL_BYTES = 256 * 1024;
 
 interface HookInput {
   sessionId: string | null;
@@ -99,6 +104,12 @@ function sessionMessage(
   if (input.cwd !== null) {
     msg.cwd = input.cwd;
   }
+  if (client === 'claude' && input.transcriptPath !== null) {
+    const title = readClaudeTitle(input.transcriptPath);
+    if (title !== undefined) {
+      msg.title = title;
+    }
+  }
   const explicit = env.MURMUR_HANDLE;
   if (typeof explicit === 'string' && explicit.length > 0) {
     msg.handle = explicit;
@@ -111,6 +122,41 @@ function sessionMessage(
     msg.native = { socketPath, token: nativeToken };
   }
   return msg;
+}
+
+// The name the user gave a Claude session (/rename): the customTitle of the
+// last custom-title entry in the tail of its transcript. Anything unreadable
+// reads as no title; a hook never fails over it.
+function readClaudeTitle(path: string): string | undefined {
+  try {
+    const fd = openSync(path, 'r');
+    try {
+      const size = fstatSync(fd).size;
+      const start = Math.max(0, size - TITLE_TAIL_BYTES);
+      const buf = Buffer.alloc(size - start);
+      readSync(fd, buf, 0, buf.length, start);
+      let title: string | undefined;
+      for (const line of buf.toString('utf8').split('\n')) {
+        if (!line.includes('"custom-title"')) {
+          continue;
+        }
+        try {
+          const rec = JSON.parse(line) as Record<string, unknown>;
+          const name = stringField(rec, 'customTitle');
+          if (rec.type === 'custom-title' && name !== null) {
+            title = name;
+          }
+        } catch {
+          // A line cut by the tail window, or not JSON: skip it.
+        }
+      }
+      return title;
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return undefined;
+  }
 }
 
 function nonEmpty(value: string | undefined): value is string {

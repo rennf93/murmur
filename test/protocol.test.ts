@@ -136,7 +136,7 @@ describe('v0.2 helpers', () => {
 
   const base: MessageSummary = {
     id: 5, threadId: 2, seq: 1, sender: 'alice', firstLine: 'x', truncated: false,
-    references: [], isReply: false, inReplyTo: null, verdict: null, createdAt: 0,
+    references: [], isReply: false, inReplyTo: null, verdict: null, via: null, createdAt: 0,
   };
 
   it('renderDelivery renders the minimal form', () => {

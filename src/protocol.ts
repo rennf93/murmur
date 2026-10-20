@@ -12,7 +12,7 @@ export const NOTIFY_BATCH_MS = 60000;
 export const WAIT_MAX_MS = 300000;
 export const WAIT_DEFAULT_MS = 120000;
 export const FIRST_LINE_MAX = 120;
-export const HANDLE_RE = /^[a-z0-9][a-z0-9-]{1,31}$/;
+export const HANDLE_RE = /^[a-z0-9][a-z0-9-]{1,47}$/;
 // How long the broker keeps polling a receiver's transcript for proof after
 // a push; later hook events of that session re-check without a deadline.
 export const PROOF_POLL_MS = 120000;
@@ -56,6 +56,8 @@ export interface MessageSummary {
   isReply: boolean;
   inReplyTo: number | null;
   verdict: Verdict | null;
+  // The session the owner typed this in (a /murmur message), else null.
+  via: string | null;
   createdAt: number;
 }
 
@@ -77,6 +79,7 @@ export interface SendResult {
   messageId: number;
   threadId: number;
   seq: number;
+  via: string | null;
   deliveries: DeliveryInfo[];
 }
 
@@ -165,6 +168,10 @@ export interface RegisterResult {
   owner: boolean;
 }
 
+export interface PruneResult {
+  removed: string[];
+}
+
 export interface SessionResult {
   handle: string;
 }
@@ -217,7 +224,8 @@ export interface HostRef {
 // tests). host: the session running under that host process, created on the
 // spot when no hook announced it yet; a handle given with host renames that
 // session. ancestors (CLI): the nearest live session host among them, else
-// the owner. owner: true forces the owner (the human surface).
+// the owner. owner: true forces the owner (the human surface); with ancestors
+// it also records the live session among them as the via of its sends.
 export interface RegisterMessage {
   v: number;
   id: number;
@@ -246,6 +254,8 @@ export interface SessionMessage {
   cliSessionId: string | null;
   host: HostRef;
   transcriptPath?: string;
+  // The name the user gave the session in its CLI (Claude's /rename).
+  title?: string;
   cwd?: string;
   handle?: string;
   native?: { socketPath: string; token: string };
@@ -342,6 +352,12 @@ export interface StatusMessage {
   type: 'status';
 }
 
+export interface PruneMessage {
+  v: number;
+  id: number;
+  type: 'prune';
+}
+
 export interface HookMessage {
   v: number;
   id: number;
@@ -383,6 +399,7 @@ export type ClientMessage =
   | WaitMessage
   | GroupsMessage
   | StatusMessage
+  | PruneMessage
   | HookMessage
   | NativeRegisterMessage
   | FetchPushMessage;
@@ -499,6 +516,9 @@ export function replyFooter(m: { id: number; threadId: number }): string {
 // how to reply.
 export function renderDelivery(m: MessageSummary, deliveredBody: string, recipients: string[]): string {
   let head = deliveryTag(m.id) + 't' + String(m.threadId) + ' s' + String(m.seq) + ' from ' + m.sender;
+  if (m.via !== null) {
+    head += ' via ' + m.via;
+  }
   if (m.inReplyTo !== null) {
     head += ' re m' + String(m.inReplyTo);
   }

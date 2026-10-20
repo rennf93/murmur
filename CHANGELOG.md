@@ -4,6 +4,26 @@ All notable changes to murmur are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.2] - 2026-10-20
+
+### Fixed
+
+- `/murmur` now reads as coming from the owner through the session it was typed in: the message tag is `from renn via <session>`, and replies are pushed into that session as well as to `renn`. Before, replies to an owner message went only to `renn`, which has no session, so the session the human typed in never saw them. From a plain terminal (no session among the ancestors) nothing changes.
+- A rename now carries the whole session: every live broker connection bound to the old handle (the session's MCP server, an adapter) follows to the new one, so its presence and later sends use the new name.
+
+### Added
+
+- Claude sessions take the name the user gave them. The hook reads the last 256 KB of the transcript, takes the latest `customTitle` and sends it as `title`; the session's handle becomes its slug (`Ledger, Implementer, Companion - Claude 3` becomes `ledger-implementer-companion-claude-3`) and its display the full title. It follows a later `/rename` only while the handle is automatic: `murmur_name` and `murmur name` pin it. A slug held by another live session keeps the current handle.
+- `via` on messages, thread views, `MessageSummary` and `SendResult`, backed by a nullable `messages.via` column.
+- `murmur prune` and the `prune` protocol request: removes peers that are not the owner and have no session, message, delivery, group membership or live connection (the v0.1 `claude-<8 hex>` leftovers), and prints the removed handles.
+- Schema migration: `messages.via` and `sessions.pinned` are added to an existing database when `PRAGMA table_info` lacks them.
+
+### Changed
+
+- Handles may be up to 48 characters (`^[a-z0-9][a-z0-9-]{1,47}$`), up from 32, so title slugs fit.
+- The MCP instructions and the `murmur_send` description tell agents to consult several sessions with one `murmur_send` to all of them instead of separate `SendMessage` calls.
+- Hummin's model-free `/murmur` passes its process as the ancestor, so its messages carry the session as `via`.
+
 ## [0.2.1] - 2026-10-20
 
 ### Fixed
@@ -61,6 +81,7 @@ All notable changes to murmur are documented here. The format follows
 - Limits: send rate, duplicate window, thread and inbox caps.
 - 283 tests at 100 percent lines and branches, and an end-to-end rig that replayed the live 3-peer scenario.
 
+[0.2.2]: https://github.com/rennf93/murmur/releases/tag/v0.2.2
 [0.2.1]: https://github.com/rennf93/murmur/releases/tag/v0.2.1
 [0.2.1-rc.1]: https://github.com/rennf93/murmur/releases/tag/v0.2.1-rc.1
 [0.2.0]: https://github.com/rennf93/murmur/releases/tag/v0.2.0

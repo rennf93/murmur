@@ -29,6 +29,8 @@ export interface SessionRow {
   // busy, idle or ended; null until a lifecycle event says otherwise.
   state: string | null;
   stateAt: number | null;
+  // True once the session was named explicitly; a pinned handle ignores the CLI's title.
+  pinned: boolean;
   startedAt: number;
   updatedAt: number;
 }
@@ -57,6 +59,7 @@ export interface MessageRow {
   isReply: boolean;
   inReplyTo: number | null;
   verdict: string | null;
+  via: string | null;
   createdAt: number;
 }
 
@@ -94,6 +97,7 @@ interface MessageRecord {
   is_reply: number;
   in_reply_to: number | null;
   verdict: string | null;
+  via: string | null;
   created_at: number;
 }
 
@@ -125,6 +129,7 @@ interface SessionRecord {
   cwd: string | null;
   state: string | null;
   state_at: number | null;
+  pinned: number;
   started_at: number;
   updated_at: number;
 }
@@ -152,6 +157,7 @@ interface AppendMessageArgs {
   isReply: boolean;
   inReplyTo: number | null;
   verdict: string | null;
+  via: string | null;
   createdAt: number;
 }
 
@@ -194,6 +200,7 @@ CREATE TABLE IF NOT EXISTS messages (
   is_reply INTEGER NOT NULL,
   in_reply_to INTEGER,
   verdict TEXT,
+  via TEXT,
   created_at INTEGER NOT NULL,
   UNIQUE (thread_id, seq)
 );
@@ -219,6 +226,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   cwd TEXT,
   state TEXT,
   state_at INTEGER,
+  pinned INTEGER NOT NULL DEFAULT 0,
   started_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   UNIQUE (client, cli_session_id)
@@ -233,6 +241,13 @@ CREATE INDEX IF NOT EXISTS idx_deliveries_recipient_state ON deliveries (recipie
 CREATE INDEX IF NOT EXISTS idx_sessions_handle ON sessions (handle, updated_at, id);
 CREATE INDEX IF NOT EXISTS idx_sessions_host ON sessions (host_pid, host_start, updated_at, id);
 `;
+
+// Columns added after 0.2.1. CREATE TABLE IF NOT EXISTS leaves an older
+// database as it was, so each one is added when PRAGMA table_info lacks it.
+const ADDED_COLUMNS: Array<[table: string, column: string, ddl: string]> = [
+  ['messages', 'via', 'TEXT'],
+  ['sessions', 'pinned', 'INTEGER NOT NULL DEFAULT 0'],
+];
 
 // Delivery states that still count as unread for inbox purposes.
 const UNREAD_STATES_SQL = "('queued','sent','delivered')";
@@ -262,6 +277,7 @@ function toSessionRow(r: SessionRecord): SessionRow {
     cwd: r.cwd,
     state: r.state,
     stateAt: r.state_at,
+    pinned: r.pinned === 1,
     startedAt: r.started_at,
     updatedAt: r.updated_at,
   };
@@ -281,6 +297,7 @@ function toMessageRow(r: MessageRecord): MessageRow {
     isReply: r.is_reply === 1,
     inReplyTo: r.in_reply_to,
     verdict: r.verdict,
+    via: r.via,
     createdAt: r.created_at,
   };
 }
@@ -342,6 +359,12 @@ export class Store {
     db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
     db.exec(SCHEMA_SQL);
+    for (const [table, column, ddl] of ADDED_COLUMNS) {
+      const columns = db.prepare('PRAGMA table_info(' + table + ')').all() as Array<{ name: string }>;
+      if (!columns.some((c) => c.name === column)) {
+        db.exec('ALTER TABLE ' + table + ' ADD COLUMN ' + column + ' ' + ddl);
+      }
+    }
     // The database holds every message and each session's native messaging
     // token: owner-only, like the token file.
     for (const file of [dbPath, dbPath + '-wal', dbPath + '-shm']) {
@@ -389,6 +412,7 @@ export class Store {
       this.stmt('UPDATE group_members SET handle = ? WHERE handle = ?').run(newHandle, oldHandle);
       this.stmt('UPDATE deliveries SET recipient = ? WHERE recipient = ?').run(newHandle, oldHandle);
       this.stmt('UPDATE messages SET sender = ? WHERE sender = ?').run(newHandle, oldHandle);
+      this.stmt('UPDATE messages SET via = ? WHERE via = ?').run(newHandle, oldHandle);
       this.stmt('UPDATE threads SET created_by = ? WHERE created_by = ?').run(newHandle, oldHandle);
     });
     move();
@@ -453,6 +477,7 @@ export class Store {
     isReply: boolean;
     inReplyTo: number | null;
     verdict: string | null;
+    via: string | null;
     createdAt: number;
   }): { id: number; seq: number } {
     return this.appendMessageTx(arg);
@@ -463,8 +488,8 @@ export class Store {
       .get(arg.threadId) as NextSeqRecord | undefined;
     const seq = seqRec === undefined ? 0 : seqRec.next_seq;
     const info = this.stmt(
-      `INSERT INTO messages (thread_id, seq, sender, body, delivered_body, truncated, refs_json, mode, is_reply, in_reply_to, verdict, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO messages (thread_id, seq, sender, body, delivered_body, truncated, refs_json, mode, is_reply, in_reply_to, verdict, via, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       arg.threadId,
       seq,
@@ -477,6 +502,7 @@ export class Store {
       arg.isReply ? 1 : 0,
       arg.inReplyTo,
       arg.verdict,
+      arg.via,
       arg.createdAt,
     );
     return { id: Number(info.lastInsertRowid), seq };
@@ -737,6 +763,7 @@ export class Store {
       cwd?: string | null;
       state?: string;
       stateAt?: number;
+      pinned?: 0 | 1;
       updatedAt?: number;
     },
   ): void {
@@ -749,6 +776,7 @@ export class Store {
       ['cwd', 'cwd'],
       ['state', 'state'],
       ['stateAt', 'state_at'],
+      ['pinned', 'pinned'],
       ['updatedAt', 'updated_at'],
     ];
     const sets: string[] = [];

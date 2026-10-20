@@ -15,6 +15,7 @@ import type {
   GroupsMessage,
   GroupsResult,
   HookEvent,
+  PruneResult,
   RegisterMessage,
   RegisterResult,
   ReplyMessage,
@@ -47,7 +48,8 @@ const NAME_USAGE = 'usage: murmur name <handle>   (renames the agent session thi
 const THREAD_USAGE = 'usage: murmur thread <id> [--since <n>] [--full]';
 const GROUPS_USAGE =
   'usage: murmur groups [list] | groups create <name> | groups add <name> <members...> | groups remove <name> <members...> | groups delete <name>';
-const SLASH_USAGE = '/murmur <group | handle[,more]> <message>   (run bare like this for peers and groups)';
+const SLASH_USAGE =
+  '/murmur <group | handle[,more]> <message>   (sent as renn, via the session you type it in; run bare like this for peers and groups)';
 
 export async function runCli(argv: string[], io?: CliIo): Promise<number> {
   // The default io is captured at call time and touches only the real
@@ -97,6 +99,8 @@ async function dispatch(argv: string[], out: Sink, err: Sink): Promise<number> {
       return cmdReply(argv.slice(1), out, err);
     case 'name':
       return cmdName(argv.slice(1), out, err);
+    case 'prune':
+      return cmdPrune(out);
     case 'slash':
       return cmdSlash(argv.slice(1), out, err);
     case 'status':
@@ -126,7 +130,8 @@ function printUsage(err: Sink): void {
     '  send <targets> <body...> send a message; flags: --as, --mode, --refs, --thread',
     '  reply <id> <body...>     reply into a thread; flags: --as, --verdict, --refs',
     '  name <handle>            rename the agent session this runs in',
-    '  slash [args...]          the /murmur backing (args or stdin); bare prints peers and groups',
+    '  slash [args...]          the /murmur backing, sent as the owner via your session; bare prints peers and groups',
+    '  prune                    remove peers with no session, message, group or connection',
     '  status                   list peers with presence and unread counts',
     '  thread <id> [--since <n>] [--full]',
     '  groups [list] | groups create <name> | groups add <name> <members...>',
@@ -243,7 +248,8 @@ function readAllStdin(): Promise<string> {
 // Who a CLI command speaks as. --as wins. Otherwise a command run inside an
 // agent session (any ancestor is a live session's host) speaks as that
 // session, and one run from a plain terminal speaks as the owner. The
-// /murmur surface is the human typing, so it always speaks as the owner.
+// /murmur surface is the human typing, so it always speaks as the owner, and
+// the session it was typed in (an ancestor host) rides along as the via.
 type Speaker = 'session' | 'owner';
 
 function identityMessage(asHandle: string | null, speaker: Speaker): Omit<RegisterMessage, 'v' | 'id'> {
@@ -251,7 +257,13 @@ function identityMessage(asHandle: string | null, speaker: Speaker): Omit<Regist
     return { type: 'register', handle: asHandle, clientKind: 'cli' };
   }
   if (speaker === 'owner') {
-    return { type: 'register', owner: true, display: OWNER_DISPLAY, clientKind: 'cli' };
+    return {
+      type: 'register',
+      owner: true,
+      display: OWNER_DISPLAY,
+      clientKind: 'cli',
+      ancestors: currentHost()?.ancestors ?? [],
+    };
   }
   return { type: 'register', clientKind: 'cli', ancestors: currentHost()?.ancestors ?? [] };
 }
@@ -469,6 +481,22 @@ async function cmdStatus(out: Sink): Promise<number> {
     out(line + '\n');
   }
   return 0;
+}
+
+async function cmdPrune(out: Sink): Promise<number> {
+  const client = await connectCli();
+  try {
+    const result = await client.request<PruneResult>({ type: 'prune' });
+    for (const handle of result.removed) {
+      out(handle + '\n');
+    }
+    if (result.removed.length === 0) {
+      out('nothing to prune\n');
+    }
+    return 0;
+  } finally {
+    client.close();
+  }
 }
 
 async function cmdThread(args: string[], out: Sink, err: Sink): Promise<number> {

@@ -28,6 +28,7 @@ interface AppendOpts {
   isReply?: boolean;
   inReplyTo?: number | null;
   verdict?: string | null;
+  via?: string | null;
   truncated?: boolean;
   createdAt?: number;
 }
@@ -44,6 +45,7 @@ function appendMessage(threadId: number, opts: AppendOpts = {}): { id: number; s
     isReply: opts.isReply ?? false,
     inReplyTo: opts.inReplyTo ?? null,
     verdict: opts.verdict ?? null,
+    via: opts.via ?? null,
     createdAt: opts.createdAt ?? 1,
   });
 }
@@ -198,6 +200,7 @@ describe('Store', () => {
       isReply: true,
       inReplyTo: 42,
       verdict: 'agree',
+      via: null,
       createdAt: 7,
     });
     expect(store.messageById(99999)).toBeNull();
@@ -443,7 +446,7 @@ describe('Store', () => {
     });
     expect(store.sessionById(a)).toEqual({
       id: a, client: 'claude', cliSessionId: 'c1', handle: 'h', hostPid: 10, hostStart: 'T',
-      transcriptPath: '/t', cwd: '/w', state: null, stateAt: null, startedAt: 5, updatedAt: 5,
+      transcriptPath: '/t', cwd: '/w', state: null, stateAt: null, pinned: false, startedAt: 5, updatedAt: 5,
     });
     expect(store.sessionById(999)).toBeNull();
     expect(store.sessionByCliId('claude', 'c1')?.id).toBe(a);
@@ -457,11 +460,11 @@ describe('Store', () => {
     expect(store.sessionById(a)?.client).toBe('claude');
     store.updateSession(a, {
       client: 'gemini', cliSessionId: 'c2', hostPid: 11, hostStart: 'U', transcriptPath: null, cwd: null,
-      state: 'busy', stateAt: 20, updatedAt: 30,
+      state: 'busy', stateAt: 20, pinned: 1, updatedAt: 30,
     });
     expect(store.sessionById(a)).toEqual({
       id: a, client: 'gemini', cliSessionId: 'c2', handle: 'h', hostPid: 11, hostStart: 'U',
-      transcriptPath: null, cwd: null, state: 'busy', stateAt: 20, startedAt: 5, updatedAt: 30,
+      transcriptPath: null, cwd: null, state: 'busy', stateAt: 20, pinned: true, startedAt: 5, updatedAt: 30,
     });
   });
 
@@ -540,5 +543,38 @@ describe('Store', () => {
       const scans = plansOf(call).filter((detail) => /^SCAN\b/.test(detail));
       expect(scans, name).toEqual([]);
     }
+  });
+  it('migrates a 0.2.1 database by adding the via and pinned columns', () => {
+    store.close();
+    rmSync(dbPath);
+    const old = new Database(dbPath);
+    old.exec(`
+      CREATE TABLE messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id INTEGER NOT NULL, seq INTEGER NOT NULL, sender TEXT NOT NULL,
+        body TEXT NOT NULL, delivered_body TEXT NOT NULL, truncated INTEGER NOT NULL, refs_json TEXT NOT NULL,
+        mode TEXT NOT NULL, is_reply INTEGER NOT NULL, in_reply_to INTEGER, verdict TEXT, created_at INTEGER NOT NULL,
+        UNIQUE (thread_id, seq)
+      );
+      CREATE TABLE sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, client TEXT NOT NULL, cli_session_id TEXT, handle TEXT NOT NULL,
+        host_pid INTEGER NOT NULL, host_start TEXT NOT NULL, transcript_path TEXT, cwd TEXT, state TEXT, state_at INTEGER,
+        started_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE (client, cli_session_id)
+      );
+      INSERT INTO messages VALUES (1, 1, 0, 'alice', 'hi', 'hi', 0, '[]', 'push', 0, NULL, NULL, 5);
+      INSERT INTO sessions VALUES (1, 'claude', 'c1', 'alice', 10, 'T', NULL, NULL, 'idle', 5, 5, 5);
+    `);
+    old.close();
+    // Opening twice proves the guard: the second open finds the columns.
+    Store.open(dbPath).close();
+    store = Store.open(dbPath);
+    expect(store.messageById(1)?.via).toBeNull();
+    expect(store.sessionById(1)?.pinned).toBe(false);
+    const { id } = appendMessage(1, { sender: 'alice', via: 'old-name' });
+    expect(id).toBe(2);
+    store.upsertPeer('old-name', null, null, false, 1);
+    store.renamePeer('old-name', 'new-name');
+    expect(store.messageById(id)?.via).toBe('new-name');
+    store.updateSession(1, { pinned: 1 });
+    expect(store.sessionById(1)?.pinned).toBe(true);
   });
 });

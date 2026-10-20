@@ -229,7 +229,11 @@ describe('SDK conformance over InMemoryTransport', () => {
     const { sdk } = await pair(stack);
     const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
     expect(sdk.getServerVersion()).toMatchObject({ name: 'murmur', version });
-    expect(sdk.getInstructions()).toContain('murmur_reply');
+    const instructions = sdk.getInstructions() ?? '';
+    expect(instructions).toContain('murmur_reply');
+    expect(instructions).toContain('ONE murmur_send');
+    expect(instructions).toContain('SendMessage');
+    expect(instructions.length).toBeLessThan(450);
     const listed = await sdk.listTools();
     expect(listed.tools.map((t) => t.name).sort()).toEqual([...TOOL_NAMES].sort());
     expect(listed.tools).toHaveLength(8);

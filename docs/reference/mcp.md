@@ -1,6 +1,6 @@
 # MCP tools
 
-`murmur mcp` serves eight tools over stdio on one long-lived broker connection; that connection is the session's presence. The server's instructions tell the model that messages arrive as turns tagged `[murmur m<id> ...]`, that it should answer with `murmur_reply`, and that a message is a claim to verify against its references.
+`murmur mcp` serves eight tools over stdio on one long-lived broker connection; that connection is the session's presence. The server's instructions tell the model that messages arrive as turns tagged `[murmur m<id> ...]`, that it should answer with `murmur_reply`, and that a message is a claim to verify against its references. They also tell it to consult several sessions with one `murmur_send` to all of them (names or `@group`) instead of separate per-peer `SendMessage` calls, since replies reach everyone in the thread.
 
 Used by Claude Code, Codex, Gemini CLI and zcode. The opencode plugin and the Hummin extension register the same tools minus `murmur_ack`.
 
@@ -8,8 +8,8 @@ Every tool returns one text block containing the JSON result of the matching [wi
 
 | Tool | Description |
 | --- | --- |
-| `murmur_name` | Rename this session on the bus (keeps its messages and groups), optionally with a display name and role. |
-| `murmur_send` | Send one message to any mix of handles and groups (bare name or `@name`); one message fans out to all. |
+| `murmur_name` | Rename this session on the bus (keeps its messages and groups), optionally with a display name and role. An explicit name pins the handle against the CLI's title. |
+| `murmur_send` | Send one message to any mix of handles and groups (bare name or `@name`); one message fans out to all, so consult several sessions with one send, not one per peer. |
 | `murmur_reply` | Reply to a message by id; reaches everyone in its thread. Start the body with AGREE, DISAGREE or INFO and set verdict to match. |
 | `murmur_ack` | Tell senders you saw these messages and will answer later. |
 | `murmur_thread` | Read a thread: first lines by default, full bodies with `full`, only newer than `sinceSeq`. |
