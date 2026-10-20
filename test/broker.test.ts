@@ -2737,7 +2737,7 @@ describe('push routing', () => {
     expect(stack.store.getDeliveries(messageId)[0]?.state).toBe('queued');
   });
 
-  it('never downgrades a delivery the recipient already pulled while the push was in flight', async () => {
+  it('leaves a delivery to its in-flight push instead of letting the recipient pull it', async () => {
     let release!: (result: NativeSendResult) => void;
     const gate = new Promise<NativeSendResult>((resolve) => {
       release = resolve;
@@ -2753,7 +2753,9 @@ describe('push routing', () => {
     const pending = req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'raced' });
     await settle(() => started, 'native push started');
     const fetched = await req<FetchPushResult>(bob.client, { type: 'fetch-push', handle: 'bob', limit: 5 });
-    expect(fetched.messages).toHaveLength(1);
+    expect(fetched.messages).toEqual([]);
+    // A read still lands during the flight and the finishing push must not downgrade it.
+    await req<ReadResult>(bob.client, { type: 'read', ids: [1] });
     release({ ok: true, error: null });
     const sent = await pending;
     expect(stack.store.getDeliveries(sent.messageId)[0]?.state).toBe('delivered');
@@ -3036,5 +3038,54 @@ describe('via, titles and prune', () => {
     await expect(req(cli.client, { type: 'prune' })).resolves.toEqual({ removed: [] });
     expect(stack.store.getPeer('still-here')).not.toBeNull();
     expect(stack.store.getPeer('renn')).not.toBeNull();
+  });
+});
+
+describe('an in-flight push', () => {
+  // A held reply whose push starts when the waiter's connection closes, with
+  // the native send left pending until release().
+  async function inFlightHeld() {
+    let release!: (r: NativeSendResult) => void;
+    const calls: string[] = [];
+    const stack = await buildStack((_s, _t, text) => {
+      calls.push(text);
+      return new Promise<NativeSendResult>((res) => {
+        release = res;
+      });
+    });
+    const a1 = await connectPeer(stack, { handle: 'alice' });
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    await connectPeer(stack, { handle: 'carol' });
+    await req(a1.client, { type: 'native-register', handle: 'alice', socketPath: '/tmp/a.sock', token: 't' });
+    const ask = await req<SendResult>(a1.client, { type: 'send', threadId: null, to: ['bob', 'carol'], body: 'q' });
+    void req<WaitResult>(a1.client, { type: 'wait', threadId: ask.threadId, until: 'all_replied', timeoutMs: 20000 }).catch(() => {});
+    await yieldTurn();
+    await yieldTurn();
+    const held = await req<ReplyResult>(bob.client, { type: 'reply', messageId: ask.messageId, body: 'HELDBODY' });
+    a1.client.close();
+    await settle(() => calls.length > 0, 'push started');
+    return { stack, ask, held, calls, release: (r: NativeSendResult) => release(r) };
+  }
+
+  it('is not handed over by a new wait', async () => {
+    const { stack, ask, held, calls, release } = await inFlightHeld();
+    const a2 = await connectPeer(stack, { handle: 'alice' });
+    const w = await req<WaitResult>(a2.client, { type: 'wait', threadId: ask.threadId, until: 'any_replied', timeoutMs: 1000 });
+    expect(w.replies).toEqual([]);
+    release({ ok: true, error: null });
+    await settle(() => stack.store.getDeliveries(held.messageId).every((d) => d.state !== 'queued'), 'push done');
+    expect(calls.filter((c) => c.includes('HELDBODY'))).toHaveLength(1);
+  });
+
+  it('is not handed over by the hook pull, and a failed push stays pullable', async () => {
+    const { stack, held, release } = await inFlightHeld();
+    const a2 = await connectPeer(stack, { handle: 'alice' });
+    const during = await req<FetchPushResult>(a2.client, { type: 'fetch-push', handle: 'alice', limit: 10 });
+    expect(during.messages).toEqual([]);
+    release({ ok: false, error: 'refused' });
+    await yieldTurn();
+    await yieldTurn();
+    const after = await req<FetchPushResult>(a2.client, { type: 'fetch-push', handle: 'alice', limit: 10 });
+    expect(after.messages.map((m) => m.id)).toEqual([held.messageId]);
   });
 });

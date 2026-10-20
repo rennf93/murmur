@@ -249,6 +249,8 @@ export class Broker {
   private readonly notifyQueue = new Map<string, NotifyEntry>();
   // Thread id to waiters registered against that thread.
   private readonly waiters = new Map<number, Set<Waiter>>();
+  // Deliveries a push is sending right now (messageId:recipient): no other path hands them over.
+  private readonly inFlight = new Set<string>();
   private stopped = false;
   private stopPromise: Promise<void> | null = null;
 
@@ -859,7 +861,7 @@ export class Broker {
     }
     // Everything the pull hands out was queued, so each one tells its
     // sender it finally arrived.
-    const result = this.core.pendingPush(handle, limit);
+    const result = this.core.pendingPush(handle, limit, (id) => this.inFlight.has(String(id) + ':' + handle));
     for (const message of result.messages) {
       this.enqueueNotification(message.sender, {
         kind: 'queued_delivered',
@@ -928,6 +930,16 @@ export class Broker {
       this.markSent(messageId, threadId, recipient);
       return;
     }
+    const key = String(messageId) + ':' + recipient;
+    this.inFlight.add(key);
+    try {
+      await this.pushVia(messageId, threadId, recipient, text);
+    } finally {
+      this.inFlight.delete(key);
+    }
+  }
+
+  private async pushVia(messageId: number, threadId: number, recipient: string, text: string): Promise<void> {
     const session = this.liveSessionOf(recipient);
     const transcript = session?.transcriptPath ?? null;
     const offset = transcript === null ? 0 : ProofWatcher.offsetOf(transcript);
@@ -1147,7 +1159,7 @@ export class Broker {
     const ask = this.store.latestAsk(threadId);
     for (const row of this.store.threadMessages(threadId, null)) {
       const delivery = this.store.getDeliveries(row.id).find((d) => d.recipient === handle);
-      if (((ask !== null && row.inReplyTo === ask.id) || held?.has(row.id) === true) && delivery?.state === 'queued') {
+      if (((ask !== null && row.inReplyTo === ask.id) || held?.has(row.id) === true) && delivery?.state === 'queued' && !this.inFlight.has(String(row.id) + ':' + delivery.recipient)) {
         this.markDeliveredHop(row.id, delivery.recipient);
         replies.push({ id: row.id, seq: row.seq, sender: row.sender, verdict: row.verdict as Verdict | null, body: row.deliveredBody });
       }

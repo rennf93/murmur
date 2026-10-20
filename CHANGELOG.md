@@ -19,7 +19,7 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 
 ### Fixed
 
-- A reply held back for an open `murmur_wait` is now only one the wait hands over (a reply to the thread's latest ask); a reply to an older ask, or to a reply, is pushed as usual instead of staying queued with no path to its recipient. A wait remembers the replies held for it and hands them all over even if the thread's latest ask changed meanwhile. Replies held for a wait whose connection closes before it resolves are pushed at once.
+- A reply held back for an open `murmur_wait` is now only one the wait hands over (a reply to the thread's latest ask); a reply to an older ask, or to a reply, is pushed as usual instead of staying queued with no path to its recipient. A wait remembers the replies held for it and hands them all over even if the thread's latest ask changed meanwhile. Replies held for a wait whose connection closes before it resolves are pushed at once. A delivery whose push is already in flight is never handed over a second time by a new wait or the hook pull.
 - The live rig (`scripts/live/lib.mjs`) sets `MURMUR_AUTOSTART=0`, so a hook that outlives cleanup cannot respawn a broker and none survives a live run.
 
 ### Added

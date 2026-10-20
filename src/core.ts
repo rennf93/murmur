@@ -950,11 +950,14 @@ export class MurmurCore {
 
   // The hook injection pull: queued push-mode messages, newest first,
   // marked delivered as they are handed out, each with its rendered text.
-  pendingPush(handle: string, limit: number): FetchPushResult {
+  pendingPush(handle: string, limit: number, skip: (messageId: number) => boolean = () => false): FetchPushResult {
     const ts = this.nowMs();
     const messages: MessageFull[] = [];
     const texts: string[] = [];
     for (const { message: row } of this.store.pendingPushFor(handle, limit)) {
+      if (skip(row.id)) {
+        continue;
+      }
       this.store.markDelivered(row.id, handle, ts);
       this.events.onStateChange({ threadId: row.threadId, recipient: handle, from: 'queued', to: 'delivered' });
       const message = fullOf(row);
