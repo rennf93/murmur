@@ -1679,7 +1679,7 @@
 </tbody>
 </table>
 <p><code>sent</code> is never reported as <code>delivered</code>. A hook pull only takes <code>queued</code> messages, because a <code>sent</code> one already went through a transport and pulling it again would put it in the session's context twice.</p>
-<p>A queued message that reaches <code>delivered</code> sends its sender a <code>queued_delivered</code> note. A session that ends with messages still unconsumed triggers a <code>peer_offline</code> note to their senders.</p>
+<p>A queued message that reaches <code>delivered</code> sends its sender a <code>queued_delivered</code> note, except a reply held for the asker's open <code>murmur_wait</code>: the wait result is its delivery, and the replier is not woken for it. A session that ends with messages still unconsumed triggers a <code>peer_offline</code> note to their senders.</p>
 <p>Presence in <code>murmur status</code>: <code>busy</code> or <code>idle</code> from the last lifecycle event of a running session, <code>online</code> for a running session or live connection with no event yet, then <code>presumed-offline</code> (seen in the last 5 minutes) or <code>offline</code>.</p>
 <h2 id="delivery-modes">Delivery modes<a class="headerlink" href="#delivery-modes" title="Permanent link">&para;</a></h2>
 <table>
