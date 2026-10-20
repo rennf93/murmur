@@ -1393,6 +1393,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#fixed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#security" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1432,7 +1443,7 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#fixed" class="md-nav__link">
+  <a href="#fixed_1" class="md-nav__link">
     <span class="md-ellipsis">
       
         Fixed
@@ -1471,7 +1482,7 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#fixed_1" class="md-nav__link">
+  <a href="#fixed_2" class="md-nav__link">
     <span class="md-ellipsis">
       
         Fixed
@@ -1521,7 +1532,7 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#fixed_2" class="md-nav__link">
+  <a href="#fixed_3" class="md-nav__link">
     <span class="md-ellipsis">
       
         Fixed
@@ -1711,6 +1722,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#fixed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#security" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1750,7 +1772,7 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#fixed" class="md-nav__link">
+  <a href="#fixed_1" class="md-nav__link">
     <span class="md-ellipsis">
       
         Fixed
@@ -1789,7 +1811,7 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#fixed_1" class="md-nav__link">
+  <a href="#fixed_2" class="md-nav__link">
     <span class="md-ellipsis">
       
         Fixed
@@ -1839,7 +1861,7 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#fixed_2" class="md-nav__link">
+  <a href="#fixed_3" class="md-nav__link">
     <span class="md-ellipsis">
       
         Fixed
@@ -1999,6 +2021,10 @@
 <li>Requires Node 22 or newer (<code>engines</code> was <code>&gt;=20</code>). Node 20 reached end of life on 2026-04-30, and vitest 5 needs Node 22.12 to run the tests, so CI now runs on Node 22 and 24 instead of 20 and 22.</li>
 <li>Dependencies: zod 4 (runtime), and for development TypeScript 7, <code>@types/node</code> 26, vitest and <code>@vitest/coverage-v8</code> 5 and <code>actions/setup-node</code> 7.1.0.</li>
 </ul>
+<h3 id="fixed">Fixed<a class="headerlink" href="#fixed" title="Permanent link">&para;</a></h3>
+<ul>
+<li>One reply that resolves two waits on the same thread answers each wait once. Before, handing over the first wait's replies re-entered the waiter check, which answered the second wait, and the outer loop then answered it again from its stale copy (<code>src/broker.ts</code> <code>checkWaiters</code>).</li>
+</ul>
 <h3 id="security">Security<a class="headerlink" href="#security" title="Permanent link">&para;</a></h3>
 <ul>
 <li>vitest 5 drops the vulnerable test-only dependencies <code>npm audit</code> reported (tinypool GHSA-5gmw-xhrv-c9v3 and GHSA-85c8-ppgw-ccpr, critical; vitest and <code>@vitest/mocker</code> GHSA-82fw-gwwq-j7x9, moderate). The published package was not affected: <code>npm audit --omit=dev</code> found nothing.</li>
@@ -2017,7 +2043,7 @@
 <li>The <code>/murmur</code> command file for Claude Code and zcode sets <code>disable-model-invocation: true</code>: it is the owner's command, and a model that invoked it through the Skill tool sent nothing. Re-run <code>murmur install claude</code> / <code>zcode</code> to get it.</li>
 <li><code>make bench-consult</code> counts a run as completed only when the Implementer's final answer holds both peers' verdicts and their answers really reached it, and reports API calls and ToolSearch calls per session. Result (haiku, 3 runs per setup, medians): plain native <code>SendMessage</code> completes 0 of 3 (268,272 tokens, 7 API calls), because its peers answer in plain text that never reaches the Implementer; native with the peers told to answer with <code>SendMessage</code> completes 3 of 3 (510,931 tokens, 13 API calls, 13.8 s); murmur completes 3 of 3 (362,879 tokens, 9 API calls, 10.1 s), 29 percent fewer tokens than the native setup that finishes.</li>
 </ul>
-<h3 id="fixed">Fixed<a class="headerlink" href="#fixed" title="Permanent link">&para;</a></h3>
+<h3 id="fixed_1">Fixed<a class="headerlink" href="#fixed_1" title="Permanent link">&para;</a></h3>
 <ul>
 <li>A reply held back for an open <code>murmur_wait</code> is now only one the wait hands over (a reply to the thread's latest ask); a reply to an older ask, or to a reply, is pushed as usual instead of staying queued with no path to its recipient. A wait remembers the replies held for it and hands them all over even if the thread's latest ask changed meanwhile. Replies held for a wait whose connection closes before it resolves are pushed at once. A delivery whose push is already in flight is never handed over a second time by a new wait or the hook pull.</li>
 <li>The live rig (<code>scripts/live/lib.mjs</code>) sets <code>MURMUR_AUTOSTART=0</code>, so a hook that outlives cleanup cannot respawn a broker and none survives a live run.</li>
@@ -2028,7 +2054,7 @@
 <li>Docs and repository files: README hero, demo and linked CLIs; a Diataxis docs navigation (getting started, using murmur, consult, design, concepts, reference); <code>CODE_OF_CONDUCT.md</code>, <code>SUPPORT.md</code>, <code>MAINTAINERS.md</code>, <code>CODEOWNERS</code>, issue forms, a pull request template, Dependabot, an OpenSSF Scorecard workflow, a docs CI workflow (markdownlint, typos, lychee) and SHA-pinned GitHub Actions.</li>
 </ul>
 <h2 id="022-2026-10-20"><a href="https://github.com/rennf93/murmur/releases/tag/v0.2.2">0.2.2</a> - 2026-10-20<a class="headerlink" href="#022-2026-10-20" title="Permanent link">&para;</a></h2>
-<h3 id="fixed_1">Fixed<a class="headerlink" href="#fixed_1" title="Permanent link">&para;</a></h3>
+<h3 id="fixed_2">Fixed<a class="headerlink" href="#fixed_2" title="Permanent link">&para;</a></h3>
 <ul>
 <li><code>/murmur</code> now reads as coming from the owner through the session it was typed in: the message tag is <code>from renn via &lt;session&gt;</code>, and replies are pushed into that session as well as to <code>renn</code>. Before, replies to an owner message went only to <code>renn</code>, which has no session, so the session the human typed in never saw them. From a plain terminal (no session among the ancestors) nothing changes.</li>
 <li>A rename now carries the whole session: every live broker connection bound to the old handle (the session's MCP server, an adapter) follows to the new one, so its presence and later sends use the new name. Pending delivery proof and batched notifications follow the rename too.</li>
@@ -2047,7 +2073,7 @@
 <li>Hummin's model-free <code>/murmur</code> passes its process as the ancestor, so its messages carry the session as <code>via</code>.</li>
 </ul>
 <h2 id="021-2026-10-20"><a href="https://github.com/rennf93/murmur/releases/tag/v0.2.1">0.2.1</a> - 2026-10-20<a class="headerlink" href="#021-2026-10-20" title="Permanent link">&para;</a></h2>
-<h3 id="fixed_2">Fixed<a class="headerlink" href="#fixed_2" title="Permanent link">&para;</a></h3>
+<h3 id="fixed_3">Fixed<a class="headerlink" href="#fixed_3" title="Permanent link">&para;</a></h3>
 <ul>
 <li><code>murmur mcp</code> exits when its client goes away. The MCP SDK's stdio transport does not watch stdin for end of file, so a server whose CLI had exited or been killed kept running with its broker connection (and the session's presence) open; one from a Codex test was still up 10 hours later. The server now also returns when stdin ends or closes.</li>
 <li>The MCP server reports the package version instead of a hard-coded <code>0.2.0</code>.</li>
