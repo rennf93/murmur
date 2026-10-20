@@ -48,7 +48,7 @@ One row per (message, recipient): `queued -> sent -> delivered -> acknowledged`,
 
 `sent` is never reported as `delivered`. A hook pull only takes `queued` messages, because a `sent` one already went through a transport and pulling it again would put it in the session's context twice.
 
-A queued message that reaches `delivered` sends its sender a `queued_delivered` note. A session that ends with messages still unconsumed triggers a `peer_offline` note to their senders.
+A queued message that reaches `delivered` sends its sender a `queued_delivered` note, except a reply held for the asker's open `murmur_wait`: the wait result is its delivery, and the replier is not woken for it. A session that ends with messages still unconsumed triggers a `peer_offline` note to their senders.
 
 Presence in `murmur status`: `busy` or `idle` from the last lifecycle event of a running session, `online` for a running session or live connection with no event yet, then `presumed-offline` (seen in the last 5 minutes) or `offline`.
 

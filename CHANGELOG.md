@@ -12,6 +12,7 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 ### Fixed
 
 - One reply that resolves two waits on the same thread answers each wait once. Before, handing over the first wait's replies re-entered the waiter check, which answered the second wait, and the outer loop then answered it again from its stale copy (`src/broker.ts` `checkWaiters`).
+- A reply held for the asker's open `murmur_wait` no longer sends the replier a `queued_delivered` note when the wait hands it over. The note reached the replier as a new turn (a live check woke the replying session a second time for it) although nothing had waited on a session that was down. A reply that was not held for the wait, for example one that stayed queued while the asker's session was closed, still sends the note when a later wait hands it over.
 
 ### Security
 
