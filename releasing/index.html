@@ -1486,7 +1486,7 @@
 <li>Update <code>version</code> in <code>package.json</code> and add a <code>## [x.y.z] - date</code> section to <code>CHANGELOG.md</code>.</li>
 <li>Merge to <code>master</code>, then tag and push: <code>git tag vx.y.z &amp;&amp; git push origin vx.y.z</code>.</li>
 <li>The workflow runs, in order:<ol>
-<li>The same checks as CI (build and <code>npm run coverage</code> on ubuntu and macOS, Node 20 and 22).</li>
+<li>The same checks as CI (build and <code>npm run coverage</code> on ubuntu and macOS, Node 22 and 24).</li>
 <li>A check that fails the run if <code>package.json</code> version differs from the tag.</li>
 <li>Build, then <code>npm pack --dry-run</code> to log the tarball contents.</li>
 <li><code>npm publish</code> of the packed tarball with <code>--provenance</code>, through npm trusted publishing (GitHub OIDC, no token).</li>
