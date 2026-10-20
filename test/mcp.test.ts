@@ -1,9 +1,10 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Broker } from '../src/broker.js';
 import { MurmurClient } from '../src/client.js';
@@ -226,7 +227,8 @@ describe('SDK conformance over InMemoryTransport', () => {
   it('completes initialize and lists exactly the 8 murmur tools with instructions', async () => {
     const stack = await buildStack();
     const { sdk } = await pair(stack);
-    expect(sdk.getServerVersion()).toMatchObject({ name: 'murmur', version: '0.2.0' });
+    const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
+    expect(sdk.getServerVersion()).toMatchObject({ name: 'murmur', version });
     expect(sdk.getInstructions()).toContain('murmur_reply');
     const listed = await sdk.listTools();
     expect(listed.tools.map((t) => t.name).sort()).toEqual([...TOOL_NAMES].sort());
@@ -376,17 +378,21 @@ describe('runMcpServer', () => {
   }
 
   // Starts the server (it parks on the broker connection by design) and
-  // returns once stdio is up; stop() fires the exit teardown.
-  async function launch(stack: Stack): Promise<{ stop: () => Promise<void> }> {
+  // returns once stdio is up; stop() fires the exit teardown, and stdin is
+  // the stream the server watches for its client going away.
+  async function launch(stack: Stack): Promise<{ stop: () => Promise<void>; stdin: PassThrough; running: Promise<void> }> {
     process.env.MURMUR_HOME = stack.home;
     const before = fakeStdio.started;
     let failure: unknown = null;
-    const running = runMcpServer().catch((err: unknown) => {
+    const stdin = new PassThrough();
+    const running = runMcpServer(stdin).catch((err: unknown) => {
       failure = err;
     });
     await settle(() => fakeStdio.started === before + 1, 'stdio transport started');
     expect(failure).toBeNull();
     return {
+      stdin,
+      running,
       stop: async () => {
         process.emit('exit', 0);
         await running;
@@ -485,5 +491,17 @@ describe('runMcpServer', () => {
     expect(stack.store.sessionByHost(9001, 'S1')?.handle).toBe('kept-name');
     await settle(async () => (await presenceOf(stack, 'kept-name')) === 'idle', 'kept-name bound after retry');
     await up.stop();
+  });
+
+  it('returns and takes the session offline when its client closes stdin', async () => {
+    const stack = await buildStack();
+    process.env.MURMUR_HANDLE = 'stdin-closes';
+    const up = await launch(stack);
+    expect(await presenceOf(stack, 'stdin-closes')).toBe('online');
+    // A CLI that exits or is killed closes the server's stdin.
+    up.stdin.resume();
+    up.stdin.end();
+    await up.running;
+    await settle(async () => (await presenceOf(stack, 'stdin-closes')) !== 'online', 'offline once stdin closed');
   });
 });

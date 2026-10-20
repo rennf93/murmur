@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Broker } from '../src/broker.js';
 import { MurmurClient } from '../src/client.js';
@@ -196,7 +197,7 @@ describe('runMcpServer fault tolerance', () => {
     const exitSpy = vi.spyOn(process, 'exit');
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
-      const up = runMcpServer();
+      const up = runMcpServer(new PassThrough());
       // The server registered and parked on the broker connection.
       const deadline = Date.now() + 5000;
       while (fakeStdio.started === 0 && Date.now() < deadline) {
