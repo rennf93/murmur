@@ -1,0 +1,858 @@
+{
+  "date": "2026-10-20",
+  "model": "haiku",
+  "claudeCodeVersion": "2.1.304 (Claude Code)",
+  "prompt": "Consult Peer A and Peer B: ask each of them to check whether HANDLE_RE in src/protocol.ts allows handles of up to 48 characters, and to answer AGREE or DISAGREE with the line they checked. Wait for both answers, then tell me the outcome in one line.",
+  "promptNativeTold": "Consult Peer A and Peer B: ask each of them to check whether HANDLE_RE in src/protocol.ts allows handles of up to 48 characters, and to send their answer back to you with SendMessage, AGREE or DISAGREE with the line they checked. Wait for both answers, then tell me the outcome in one line.",
+  "runs": [
+    {
+      "arm": "native",
+      "run": 1,
+      "timedOut": false,
+      "completed": false,
+      "toolSearchCalls": {
+        "impl": 0,
+        "a": 0,
+        "b": 0
+      },
+      "wallSeconds": 5.69,
+      "finalAnswer": "Both messages are sent, and I haven't received replies from Peer A or Peer B yet, so there's no outcome to report. I'll report it once both answers arrive.",
+      "implementerSendCalls": {
+        "SendMessage": 2
+      },
+      "implementerToolCounts": {
+        "ListAgents": 1,
+        "SendMessage": 2
+      },
+      "composedCount": 2,
+      "repliesReachedImplementer": [],
+      "copiesReceived": {
+        "a": 1,
+        "b": 1
+      },
+      "peerSawOtherPeerReply": {
+        "a": false,
+        "b": false
+      },
+      "peerSawOtherPeerReplyDb": null,
+      "deliveriesDb": null,
+      "tokens": {
+        "impl": {
+          "input_tokens": 6,
+          "cache_creation_input_tokens": 5794,
+          "cache_read_input_tokens": 108958,
+          "output_tokens": 569,
+          "total": 115327
+        },
+        "a": {
+          "input_tokens": 6,
+          "cache_creation_input_tokens": 4987,
+          "cache_read_input_tokens": 70978,
+          "output_tokens": 349,
+          "total": 76320
+        },
+        "b": {
+          "input_tokens": 6,
+          "cache_creation_input_tokens": 4991,
+          "cache_read_input_tokens": 70982,
+          "output_tokens": 368,
+          "total": 76347
+        },
+        "arm": {
+          "input_tokens": 18,
+          "cache_creation_input_tokens": 15772,
+          "cache_read_input_tokens": 250918,
+          "output_tokens": 1286,
+          "total": 267994
+        }
+      },
+      "apiCalls": {
+        "impl": 3,
+        "a": 2,
+        "b": 2,
+        "arm": 7
+      }
+    },
+    {
+      "arm": "native-told",
+      "run": 1,
+      "timedOut": false,
+      "completed": true,
+      "toolSearchCalls": {
+        "impl": 0,
+        "a": 1,
+        "b": 1
+      },
+      "wallSeconds": 15.044,
+      "finalAnswer": "Both peers agree: HANDLE_RE in src/protocol.ts line 15 is `/^[a-z0-9][a-z0-9-]{1,47}$/`, which allows handles up to 48 characters. I confirmed the line myself with grep.",
+      "implementerSendCalls": {
+        "SendMessage": 2
+      },
+      "implementerToolCounts": {
+        "ListAgents": 1,
+        "SendMessage": 2,
+        "Bash": 1
+      },
+      "composedCount": 2,
+      "repliesReachedImplementer": [
+        "Peer A",
+        "Peer B"
+      ],
+      "copiesReceived": {
+        "a": 1,
+        "b": 1
+      },
+      "peerSawOtherPeerReply": {
+        "a": false,
+        "b": false
+      },
+      "peerSawOtherPeerReplyDb": null,
+      "deliveriesDb": null,
+      "tokens": {
+        "impl": {
+          "input_tokens": 12,
+          "cache_creation_input_tokens": 6879,
+          "cache_read_input_tokens": 187688,
+          "output_tokens": 944,
+          "total": 195523
+        },
+        "a": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 7584,
+          "cache_read_input_tokens": 149445,
+          "output_tokens": 669,
+          "total": 157708
+        },
+        "b": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 7587,
+          "cache_read_input_tokens": 149464,
+          "output_tokens": 665,
+          "total": 157726
+        },
+        "arm": {
+          "input_tokens": 32,
+          "cache_creation_input_tokens": 22050,
+          "cache_read_input_tokens": 486597,
+          "output_tokens": 2278,
+          "total": 510957
+        }
+      },
+      "apiCalls": {
+        "impl": 5,
+        "a": 4,
+        "b": 4,
+        "arm": 13
+      }
+    },
+    {
+      "arm": "murmur",
+      "run": 1,
+      "timedOut": false,
+      "completed": true,
+      "toolSearchCalls": {
+        "impl": 0,
+        "a": 0,
+        "b": 0
+      },
+      "wallSeconds": 8.708,
+      "finalAnswer": "Both peers answered AGREE: HANDLE_RE at src/protocol.ts:15 (`/^[a-z0-9][a-z0-9-]{1,47}$/`) allows up to 48 characters, and both noted the minimum is 2.",
+      "implementerSendCalls": {
+        "mcp__murmur__murmur_send": 1
+      },
+      "implementerToolCounts": {
+        "mcp__murmur__murmur_send": 1
+      },
+      "composedCount": 1,
+      "repliesReachedImplementer": [],
+      "copiesReceived": {
+        "a": 1,
+        "b": 1
+      },
+      "peerSawOtherPeerReply": {
+        "a": false,
+        "b": false
+      },
+      "peerSawOtherPeerReplyDb": {
+        "a": false,
+        "b": false
+      },
+      "deliveriesDb": [
+        {
+          "id": 1,
+          "sender": "implementer",
+          "inReplyTo": null,
+          "to": [
+            {
+              "recipient": "peer-a",
+              "state": "replied"
+            },
+            {
+              "recipient": "peer-b",
+              "state": "replied"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "sender": "peer-b",
+          "inReplyTo": 1,
+          "to": [
+            {
+              "recipient": "implementer",
+              "state": "delivered"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "sender": "peer-a",
+          "inReplyTo": 1,
+          "to": [
+            {
+              "recipient": "implementer",
+              "state": "delivered"
+            }
+          ]
+        }
+      ],
+      "tokens": {
+        "impl": {
+          "input_tokens": 4,
+          "cache_creation_input_tokens": 5681,
+          "cache_read_input_tokens": 74379,
+          "output_tokens": 357,
+          "total": 80421
+        },
+        "a": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 5574,
+          "cache_read_input_tokens": 114616,
+          "output_tokens": 605,
+          "total": 120803
+        },
+        "b": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 5522,
+          "cache_read_input_tokens": 114591,
+          "output_tokens": 577,
+          "total": 120698
+        },
+        "arm": {
+          "input_tokens": 20,
+          "cache_creation_input_tokens": 16777,
+          "cache_read_input_tokens": 303586,
+          "output_tokens": 1539,
+          "total": 321922
+        }
+      },
+      "apiCalls": {
+        "impl": 2,
+        "a": 3,
+        "b": 3,
+        "arm": 8
+      }
+    },
+    {
+      "arm": "native",
+      "run": 2,
+      "timedOut": false,
+      "completed": false,
+      "toolSearchCalls": {
+        "impl": 1,
+        "a": 1,
+        "b": 0
+      },
+      "wallSeconds": 13.469,
+      "finalAnswer": "Peer A answered AGREE: HANDLE_RE allows 48-character handles (`src/protocol.ts:15`, `/^[a-z0-9][a-z0-9-]{1,47}$/`). Peer B hasn't replied yet, so the overall outcome is still pending.",
+      "implementerSendCalls": {
+        "SendMessage": 2
+      },
+      "implementerToolCounts": {
+        "ListAgents": 1,
+        "ToolSearch": 1,
+        "SendMessage": 2
+      },
+      "composedCount": 2,
+      "repliesReachedImplementer": [
+        "Peer A"
+      ],
+      "copiesReceived": {
+        "a": 1,
+        "b": 1
+      },
+      "peerSawOtherPeerReply": {
+        "a": false,
+        "b": false
+      },
+      "peerSawOtherPeerReplyDb": null,
+      "deliveriesDb": null,
+      "tokens": {
+        "impl": {
+          "input_tokens": 12,
+          "cache_creation_input_tokens": 8383,
+          "cache_read_input_tokens": 190560,
+          "output_tokens": 1035,
+          "total": 199990
+        },
+        "a": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 8256,
+          "cache_read_input_tokens": 150439,
+          "output_tokens": 1022,
+          "total": 159727
+        },
+        "b": {
+          "input_tokens": 6,
+          "cache_creation_input_tokens": 5011,
+          "cache_read_input_tokens": 70999,
+          "output_tokens": 433,
+          "total": 76449
+        },
+        "arm": {
+          "input_tokens": 28,
+          "cache_creation_input_tokens": 21650,
+          "cache_read_input_tokens": 411998,
+          "output_tokens": 2490,
+          "total": 436166
+        }
+      },
+      "apiCalls": {
+        "impl": 5,
+        "a": 4,
+        "b": 2,
+        "arm": 11
+      }
+    },
+    {
+      "arm": "native-told",
+      "run": 2,
+      "timedOut": false,
+      "completed": true,
+      "toolSearchCalls": {
+        "impl": 0,
+        "a": 1,
+        "b": 1
+      },
+      "wallSeconds": 13.84,
+      "finalAnswer": "Both peers AGREE that HANDLE_RE allows handles up to 48 characters. Line 15 of src/protocol.ts is `/^[a-z0-9][a-z0-9-]{1,47}$/`, which I confirmed with grep.",
+      "implementerSendCalls": {
+        "SendMessage": 2
+      },
+      "implementerToolCounts": {
+        "ListAgents": 1,
+        "SendMessage": 2,
+        "Bash": 1
+      },
+      "composedCount": 2,
+      "repliesReachedImplementer": [
+        "Peer A",
+        "Peer B"
+      ],
+      "copiesReceived": {
+        "a": 1,
+        "b": 1
+      },
+      "peerSawOtherPeerReply": {
+        "a": false,
+        "b": false
+      },
+      "peerSawOtherPeerReplyDb": null,
+      "deliveriesDb": null,
+      "tokens": {
+        "impl": {
+          "input_tokens": 12,
+          "cache_creation_input_tokens": 6959,
+          "cache_read_input_tokens": 187388,
+          "output_tokens": 928,
+          "total": 195287
+        },
+        "a": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 7632,
+          "cache_read_input_tokens": 149477,
+          "output_tokens": 722,
+          "total": 157841
+        },
+        "b": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 7632,
+          "cache_read_input_tokens": 149465,
+          "output_tokens": 696,
+          "total": 157803
+        },
+        "arm": {
+          "input_tokens": 32,
+          "cache_creation_input_tokens": 22223,
+          "cache_read_input_tokens": 486330,
+          "output_tokens": 2346,
+          "total": 510931
+        }
+      },
+      "apiCalls": {
+        "impl": 5,
+        "a": 4,
+        "b": 4,
+        "arm": 13
+      }
+    },
+    {
+      "arm": "murmur",
+      "run": 2,
+      "timedOut": false,
+      "completed": true,
+      "toolSearchCalls": {
+        "impl": 0,
+        "a": 0,
+        "b": 0
+      },
+      "wallSeconds": 10.106,
+      "finalAnswer": "Both peers AGREE: `HANDLE_RE` in `src/protocol.ts` line 15 is `/^[a-z0-9][a-z0-9-]{1,47}$/`, which allows handles of up to 48 characters.",
+      "implementerSendCalls": {
+        "mcp__murmur__murmur_send": 1
+      },
+      "implementerToolCounts": {
+        "mcp__murmur__murmur_status": 1,
+        "mcp__murmur__murmur_send": 1
+      },
+      "composedCount": 1,
+      "repliesReachedImplementer": [],
+      "copiesReceived": {
+        "a": 1,
+        "b": 1
+      },
+      "peerSawOtherPeerReply": {
+        "a": false,
+        "b": false
+      },
+      "peerSawOtherPeerReplyDb": {
+        "a": false,
+        "b": false
+      },
+      "deliveriesDb": [
+        {
+          "id": 1,
+          "sender": "implementer",
+          "inReplyTo": null,
+          "to": [
+            {
+              "recipient": "peer-a",
+              "state": "replied"
+            },
+            {
+              "recipient": "peer-b",
+              "state": "replied"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "sender": "peer-a",
+          "inReplyTo": 1,
+          "to": [
+            {
+              "recipient": "implementer",
+              "state": "delivered"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "sender": "peer-b",
+          "inReplyTo": 1,
+          "to": [
+            {
+              "recipient": "implementer",
+              "state": "delivered"
+            }
+          ]
+        }
+      ],
+      "tokens": {
+        "impl": {
+          "input_tokens": 6,
+          "cache_creation_input_tokens": 6170,
+          "cache_read_input_tokens": 114472,
+          "output_tokens": 461,
+          "total": 121109
+        },
+        "a": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 5582,
+          "cache_read_input_tokens": 114648,
+          "output_tokens": 617,
+          "total": 120855
+        },
+        "b": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 5613,
+          "cache_read_input_tokens": 114668,
+          "output_tokens": 626,
+          "total": 120915
+        },
+        "arm": {
+          "input_tokens": 22,
+          "cache_creation_input_tokens": 17365,
+          "cache_read_input_tokens": 343788,
+          "output_tokens": 1704,
+          "total": 362879
+        }
+      },
+      "apiCalls": {
+        "impl": 3,
+        "a": 3,
+        "b": 3,
+        "arm": 9
+      }
+    },
+    {
+      "arm": "native",
+      "run": 3,
+      "timedOut": false,
+      "completed": false,
+      "toolSearchCalls": {
+        "impl": 0,
+        "a": 0,
+        "b": 0
+      },
+      "wallSeconds": 5.017,
+      "finalAnswer": "I've sent the question to Peer A and Peer B, and both messages were delivered to their inboxes. Neither has replied yet, so I don't have an outcome to report. I'll give you the one-line result once both answers arrive.",
+      "implementerSendCalls": {
+        "SendMessage": 2
+      },
+      "implementerToolCounts": {
+        "ListAgents": 1,
+        "SendMessage": 2
+      },
+      "composedCount": 2,
+      "repliesReachedImplementer": [],
+      "copiesReceived": {
+        "a": 1,
+        "b": 1
+      },
+      "peerSawOtherPeerReply": {
+        "a": false,
+        "b": false
+      },
+      "peerSawOtherPeerReplyDb": null,
+      "deliveriesDb": null,
+      "tokens": {
+        "impl": {
+          "input_tokens": 6,
+          "cache_creation_input_tokens": 5814,
+          "cache_read_input_tokens": 109009,
+          "output_tokens": 555,
+          "total": 115384
+        },
+        "a": {
+          "input_tokens": 6,
+          "cache_creation_input_tokens": 4950,
+          "cache_read_input_tokens": 70972,
+          "output_tokens": 544,
+          "total": 76472
+        },
+        "b": {
+          "input_tokens": 6,
+          "cache_creation_input_tokens": 4994,
+          "cache_read_input_tokens": 70975,
+          "output_tokens": 441,
+          "total": 76416
+        },
+        "arm": {
+          "input_tokens": 18,
+          "cache_creation_input_tokens": 15758,
+          "cache_read_input_tokens": 250956,
+          "output_tokens": 1540,
+          "total": 268272
+        }
+      },
+      "apiCalls": {
+        "impl": 3,
+        "a": 2,
+        "b": 2,
+        "arm": 7
+      }
+    },
+    {
+      "arm": "native-told",
+      "run": 3,
+      "timedOut": false,
+      "completed": true,
+      "toolSearchCalls": {
+        "impl": 0,
+        "a": 1,
+        "b": 1
+      },
+      "wallSeconds": 11.386,
+      "finalAnswer": "Outcome: both peers AGREE that `HANDLE_RE` in src/protocol.ts line 15 (`/^[a-z0-9][a-z0-9-]{1,47}$/`) allows handles of up to 48 characters (2 to 48 total).",
+      "implementerSendCalls": {
+        "SendMessage": 2
+      },
+      "implementerToolCounts": {
+        "ListAgents": 1,
+        "SendMessage": 2
+      },
+      "composedCount": 2,
+      "repliesReachedImplementer": [
+        "Peer A",
+        "Peer B"
+      ],
+      "copiesReceived": {
+        "a": 1,
+        "b": 1
+      },
+      "peerSawOtherPeerReply": {
+        "a": false,
+        "b": false
+      },
+      "peerSawOtherPeerReplyDb": null,
+      "deliveriesDb": null,
+      "tokens": {
+        "impl": {
+          "input_tokens": 14,
+          "cache_creation_input_tokens": 6773,
+          "cache_read_input_tokens": 187516,
+          "output_tokens": 934,
+          "total": 195237
+        },
+        "a": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 7603,
+          "cache_read_input_tokens": 149464,
+          "output_tokens": 688,
+          "total": 157765
+        },
+        "b": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 7610,
+          "cache_read_input_tokens": 149488,
+          "output_tokens": 695,
+          "total": 157803
+        },
+        "arm": {
+          "input_tokens": 34,
+          "cache_creation_input_tokens": 21986,
+          "cache_read_input_tokens": 486468,
+          "output_tokens": 2317,
+          "total": 510805
+        }
+      },
+      "apiCalls": {
+        "impl": 5,
+        "a": 4,
+        "b": 4,
+        "arm": 13
+      }
+    },
+    {
+      "arm": "murmur",
+      "run": 3,
+      "timedOut": false,
+      "completed": true,
+      "toolSearchCalls": {
+        "impl": 0,
+        "a": 0,
+        "b": 0
+      },
+      "wallSeconds": 11.531,
+      "finalAnswer": "Both peers AGREE: HANDLE_RE at `src/protocol.ts:15` is `/^[a-z0-9][a-z0-9-]{1,47}$/`, so handles run from 2 to 48 characters (a one-character handle won't match).",
+      "implementerSendCalls": {
+        "mcp__murmur__murmur_send": 1
+      },
+      "implementerToolCounts": {
+        "mcp__murmur__murmur_status": 1,
+        "mcp__murmur__murmur_send": 1
+      },
+      "composedCount": 1,
+      "repliesReachedImplementer": [],
+      "copiesReceived": {
+        "a": 1,
+        "b": 1
+      },
+      "peerSawOtherPeerReply": {
+        "a": false,
+        "b": false
+      },
+      "peerSawOtherPeerReplyDb": {
+        "a": false,
+        "b": false
+      },
+      "deliveriesDb": [
+        {
+          "id": 1,
+          "sender": "implementer",
+          "inReplyTo": null,
+          "to": [
+            {
+              "recipient": "peer-a",
+              "state": "replied"
+            },
+            {
+              "recipient": "peer-b",
+              "state": "replied"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "sender": "peer-a",
+          "inReplyTo": 1,
+          "to": [
+            {
+              "recipient": "implementer",
+              "state": "delivered"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "sender": "peer-b",
+          "inReplyTo": 1,
+          "to": [
+            {
+              "recipient": "implementer",
+              "state": "delivered"
+            }
+          ]
+        }
+      ],
+      "tokens": {
+        "impl": {
+          "input_tokens": 6,
+          "cache_creation_input_tokens": 6316,
+          "cache_read_input_tokens": 114474,
+          "output_tokens": 494,
+          "total": 121290
+        },
+        "a": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 5752,
+          "cache_read_input_tokens": 114685,
+          "output_tokens": 727,
+          "total": 121172
+        },
+        "b": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 6473,
+          "cache_read_input_tokens": 155652,
+          "output_tokens": 974,
+          "total": 163109
+        },
+        "arm": {
+          "input_tokens": 24,
+          "cache_creation_input_tokens": 18541,
+          "cache_read_input_tokens": 384811,
+          "output_tokens": 2195,
+          "total": 405571
+        }
+      },
+      "apiCalls": {
+        "impl": 3,
+        "a": 3,
+        "b": 4,
+        "arm": 10
+      }
+    }
+  ],
+  "arms": {
+    "native": {
+      "medians": {
+        "composedCount": 2,
+        "copiesPeerA": 1,
+        "copiesPeerB": 1,
+        "wallSeconds": 5.69,
+        "tokens": {
+          "input_tokens": 18,
+          "cache_creation_input_tokens": 15772,
+          "cache_read_input_tokens": 250956,
+          "output_tokens": 1540,
+          "total": 268272
+        },
+        "implementerTotal": 115384,
+        "perSessionTokens": {
+          "impl": 115384,
+          "a": 76472,
+          "b": 76416
+        },
+        "perSessionApiCalls": {
+          "impl": 3,
+          "a": 2,
+          "b": 2
+        },
+        "toolSearch": {
+          "impl": 0,
+          "a": 0,
+          "b": 0
+        },
+        "completed": 0,
+        "apiCalls": 7
+      }
+    },
+    "native-told": {
+      "medians": {
+        "composedCount": 2,
+        "copiesPeerA": 1,
+        "copiesPeerB": 1,
+        "wallSeconds": 13.84,
+        "tokens": {
+          "input_tokens": 32,
+          "cache_creation_input_tokens": 22050,
+          "cache_read_input_tokens": 486468,
+          "output_tokens": 2317,
+          "total": 510931
+        },
+        "implementerTotal": 195287,
+        "perSessionTokens": {
+          "impl": 195287,
+          "a": 157765,
+          "b": 157803
+        },
+        "perSessionApiCalls": {
+          "impl": 5,
+          "a": 4,
+          "b": 4
+        },
+        "toolSearch": {
+          "impl": 0,
+          "a": 1,
+          "b": 1
+        },
+        "completed": 3,
+        "apiCalls": 13
+      }
+    },
+    "murmur": {
+      "medians": {
+        "composedCount": 1,
+        "copiesPeerA": 1,
+        "copiesPeerB": 1,
+        "wallSeconds": 10.106,
+        "tokens": {
+          "input_tokens": 22,
+          "cache_creation_input_tokens": 17365,
+          "cache_read_input_tokens": 343788,
+          "output_tokens": 1704,
+          "total": 362879
+        },
+        "implementerTotal": 121109,
+        "perSessionTokens": {
+          "impl": 121109,
+          "a": 120855,
+          "b": 120915
+        },
+        "perSessionApiCalls": {
+          "impl": 3,
+          "a": 3,
+          "b": 3
+        },
+        "toolSearch": {
+          "impl": 0,
+          "a": 0,
+          "b": 0
+        },
+        "completed": 3,
+        "apiCalls": 9
+      }
+    }
+  }
+}
