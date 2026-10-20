@@ -8,8 +8,14 @@ Requires Node 20 or newer.
 
 ```
 npm install
-npm run build            # emits dist/cli.js, the murmur bin entry
-npm link                 # optional: puts murmur on PATH
+npm run build            # emits dist/; the package bin is bin/murmur.js, a small
+                         # wrapper with a shebang that calls runCli explicitly,
+                         # because node resolves argv[1] through the npm-link
+                         # symlink while import.meta.url keeps the real path,
+                         # which defeats an in-module entry guard
+npm link                 # required: puts murmur on PATH; the mcp config, the
+                         # hooks and the /murmur command all invoke plain
+                         # 'murmur' from PATH
 murmur init              # create the murmur home and the owner peer
 murmur serve             # start the broker; prints the socket path
 murmur install claude    # or: murmur install zcode | hummin
@@ -21,10 +27,33 @@ murmur install claude    # or: murmur install zcode | hummin
   - `~/.claude/commands/murmur.md`, the `/murmur` slash command,
   - `mcpServers.murmur` in `~/.claude.json` (launches `murmur mcp`),
   - hooks in `~/.claude/settings.json`: SessionStart runs `murmur hook session-start`, UserPromptSubmit runs `murmur hook prompt`, Stop runs `murmur hook stop`.
-- `murmur install zcode` writes `~/.zcode/skills/murmur/SKILL.md`, a CLI-first skill for sending and polling.
+- `murmur install zcode` writes `~/.zcode/skills/murmur/SKILL.md`, a CLI-first skill for sending and polling. MCP is the identity-correct path where the client supports MCP servers; the CLI skill with `--as` is the fallback.
 - `murmur install hummin` writes nothing; it prints the three `murmur hook` commands to wire by hand.
 
 Per-session handle: edit the `MURMUR_HANDLE` value that `murmur install claude` writes into `mcpServers.murmur` in `~/.claude.json` (placeholder `CHANGE-ME-per-session`) so every session carries its own handle on the bus. Fallbacks when it is unset: the MCP server registers as `anon-<pid>`; hooks resolve `claude-` plus the first 8 characters of the session id, or `claude-unknown` when no session id is available.
+
+## Quickstart
+
+One terminal, straight after `murmur init`, real transcript:
+
+```
+$ murmur status
+renn offline unread 0
+$ murmur groups create smoke-test
+smoke-test:
+$ murmur groups add smoke-test renn
+smoke-test: renn
+$ murmur send @smoke-test first message on the bus
+renn: queued
+message 1 thread 1 seq 0
+$ murmur thread 1
+0 renn first message on the bus
+$ murmur groups delete smoke-test
+```
+
+`murmur groups delete` tidies the group and keeps threads and history. The delivery prints `queued` because there is no live connection and no native transport for that recipient yet; it becomes `delivered` on the next hook pull or read.
+
+Two sessions: in terminal A run `murmur send <peer-handle> question`. The peer's session receives it via its native socket or at its next prompt hook. The peer replies from its session (the `murmur_reply` tool) or from a shell (`murmur send --as <handle> --thread <id> <targets> <body>`). The sender catches up with `murmur thread <id>` and `murmur_collect`.
 
 ## Delivery truth table
 
@@ -34,7 +63,7 @@ The table assumes the default `push` mode. `notify` stores the message and emits
 | --- | --- | --- | --- | --- |
 | Claude peer with native transport | The message text (cut at 4000 chars with a truncation notice when the stored body is longer) plus a reply footer, written to the session's own messaging socket under `/tmp/cc-socks/<pid>.sock`, registered at session-start from `CLAUDE_CODE_MESSAGING_SOCKET` and `CLAUDE_CODE_MESSAGING_TOKEN` | Immediately, mid-session: the running Claude Code session receives it over its native messaging socket | `queued`, then `sent`, then `delivered` in one step at send time; `sentAt` and `deliveredAt` both stamped | The footer names it: `murmur_reply in_reply_to <message id>` (MCP tool, optionally with a verdict), then `murmur_thread <thread id>` to read the full thread |
 | Claude peer without native transport | A push event over the session's live broker connection (the MCP facade's long-lived connection) when one exists; the body itself stays in the store. With no live connection at send time, nothing leaves the broker | The facade forwards no events on its own. At the next user prompt the UserPromptSubmit hook drains up to 10 pending messages into `additionalContext`; or on demand via `murmur_inbox` / `murmur_read` | `sent` if a live connection took the push event, otherwise `queued`; `delivered` once the hook pull or `murmur_read` hands it over | The rendered header says `reply with murmur_reply in_reply_to <id>`; same alternatives as the row above |
-| zcode or hummin peer | Nothing is pushed; the message waits in the store as a queued delivery. Batched notifications find no live connection and no native transport and are dropped; the data stays in the database | zcode: at its next turn start, by polling as the installed skill instructs, `murmur thread <id> --since <last seq seen>`. hummin: at the next prompt if the operator wired `murmur hook prompt` by hand; the hook drains up to 10 pending messages | `queued`. It becomes `delivered` only through a hook pull (hummin) or `murmur_read`; a plain CLI `murmur thread` read leaves the delivery state untouched | `murmur send --thread <id> <sender> <body>`, the form the zcode skill documents |
+| zcode or hummin peer | Nothing is pushed; the message waits in the store as a queued delivery. Batched notifications find no live connection and no native transport and are dropped; the data stays in the database | zcode: at its next turn start, by polling as the installed skill instructs, `murmur thread <id> --since <last seq seen>`. hummin: at the next prompt if the operator wired `murmur hook prompt` by hand; the hook drains up to 10 pending messages | `queued`. It becomes `delivered` only through a hook pull (hummin) or `murmur_read`; a plain CLI `murmur thread` read leaves the delivery state untouched | `murmur send --as <handle> --thread <id> <targets> <body>`, the form the zcode skill documents; CLI replies without `--as` attribute to the owner handle |
 | Offline peer | Nothing at send time; the delivery row is born queued. A failed native push (error reply, write failure, 5s timeout, vanished transport row) is skipped silently and also stays queued | On its next pull after returning: prompt hook fetch, `murmur_read`, or `murmur_inbox`. The sender can `murmur_wait` on the thread and receives `peer_offline` when the peer drops with the message unconsumed, and `queued_delivered` when the queued message is finally handed out | `queued` until read or fetch, then `delivered` | Same reply paths, once the peer is back |
 
 ## Group and thread model
@@ -56,8 +85,8 @@ The table assumes the default `push` mode. `notify` stores the message and emits
 
 ## The human surface
 
-- **`murmur send` (positional form).** `murmur send <targets> <body...> [--mode <mode>] [--refs <a,b>] [--thread <id>]`. Targets are a comma separated list of handles and `@groups`. The human's CLI sends always go out as the owner handle `renn`, display `renn (owner)`. Output is one `recipient: state` line per delivery, then a final `message <id> thread <t> seq <s>` line. Other read-side commands: `murmur status`, `murmur thread <id> [--since <n>] [--full]`, and `murmur groups list|create|add|remove|delete`.
-- **The `/murmur` slash command.** `murmur install claude` writes `~/.claude/commands/murmur.md` with frontmatter (`Send a message on the murmur bus`), a pre-exec line `!murmur send $ARGUMENTS`, and a fallback block. The bang-mode caveat: the exclamation line is a Claude Code command-file feature, where a `!`-prefixed line in a command markdown file is pre-executed as a shell command when the command runs; it is a distinct mechanism from typing `!command` directly in the input box (interactive bash mode). The file itself carries a comment that the pre-exec form must be verified against the installed Claude version, and its fallback block covers versions where pre-exec does not run: it instructs the model to run `murmur send $ARGUMENTS` through the Bash tool instead, then report the printed per-recipient delivery states and the final message, thread, and seq line.
+- **`murmur send` (positional form).** `murmur send <targets> <body...> [--as <handle>] [--mode <mode>] [--refs <a,b>] [--thread <id>]`. Targets are a comma separated list of handles and `@groups`. Default identity is the owner handle `renn`, display `renn (owner)`. `--as <handle>` registers and sends as that handle instead, with no display name; it exists for scripted agents replying on their own identity, while humans keep the default owner identity. An invalid `--as` handle is rejected with `invalid handle: <handle>` and exit code 1. Output is one `recipient: state` line per delivery, then a final `message <id> thread <t> seq <s>` line. Other read-side commands: `murmur status`, `murmur thread <id> [--since <n>] [--full]`, and `murmur groups list|create|add|remove|delete`.
+- **The `/murmur` slash command.** `murmur install claude` writes `~/.claude/commands/murmur.md` with frontmatter (`description: Send to a murmur group or peer; with no arguments it lists peers, groups and usage` and `argument-hint: <@group | handle> <message>`, so the autocomplete hint spells out the `/murmur <@group | handle> <message>` syntax), a pre-exec line `!murmur slash $ARGUMENTS`, and a fallback block. Discovery is built into the command: bare `/murmur` (or `murmur slash` in a terminal) prints one usage line, `/murmur <@group | handle[,more]> <message>   (run bare like this for peers and groups)`, then `peers:` with the exact lines `murmur status` prints, then `groups:` with the exact lines `murmur groups list` prints, so the active groups and peers are visible from the command itself. `murmur slash status` and `murmur slash groups` delegate to those views; any other arguments behave exactly like `murmur send` with the same parsing, flags and output. The bang-mode caveat: the exclamation line is a Claude Code command-file feature, where a `!`-prefixed line in a command markdown file is pre-executed as a shell command when the command runs; it is a distinct mechanism from typing `!command` directly in the input box (interactive bash mode). The file itself carries a comment that the pre-exec form must be verified against the installed Claude version, and its fallback block covers versions where pre-exec does not run: it instructs the model to run `murmur slash $ARGUMENTS` through the Bash tool instead, then report the printed lines verbatim (the per-recipient delivery states and the final message, thread, and seq line when sending; the usage, peers and groups listing when no arguments were given).
 
 ## Doctrine
 
@@ -81,6 +110,13 @@ The bus exists to remove two costs and to never touch a third thing. The two cos
 - **Token file.** One shared random 256-bit token lives at `<home>/token`, mode 0600, inside a home directory pinned to 0700. The first line on any connection must be `auth` with that token; anything else draws `auth_required` and a disconnect.
 - **Same-user boundary.** A 0700 home, a 0600 socket, and a 0600 token mean only processes running as the same OS user can connect or learn the token. That is the entire trust boundary, and it is deliberate: murmur carries context between an operator's own sessions, not between strangers.
 - **Messages never approve anything.** Deliveries are injected context for a session to read, never permission decisions; hooks exit 0 on every failure path and can never fail or block a session.
+
+## Verification
+
+- `make test` runs the full suite (285 tests).
+- `make coverage` runs the suite under the coverage gate: it enforces 100 percent on statements, branches, functions and lines, and it must never be weakened.
+- `make verify` runs the end-to-end rig with real headless claude sessions; `node scripts/e2e.mjs --fake-peers` exits 3 as its honest degraded-mode pass signal (real mode exits 0).
+- The repo lives at `/Users/renzof/Documents/GitHub/ZZZ/murmur` and requires Node 20 or newer.
 
 ## Troubleshooting
 

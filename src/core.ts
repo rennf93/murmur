@@ -51,7 +51,7 @@ export interface PushTarget {
   footer: string;
 }
 
-const HANDLE_RE = /^[a-z0-9][a-z0-9-]{1,31}$/;
+export const HANDLE_RE = /^[a-z0-9][a-z0-9-]{1,31}$/;
 const GROUP_NAME_RE = /^@?[a-z0-9][a-z0-9-]{1,31}$/;
 const VERDICTS: readonly string[] = ['agree', 'disagree', 'info'];
 const UNREAD_STATES: string[] = ['queued', 'sent', 'delivered'];

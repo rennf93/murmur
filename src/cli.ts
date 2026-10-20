@@ -3,7 +3,7 @@ import { pathToFileURL } from 'node:url';
 import { Broker } from './broker.js';
 import { MurmurClient, isBrokerDown } from './client.js';
 import { ensureHome, getPaths, readToken } from './config.js';
-import { MurmurCore } from './core.js';
+import { HANDLE_RE, MurmurCore } from './core.js';
 import type { CoreEvents } from './core.js';
 import { runHook } from './hooks.js';
 import { installClient } from './install.js';
@@ -40,10 +40,11 @@ const OWNER_HANDLE = 'renn';
 const OWNER_DISPLAY = 'renn (owner)';
 
 const SEND_USAGE =
-  'usage: murmur send <targets> <body...> [--mode <mode>] [--refs <a,b>] [--thread <id>]';
+  'usage: murmur send <targets> <body...> [--as <handle>] [--mode <mode>] [--refs <a,b>] [--thread <id>]';
 const THREAD_USAGE = 'usage: murmur thread <id> [--since <n>] [--full]';
 const GROUPS_USAGE =
   'usage: murmur groups [list] | groups create <name> | groups add <name> <members...> | groups remove <name> <members...> | groups delete <name>';
+const SLASH_USAGE = '/murmur <@group | handle[,more]> <message>   (run bare like this for peers and groups)';
 
 export async function runCli(argv: string[], io?: CliIo): Promise<number> {
   // The default io is captured at call time and touches only the real
@@ -87,6 +88,8 @@ async function dispatch(argv: string[], out: Sink, err: Sink): Promise<number> {
       return cmdHook(argv.slice(1), out, err);
     case 'send':
       return cmdSend(argv.slice(1), out, err);
+    case 'slash':
+      return cmdSlash(argv.slice(1), out, err);
     case 'status':
       return cmdStatus(out);
     case 'thread':
@@ -111,7 +114,8 @@ function printUsage(err: Sink): void {
     '  serve [--daemon]         start the broker and print the socket path',
     '  mcp                      serve the murmur MCP server over stdio',
     '  hook <event>             run one client hook (session-start, prompt, stop)',
-    '  send <targets> <body...> send a message; flags: --mode, --refs, --thread',
+    '  send <targets> <body...> send a message; flags: --as, --mode, --refs, --thread',
+    '  slash [args...]          the /murmur backing: bare prints usage, peers and groups',
     '  status                   list peers with presence and unread counts',
     '  thread <id> [--since <n>] [--full]',
     '  groups [list] | groups create <name> | groups add <name> <members...>',
@@ -214,6 +218,7 @@ function readAllStdin(): Promise<string> {
 }
 
 async function cmdSend(args: string[], out: Sink, err: Sink): Promise<number> {
+  let asHandle: string | null = null;
   let mode: DeliveryMode | undefined;
   let refs: string[] | undefined;
   let threadId: number | null = null;
@@ -224,14 +229,16 @@ async function cmdSend(args: string[], out: Sink, err: Sink): Promise<number> {
     if (arg === undefined) {
       break;
     }
-    if (arg === '--mode' || arg === '--refs' || arg === '--thread') {
+    if (arg === '--as' || arg === '--mode' || arg === '--refs' || arg === '--thread') {
       const value = args[i + 1];
       if (value === undefined) {
         err('murmur send: flag ' + arg + ' needs a value\n' + SEND_USAGE + '\n');
         return 1;
       }
       i += 1;
-      if (arg === '--mode') {
+      if (arg === '--as') {
+        asHandle = value;
+      } else if (arg === '--mode') {
         // The broker validates the mode value against the wire enum.
         mode = value as DeliveryMode;
       } else if (arg === '--refs') {
@@ -255,6 +262,12 @@ async function cmdSend(args: string[], out: Sink, err: Sink): Promise<number> {
   if (!flagsOk) {
     return 1;
   }
+  if (asHandle !== null && !HANDLE_RE.test(asHandle)) {
+    // Rejected locally with the same message the broker's register
+    // validation would produce, before any connection is made.
+    err('invalid handle: ' + asHandle + '\n');
+    return 1;
+  }
   const targetsArg = positionals[0];
   if (targetsArg === undefined) {
     err('murmur send: missing targets\n' + SEND_USAGE + '\n');
@@ -271,12 +284,13 @@ async function cmdSend(args: string[], out: Sink, err: Sink): Promise<number> {
     .filter((entry) => entry.length > 0);
   const client = await connectCli();
   try {
-    const reg: Omit<RegisterMessage, 'v' | 'id'> = {
-      type: 'register',
-      handle: OWNER_HANDLE,
-      display: OWNER_DISPLAY,
-      clientKind: 'cli',
-    };
+    // Default identity is the owner. With --as the session registers under
+    // its own handle with no display name, so its replies never speak as the
+    // owner.
+    const reg: Omit<RegisterMessage, 'v' | 'id'> =
+      asHandle === null
+        ? { type: 'register', handle: OWNER_HANDLE, display: OWNER_DISPLAY, clientKind: 'cli' }
+        : { type: 'register', handle: asHandle, clientKind: 'cli' };
     await client.request<RegisterResult>(reg);
     const msg: Omit<SendMessage, 'v' | 'id'> = { type: 'send', threadId, to, body };
     if (mode !== undefined) {
@@ -306,21 +320,30 @@ async function connectCli(): Promise<MurmurClient> {
   return MurmurClient.connect({ socketPath: paths.socketPath, token });
 }
 
-async function cmdStatus(out: Sink): Promise<number> {
+// One formatted line per peer, exactly as the status view prints them. The
+// slash discovery view reuses these so the two can never drift apart.
+async function statusLines(): Promise<string[]> {
   const client = await connectCli();
   try {
     const result = await client.request<StatusResult>({ type: 'status' });
-    for (const peer of result.peers) {
+    return result.peers.map((peer) => {
       let line = peer.handle + ' ' + peer.presence + ' unread ' + String(peer.unread);
       if (peer.display !== null) {
         line += ' ' + peer.display;
       }
-      out(line + '\n');
-    }
-    return 0;
+      return line;
+    });
   } finally {
     client.close();
   }
+}
+
+async function cmdStatus(out: Sink): Promise<number> {
+  const lines = await statusLines();
+  for (const line of lines) {
+    out(line + '\n');
+  }
+  return 0;
 }
 
 async function cmdThread(args: string[], out: Sink, err: Sink): Promise<number> {
@@ -377,6 +400,28 @@ async function cmdThread(args: string[], out: Sink, err: Sink): Promise<number> 
   }
 }
 
+// Runs one groups action and returns one formatted line per group, exactly as
+// the groups view prints them; the slash discovery view reuses the list form.
+async function groupsLines(action: GroupAction, name?: string, members?: string[]): Promise<string[]> {
+  const client = await connectCli();
+  try {
+    const msg: Omit<GroupsMessage, 'v' | 'id'> = { type: 'groups', action };
+    if (name !== undefined) {
+      msg.name = name;
+    }
+    if (members !== undefined) {
+      msg.members = members;
+    }
+    const groups = await client.request<GroupsResult[]>(msg);
+    return groups.map((group) => {
+      const memberText = group.members.length > 0 ? ' ' + group.members.join(', ') : '';
+      return group.name + ':' + memberText;
+    });
+  } finally {
+    client.close();
+  }
+}
+
 async function cmdGroups(args: string[], out: Sink, err: Sink): Promise<number> {
   const sub = args[0];
   let action: GroupAction = 'list';
@@ -406,24 +451,40 @@ async function cmdGroups(args: string[], out: Sink, err: Sink): Promise<number> 
     err('murmur groups: unknown action: ' + sub + '\n' + GROUPS_USAGE + '\n');
     return 1;
   }
-  const client = await connectCli();
-  try {
-    const msg: Omit<GroupsMessage, 'v' | 'id'> = { type: 'groups', action };
-    if (name !== undefined) {
-      msg.name = name;
-    }
-    if (members !== undefined) {
-      msg.members = members;
-    }
-    const groups = await client.request<GroupsResult[]>(msg);
-    for (const group of groups) {
-      const memberText = group.members.length > 0 ? ' ' + group.members.join(', ') : '';
-      out(group.name + ':' + memberText + '\n');
-    }
-    return 0;
-  } finally {
-    client.close();
+  const lines = await groupsLines(action, name, members);
+  for (const line of lines) {
+    out(line + '\n');
   }
+  return 0;
+}
+
+// The backing of the /murmur command. Bare, it is the discovery surface: the
+// usage line, then the peers exactly as status prints them, then the groups
+// exactly as the groups list prints them. 'status' and 'groups' delegate to
+// those views; anything else is a plain send with the same parsing.
+async function cmdSlash(args: string[], out: Sink, err: Sink): Promise<number> {
+  const sub = args[0];
+  if (sub === 'status') {
+    return cmdStatus(out);
+  }
+  if (sub === 'groups') {
+    return cmdGroups(args.slice(1), out, err);
+  }
+  if (sub !== undefined) {
+    return cmdSend(args, out, err);
+  }
+  const peers = await statusLines();
+  const groups = await groupsLines('list');
+  out(SLASH_USAGE + '\n');
+  out('\npeers:\n');
+  for (const line of peers) {
+    out(line + '\n');
+  }
+  out('\ngroups:\n');
+  for (const line of groups) {
+    out(line + '\n');
+  }
+  return 0;
 }
 
 function isInstallClient(value: string): value is 'claude' | 'zcode' | 'hummin' {

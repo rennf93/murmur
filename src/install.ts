@@ -10,21 +10,26 @@ import { dirname, join } from 'node:path';
 const BACKUP_SUFFIX = '.bak-murmur';
 
 const CLAUDE_COMMANDS_MD = `---
-description: Send a message on the murmur bus
+description: Send to a murmur group or peer; with no arguments it lists peers, groups and usage
+argument-hint: <@group | handle> <message>
 ---
 
-!murmur send $ARGUMENTS
+!murmur slash $ARGUMENTS
 
-<!-- The bang (!) pre-exec form must be verified against the installed Claude
-version. The fallback block below covers versions where it does not run. -->
+<!-- The bang (!) pre-exec form is a command-file feature (a pre-executed shell
+line), distinct from typing !command in the input box, and it must be verified
+against the installed Claude version. The fallback block below covers versions
+where it does not run. -->
 
 Fallback when the pre-exec line above produced no output: use the Bash tool
 with exactly this command.
 
-    murmur send $ARGUMENTS
+    murmur slash $ARGUMENTS
 
-Then report the printed delivery states, one line per recipient, plus the
-final line with the message id, thread id and seq.
+Then report the printed lines verbatim: when a message was sent, the delivery
+states, one line per recipient, plus the final line with the message id,
+thread id and seq; when no arguments were given, the bus status as printed,
+the usage line, the peers and the groups.
 `;
 
 const ZCODE_SKILL_MD = `---
@@ -63,7 +68,7 @@ message id, thread id and seq.
 
 At the start of every turn, poll the threads this session participates in:
 run murmur thread <id> --since <last seq seen> and read any new lines before
-answering. Reply with murmur send --thread <id> <handle> <body>.
+answering. Reply with murmur send --as <your-handle> --thread <id> <targets> <body>.
 `;
 
 // The Claude hooks we install, one murmur command per settings event.

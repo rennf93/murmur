@@ -390,6 +390,33 @@ describe('send', () => {
     expect(cap.out).toEqual([]);
     expect(cap.err.join('')).toBe('unknown handle: nobody-here\n');
   });
+
+  it('registers and sends as another handle with --as', async () => {
+    // A dedicated recipient so the unread counts the status test pins stay
+    // untouched.
+    await connectPeer('probe-b');
+    const cap = capture();
+    const code = await runCli(['send', '--as', 'probe-a', 'probe-b', 'hello', 'from', 'probe'], cap.io);
+    expect(code).toBe(0);
+    expect(cap.err).toEqual([]);
+    const lines = cap.out.join('').split('\n').filter((l) => l.length > 0);
+    expect(lines[0]).toBe('probe-b: queued');
+    expect(lines[1]).toMatch(/^message \d+ thread \d+ seq 0$/);
+    const messageId = Number(/^message (\d+)/.exec(lines[1] ?? '')?.[1]);
+    // The register went out under probe-a: a fresh peer row with no display
+    // name, and the message row records probe-a as the sender.
+    expect(store.getPeer('probe-a')?.display).toBeNull();
+    expect(store.getPeer('probe-a')?.isOwner).toBe(false);
+    expect(store.messageById(messageId)?.sender).toBe('probe-a');
+  });
+
+  it('rejects an invalid --as handle with exit 1 before connecting', async () => {
+    const cap = capture();
+    expect(await runCli(['send', '--as', 'Bad_Handle', 'alice', 'hi'], cap.io)).toBe(1);
+    expect(cap.err.join('')).toBe('invalid handle: Bad_Handle\n');
+    expect(cap.out).toEqual([]);
+    expect(store.getPeer('Bad_Handle')).toBeNull();
+  });
 });
 
 describe('status', () => {
@@ -484,6 +511,92 @@ describe('groups', () => {
     const unknownGroup = capture();
     expect(await runCli(['groups', 'delete', 'nope'], unknownGroup.io)).toBe(1);
     expect(unknownGroup.err.join('')).toBe('unknown group: nope\n');
+  });
+});
+
+describe('slash', () => {
+  it('bare prints the usage line, then the status view, then the groups view', async () => {
+    const create = capture();
+    expect(await runCli(['groups', 'create', 'demo'], create.io)).toBe(0);
+    const add = capture();
+    expect(await runCli(['groups', 'add', 'demo', 'alice', 'bob'], add.io)).toBe(0);
+    // Both standalone views are captured right before the slash run, so the
+    // peer and group sections are checked against what those commands print.
+    const status = capture();
+    expect(await runCli(['status'], status.io)).toBe(0);
+    const groups = capture();
+    expect(await runCli(['groups'], groups.io)).toBe(0);
+    const peerLines = status.out.join('').split('\n').filter((l) => l.length > 0);
+    const groupLines = groups.out.join('').split('\n').filter((l) => l.length > 0);
+    expect(peerLines.length).toBeGreaterThanOrEqual(3);
+    expect(groupLines).toEqual(['demo: alice, bob']);
+    const cap = capture();
+    expect(await runCli(['slash'], cap.io)).toBe(0);
+    expect(cap.err).toEqual([]);
+    expect(cap.out.join('')).toBe(
+      [
+        '/murmur <@group | handle[,more]> <message>   (run bare like this for peers and groups)',
+        '',
+        'peers:',
+        ...peerLines,
+        '',
+        'groups:',
+        ...groupLines,
+      ].join('\n') + '\n',
+    );
+  });
+
+  it('delegates status and groups to the existing views', async () => {
+    const viaSlash = capture();
+    expect(await runCli(['slash', 'status'], viaSlash.io)).toBe(0);
+    const direct = capture();
+    expect(await runCli(['status'], direct.io)).toBe(0);
+    expect(viaSlash.err).toEqual([]);
+    expect(viaSlash.out.join('')).toBe(direct.out.join(''));
+    expect(viaSlash.out.join('')).toMatch(/^renn \S+ unread 0 renn \(owner\)$/m);
+    const groupsViaSlash = capture();
+    expect(await runCli(['slash', 'groups'], groupsViaSlash.io)).toBe(0);
+    expect(groupsViaSlash.out.join('')).toBe('demo: alice, bob\n');
+    const groupsDirect = capture();
+    expect(await runCli(['groups', 'list'], groupsDirect.io)).toBe(0);
+    expect(groupsViaSlash.out.join('')).toBe(groupsDirect.out.join(''));
+    // Sub-actions ride through the same groups parser, including its errors.
+    const bad = capture();
+    expect(await runCli(['slash', 'groups', 'frobnicate'], bad.io)).toBe(1);
+    expect(bad.err.join('')).toContain('murmur groups: unknown action: frobnicate');
+  });
+
+  it('sends through with the send parsing and flags when given any other arguments', async () => {
+    await connectPeer('slash-target');
+    const cap = capture();
+    const code = await runCli(['slash', 'slash-target,@demo', 'sent', 'through', 'slash', '--refs', 'alice'], cap.io);
+    expect(code).toBe(0);
+    expect(cap.err).toEqual([]);
+    const lines = cap.out.join('').split('\n').filter((l) => l.length > 0);
+    const last = lines[lines.length - 1] ?? '';
+    expect(lines.slice(0, -1).sort()).toEqual(['alice: queued', 'bob: queued', 'slash-target: queued']);
+    expect(last).toMatch(/^message \d+ thread \d+ seq 0$/);
+    // A real send happened: the message row and its deliveries are stored
+    // under the owner identity, exactly as murmur send would have done.
+    const messageId = Number(/^message (\d+)/.exec(last)?.[1]);
+    const row = store.messageById(messageId);
+    expect(row?.sender).toBe('renn');
+    expect(row?.body).toBe('sent through slash');
+    expect(JSON.parse(row?.refsJson ?? '[]')).toEqual(['alice']);
+    expect(
+      store
+        .getDeliveries(messageId)
+        .map((d) => d.recipient)
+        .sort(),
+    ).toEqual(['alice', 'bob', 'slash-target']);
+    // The send error path is unchanged too.
+    const unknown = capture();
+    expect(await runCli(['slash', '@nonexistent-group', 'x'], unknown.io)).toBe(1);
+    expect(unknown.err.join('')).toBe('unknown group: nonexistent-group\n');
+    expect(unknown.out).toEqual([]);
+    const noBody = capture();
+    expect(await runCli(['slash', 'alice'], noBody.io)).toBe(1);
+    expect(noBody.err.join('')).toContain('murmur send: missing body');
   });
 });
 
@@ -723,5 +836,10 @@ describe('broker down', () => {
     expect(await runCli(['thread', '1'], thread.io)).toBe(2);
     const groups = capture();
     expect(await runCli(['groups'], groups.io)).toBe(2);
+    // Bare slash falls through to the same message before printing anything.
+    const slash = capture();
+    expect(await runCli(['slash'], slash.io)).toBe(2);
+    expect(slash.err.join('')).toBe('murmur broker is down; start it with: murmur serve\n');
+    expect(slash.out).toEqual([]);
   });
 });

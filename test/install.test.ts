@@ -100,8 +100,13 @@ describe('installClient claude', () => {
 
     // Command file.
     const command = readFileSync(commandPath, 'utf8');
-    expect(command).toContain('description: Send a message on the murmur bus');
-    expect(command).toContain('!murmur send $ARGUMENTS');
+    expect(command).toContain(
+      'description: Send to a murmur group or peer; with no arguments it lists peers, groups and usage',
+    );
+    expect(command).toContain('argument-hint: <@group | handle> <message>');
+    expect(command).toContain('!murmur slash $ARGUMENTS');
+    expect(command).toContain('    murmur slash $ARGUMENTS');
+    expect(command).not.toContain('murmur send $ARGUMENTS');
     expect(existsSync(commandPath + '.bak-murmur')).toBe(false);
 
     // ~/.claude.json: other server and unrelated keys preserved, murmur added.
@@ -160,6 +165,18 @@ describe('installClient claude', () => {
     expect(readFileSync(claudeJsonPath + '.bak-murmur', 'utf8')).toBe(claudeText);
     // The command file now has a backup too (it existed before the rerun).
     expect(readFileSync(commandPath + '.bak-murmur', 'utf8')).toBe(afterFirstCommand);
+  });
+
+  it('refreshes a stale murmur-owned command file on rerun instead of preserving it', async () => {
+    mkdirSync(join(claudeDir, 'commands'), { recursive: true });
+    const stale = '---\ndescription: Send a message on the murmur bus\n---\n\n!murmur send $ARGUMENTS\n';
+    writeFileSync(commandPath, stale, 'utf8');
+    await installClient('claude', { claudeDir });
+    const command = readFileSync(commandPath, 'utf8');
+    expect(command).toContain('argument-hint: <@group | handle> <message>');
+    expect(command).toContain('!murmur slash $ARGUMENTS');
+    expect(command).not.toContain('!murmur send $ARGUMENTS');
+    expect(readFileSync(commandPath + '.bak-murmur', 'utf8')).toBe(stale);
   });
 
   it('creates every file from scratch in a fresh home and defaults claudeDir to ~/.claude', async () => {
