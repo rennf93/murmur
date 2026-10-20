@@ -1127,6 +1127,45 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#021-2026-10-20" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0.2.1 - 2026-10-20
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="0.2.1 - 2026-10-20">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#fixed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#021-rc1-2026-10-20" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1139,7 +1178,7 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#changed" class="md-nav__link">
+  <a href="#changed_1" class="md-nav__link">
     <span class="md-ellipsis">
       
         Changed
@@ -1178,7 +1217,7 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#changed_1" class="md-nav__link">
+  <a href="#changed_2" class="md-nav__link">
     <span class="md-ellipsis">
       
         Changed
@@ -1267,6 +1306,45 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#021-2026-10-20" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0.2.1 - 2026-10-20
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="0.2.1 - 2026-10-20">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#fixed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fixed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#changed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Changed
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#021-rc1-2026-10-20" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1279,7 +1357,7 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#changed" class="md-nav__link">
+  <a href="#changed_1" class="md-nav__link">
     <span class="md-ellipsis">
       
         Changed
@@ -1318,7 +1396,7 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#changed_1" class="md-nav__link">
+  <a href="#changed_2" class="md-nav__link">
     <span class="md-ellipsis">
       
         Changed
@@ -1396,8 +1474,18 @@
 <p>All notable changes to murmur are documented here. The format follows
 <a href="https://keepachangelog.com/en/1.1.0/">Keep a Changelog</a> and the project uses
 <a href="https://semver.org/">Semantic Versioning</a>.</p>
-<h2 id="021-rc1-2026-10-20"><a href="https://github.com/rennf93/murmur/releases/tag/v0.2.1-rc.1">0.2.1-rc.1</a> - 2026-10-20<a class="headerlink" href="#021-rc1-2026-10-20" title="Permanent link">&para;</a></h2>
+<h2 id="021-2026-10-20"><a href="https://github.com/rennf93/murmur/releases/tag/v0.2.1">0.2.1</a> - 2026-10-20<a class="headerlink" href="#021-2026-10-20" title="Permanent link">&para;</a></h2>
+<h3 id="fixed">Fixed<a class="headerlink" href="#fixed" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>murmur mcp</code> exits when its client goes away. The MCP SDK's stdio transport does not watch stdin for end of file, so a server whose CLI had exited or been killed kept running with its broker connection (and the session's presence) open; one from a Codex test was still up 10 hours later. The server now also returns when stdin ends or closes.</li>
+<li>The MCP server reports the package version instead of a hard-coded <code>0.2.0</code>.</li>
+</ul>
 <h3 id="changed">Changed<a class="headerlink" href="#changed" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>publishConfig</code> no longer sets <code>provenance: true</code>, so a hand <code>npm publish</code> works outside CI. The release workflow still publishes with <code>--provenance</code>.</li>
+</ul>
+<h2 id="021-rc1-2026-10-20"><a href="https://github.com/rennf93/murmur/releases/tag/v0.2.1-rc.1">0.2.1-rc.1</a> - 2026-10-20<a class="headerlink" href="#021-rc1-2026-10-20" title="Permanent link">&para;</a></h2>
+<h3 id="changed_1">Changed<a class="headerlink" href="#changed_1" title="Permanent link">&para;</a></h3>
 <ul>
 <li>Release pipeline check: the first version published to npm by CI through trusted publishing, as a prerelease on the <code>next</code> dist-tag. No code changes.</li>
 </ul>
@@ -1418,7 +1506,7 @@
 <li>Live checks against real CLIs in tmux (<code>scripts/live/</code>, <code>make verify CLI=&lt;cli&gt;</code>) and a benchmark (<code>scripts/bench.mjs</code>).</li>
 <li>Packaging for npm, a CI workflow, a release workflow with npm trusted publishing, and a documentation site.</li>
 </ul>
-<h3 id="changed_1">Changed<a class="headerlink" href="#changed_1" title="Permanent link">&para;</a></h3>
+<h3 id="changed_2">Changed<a class="headerlink" href="#changed_2" title="Permanent link">&para;</a></h3>
 <ul>
 <li>Claude Code native transport corrected from the Claude binary's own injection recipe: <code>{"type":"auth",...}</code> then <code>{"type":"user","message":{...}}</code>. v0.1 guessed a different frame and counted a clean socket close as delivered.</li>
 <li>Performance: SQLite indexes, a prepared statement cache, a lazily imported MCP SDK (only <code>murmur mcp</code> loads it), and a single per-pid <code>ps</code> walk for identity.</li>
