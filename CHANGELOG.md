@@ -4,6 +4,12 @@ All notable changes to murmur are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.1-rc.1] - 2026-10-20
+
+### Changed
+
+- Release pipeline check: the first version published to npm by CI through trusted publishing, as a prerelease on the `next` dist-tag. No code changes.
+
 ## [0.2.0] - 2026-10-20
 
 ### Added
@@ -44,5 +50,6 @@ All notable changes to murmur are documented here. The format follows
 - Limits: send rate, duplicate window, thread and inbox caps.
 - 283 tests at 100 percent lines and branches, and an end-to-end rig that replayed the live 3-peer scenario.
 
+[0.2.1-rc.1]: https://github.com/rennf93/murmur/releases/tag/v0.2.1-rc.1
 [0.2.0]: https://github.com/rennf93/murmur/releases/tag/v0.2.0
 [0.1.0]: https://github.com/rennf93/murmur/releases/tag/v0.1.0

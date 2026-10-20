@@ -1,6 +1,6 @@
 {
   "name": "murmur-it",
-  "version": "0.2.0",
+  "version": "0.2.1-rc.1",
   "description": "Local, client-agnostic message bus for AI CLI sessions with group threads",
   "license": "MIT",
   "author": "Renn F",
