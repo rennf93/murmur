@@ -2,8 +2,8 @@
 // Live check, Claude Code: two interactive sessions in tmux with only the
 // hooks, MCP entry and /murmur command that `murmur install claude` writes
 // (user settings and other MCP servers are not loaded). The owner sends one
-// message to both; each must reply through murmur_reply, each reply must fan
-// out to the other session, and /murmur must store its text verbatim. Before
+// message to both; each must reply through murmur_reply, each reply must reach
+// only the owner who asked (not the other peer), and /murmur must store its text verbatim. Before
 // that, /rename in each session must become its handle (live-peer-a and
 // live-peer-b), and the /murmur message typed in mlA must carry via = mlA's
 // handle, with B's reply delivered to mlA as well as to the owner.
@@ -60,7 +60,7 @@ try {
   log('ask deliveries', JSON.stringify(final));
   const replies = r.db.prepare('SELECT id, sender FROM messages WHERE thread_id = ? AND id != ?').all(threadId, messageId);
   const fanout = replies.map((m) => ({ from: m.sender, to: r.db.prepare('SELECT recipient FROM deliveries WHERE message_id = ?').all(m.id).map((d) => d.recipient).sort() }));
-  log('reply fan-out', JSON.stringify(fanout));
+  log('reply routing', JSON.stringify(fanout));
   await r.type('mlA', '/murmur-live live-peer-b ' + SLASH_TEXT);
   const slash = await until('slash message', () => r.db.prepare('SELECT id, sender, via, body FROM messages WHERE body LIKE ? ').get('slash check:%'), 40000).catch(() => null);
   log('slash row', JSON.stringify(slash));
@@ -71,7 +71,7 @@ try {
     ['both sessions announced with a native transport', handles.length === 2 && handles.every((h) => native.includes(h)), handles.join(', ')],
     ['/rename became each session handle (live-peer-a, live-peer-b) with the title as display', nameOk && display.length === 2 && display.some((d) => d.display === 'Live Peer A') && display.some((d) => d.display === 'Live Peer B'), JSON.stringify(display)],
     ['both deliveries went sent, delivered (transcript proof), replied', final.every((d) => d.state === 'replied' && d.sent && d.delivered), JSON.stringify(final)],
-    ['each reply fanned out to the other session and the owner', fanout.length === 2 && fanout.every((f) => f.to.length === 2 && f.to.includes('renn') && !f.to.includes(f.from)), JSON.stringify(fanout)],
+    ['each reply reached the owner who asked and not the other session', fanout.length === 2 && fanout.every((f) => f.to.join(',') === 'renn'), JSON.stringify(fanout)],
     ['/murmur stored the text verbatim as the owner', slash?.body === SLASH_TEXT && slash?.sender === 'renn', JSON.stringify(slash)],
     ['/murmur message has via = mlA handle (live-peer-a)', slash?.via === 'live-peer-a', JSON.stringify(slash?.via)],
     ['B replied and the reply was delivered to mlA as well as the owner', slashReply?.sender === 'live-peer-b' && slashTo.join(',') === 'live-peer-a,renn', JSON.stringify(slashTo)],

@@ -22,6 +22,7 @@ const PRE_EXEC_COMMAND_MD = `---
 description: Send to a murmur group or peer as the owner; bare lists peers and groups
 argument-hint: <group | @group | handle[,more]> <message>
 allowed-tools: Bash(murmur slash:*)
+disable-model-invocation: true
 ---
 
 \`\`\`!
@@ -129,7 +130,8 @@ function installClaude(home: string): string[] {
   writeTextFile(commandPath, PRE_EXEC_COMMAND_MD);
   const claudeJsonPath = join(home, '.claude.json');
   const claudeJson = readJsonObject(claudeJsonPath);
-  mergeMcpServer(objectAt(claudeJson, 'mcpServers', claudeJsonPath));
+  // alwaysLoad keeps the tool schemas in the prompt instead of behind ToolSearch (one call less per use).
+  mergeMcpServer(objectAt(claudeJson, 'mcpServers', claudeJsonPath), { alwaysLoad: true });
   writeJsonFile(claudeJsonPath, claudeJson);
   const settingsPath = join(home, '.claude', 'settings.json');
   const settings = readJsonObject(settingsPath);
@@ -255,13 +257,13 @@ function objectAt(parent: Record<string, unknown>, key: string, file: string): R
 // The murmur server entry, keeping any env the user added but dropping the
 // per-session handle placeholder older versions wrote: identity now comes
 // from the session's host process.
-function mergeMcpServer(servers: Record<string, unknown>): void {
+function mergeMcpServer(servers: Record<string, unknown>, extra: Record<string, unknown> = {}): void {
   const existing = servers.murmur;
   const env = isRecord(existing) && isRecord(existing.env) ? { ...existing.env } : {};
   if (env.MURMUR_HANDLE === 'CHANGE-ME-per-session') {
     delete env.MURMUR_HANDLE;
   }
-  servers.murmur = Object.keys(env).length > 0 ? { ...MCP_ENTRY, env } : { ...MCP_ENTRY };
+  servers.murmur = Object.keys(env).length > 0 ? { ...MCP_ENTRY, ...extra, env } : { ...MCP_ENTRY, ...extra };
 }
 
 // Claude-style hook maps: event name to a list of { matcher?, hooks: [...] }.

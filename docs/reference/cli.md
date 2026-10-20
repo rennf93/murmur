@@ -64,10 +64,10 @@ Deletes peers that are not the owner and have no session rows, no sent messages,
 ## thread
 
 ```
-murmur thread <id> [--since <n>] [--full]
+murmur thread <id> [--since <n>] [--full] [--message <id>]
 ```
 
-`--since <n>` returns only messages with `seq` newer than n; `--full` includes bodies.
+`--since <n>` returns only messages with `seq` newer than n; `--full` includes bodies; `--message <id>` returns only that message and the replies to it (full bodies), the per-question read. An id that is not in the thread is an error.
 
 ## groups
 

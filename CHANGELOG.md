@@ -1,8 +1,31 @@
 # Changelog
 
-All notable changes to murmur are documented here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
-[Semantic Versioning](https://semver.org/).
+All notable changes to murmur are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
+
+## [0.2.3] - 2026-10-20
+
+### Changed
+
+- Murmur is a group chat: a message is posted once and everyone in the thread can read it, but nobody is woken for a message that is not for them. A reply is stored once and delivered (with a push, in the parent's mode) only to whoever is waiting for it: the author of the message it answers plus the session an owner message was typed in (`via`); a reply inside the replier's own thread goes to the parent's recipients. Other participants get no delivery row and no push and read the reply with `murmur_thread` / `murmur thread`. Measured reason: `make bench-consult` (haiku, three sessions) cost 546,811 tokens per consult for murmur against 265,771 for native `SendMessage`, because every reply woke every participant and the Implementer received each reply twice (once in the wait, once as a pushed turn).
+- `murmur_wait` returns the text of the replies addressed to the waiting handle (`replies`: id, seq, sender, verdict, delivered body with the truncation pointer). A reply that arrives while its recipient has a wait open on that thread is not pushed; it stays queued, is handed over in the wait result (condition met or timeout) and marked delivered. A reply that arrives with no wait open is pushed as before.
+- `murmur_thread` takes an optional `messageId` (CLI `murmur thread <id> --message <m>`): the result is only that message and the replies to it, with full delivered bodies; a message not in the thread is a `bad_request`. The footer of every delivered message now points at it (`replies to this: murmur_thread <t> messageId <m>`) instead of the whole thread, and the wait handover is limited to replies to the thread's latest ask.
+- The MCP instructions, the `murmur_reply` and `murmur_wait` descriptions, the opencode and Hummin adapter descriptions and the docs describe this routing.
+- Claude Code never defers murmur's tools: `murmur install claude` writes `"alwaysLoad": true` into `mcpServers.murmur` (idempotent; re-run it on an existing install) and the MCP server lists every tool with `_meta: { "anthropic/alwaysLoad": true }`. Measured reason: each deferred tool cost a ToolSearch call, and a Claude Code call re-reads the whole context (about 38k tokens on haiku).
+- Teaching the reply: the footer on every delivered message and the MCP instructions say plainly that the answer goes through `murmur_reply` with that messageId and that plain text never reaches the sender.
+- `murmur_send` takes optional `wait` (`all_replied` or `any_replied`) and `timeoutMs` (same default and cap as `murmur_wait`): it sends and waits on that thread in the same call and returns `{ sent, wait }` with states, verdicts and the replies' text. Asking is one tool call.
+- `to` also accepts a session's display name (its CLI title, case-insensitive) or a name whose slug is a handle (`Peer A` resolves to `peer-a`). Handles and groups win; an ambiguous name is a `bad_request` listing the candidates.
+- The `/murmur` command file for Claude Code and zcode sets `disable-model-invocation: true`: it is the owner's command, and a model that invoked it through the Skill tool sent nothing. Re-run `murmur install claude` / `zcode` to get it.
+- `make bench-consult` counts a run as completed only when the Implementer's final answer holds both peers' verdicts and their answers really reached it, and reports API calls and ToolSearch calls per session. Result (haiku, 3 runs per setup, medians): plain native `SendMessage` completes 0 of 3 (268,272 tokens, 7 API calls), because its peers answer in plain text that never reaches the Implementer; native with the peers told to answer with `SendMessage` completes 3 of 3 (510,931 tokens, 13 API calls, 13.8 s); murmur completes 3 of 3 (362,879 tokens, 9 API calls, 10.1 s), 29 percent fewer tokens than the native setup that finishes.
+
+### Fixed
+
+- A reply held back for an open `murmur_wait` is now only one the wait hands over (a reply to the thread's latest ask); a reply to an older ask, or to a reply, is pushed as usual instead of staying queued with no path to its recipient. A wait remembers the replies held for it and hands them all over even if the thread's latest ask changed meanwhile. Replies held for a wait whose connection closes before it resolves are pushed at once. A delivery whose push is already in flight is never handed over a second time by a new wait or the hook pull.
+- The live rig (`scripts/live/lib.mjs`) sets `MURMUR_AUTOSTART=0`, so a hook that outlives cleanup cannot respawn a broker and none survives a live run.
+
+### Added
+
+- `make bench-consult` (`scripts/live/bench-consult.mjs`): three real Claude sessions per run, plain native `SendMessage`, native with the peers told to reply with `SendMessage`, and murmur, with tokens, API calls, copies received and wall time from the sessions' own transcripts; results in `docs/bench/consult.md` and `consult.json`.
+- Docs and repository files: README hero, demo and linked CLIs; a Diataxis docs navigation (getting started, using murmur, consult, design, concepts, reference); `CODE_OF_CONDUCT.md`, `SUPPORT.md`, `MAINTAINERS.md`, `CODEOWNERS`, issue forms, a pull request template, Dependabot, an OpenSSF Scorecard workflow, a docs CI workflow (markdownlint, typos, lychee) and SHA-pinned GitHub Actions.
 
 ## [0.2.2] - 2026-10-20
 
@@ -81,6 +104,7 @@ All notable changes to murmur are documented here. The format follows
 - Limits: send rate, duplicate window, thread and inbox caps.
 - 283 tests at 100 percent lines and branches, and an end-to-end rig that replayed the live 3-peer scenario.
 
+[0.2.3]: https://github.com/rennf93/murmur/releases/tag/v0.2.3
 [0.2.2]: https://github.com/rennf93/murmur/releases/tag/v0.2.2
 [0.2.1]: https://github.com/rennf93/murmur/releases/tag/v0.2.1
 [0.2.1-rc.1]: https://github.com/rennf93/murmur/releases/tag/v0.2.1-rc.1

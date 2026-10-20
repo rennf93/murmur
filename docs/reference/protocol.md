@@ -22,7 +22,7 @@ Every client message carries `v` (protocol version) and `id` (a per-connection m
 | `ack` | `ids` | `{acknowledged}` |
 | `read` | `ids` | `{messages}` |
 | `inbox` | `unreadOnly` | `{handle, unreadTotal, threads}` |
-| `thread` | `threadId`, `sinceSeq` (or null), `full` | `{threadId, latestSeq, messages}` |
+| `thread` | `threadId`, `sinceSeq` (or null), `full`, `messageId?` (only that message and its replies, full bodies; `bad_request` if not in the thread) | `{threadId, latestSeq, messages}` |
 | `collect` | `threadId` | `{threadId, askMessageId, recipients, verdictTally}` |
 | `wait` | `threadId`, `until` (`all_replied`\|`any_replied`), `timeoutMs` | `{threadId, conditionMet, timedOut, matrix}` |
 | `groups` | `action` (`create`\|`list`\|`add`\|`remove`\|`delete`), `name?`, `members?` | group records |

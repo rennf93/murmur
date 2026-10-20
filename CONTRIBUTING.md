@@ -23,6 +23,7 @@ npm test
 - Behavior that touches a real CLI should be checked with `make verify CLI=<cli>` (see the Verification page of the docs); it spends a few cents of model calls.
 - Docs under `docs/` and `README.md` change with the behavior they describe. Every fact there must come from the code.
 - Add an entry to `CHANGELOG.md` for user-visible changes.
+- Fill in the pull request template: what changed, the issue, how you verified it, and any behavior change.
 - Keep commits focused, with messages that say what changed and why.
 
 ## Docs
@@ -33,8 +34,10 @@ The site is mkdocs-material. To preview locally in a throwaway environment:
 uvx --with mkdocs-material mkdocs serve
 ```
 
-`mkdocs build --strict` must pass.
+`mkdocs build --strict` must pass. The Docs CI workflow also runs lychee (links, external included), markdownlint-cli2 (`.markdownlint-cli2.yaml`) and typos (`_typos.toml`); run them locally with `npx markdownlint-cli2`, `lychee --config lychee.toml README.md 'docs/**/*.md'` and `typos`.
 
 ## Issues
 
-Keep them short and concrete: what happened, what you expected, the CLI and version, and `murmur status` output if relevant. For security reports, see [SECURITY.md](SECURITY.md) and do not open a public issue.
+Use the issue forms. Keep them short and concrete: what happened, what you expected, the CLI and version, and `murmur status` output if relevant. For security reports, see [SECURITY.md](SECURITY.md) and do not open a public issue. Questions go through [SUPPORT.md](SUPPORT.md).
+
+Everyone taking part follows the [Code of Conduct](CODE_OF_CONDUCT.md).

@@ -14,7 +14,7 @@ Every hook, MCP server and CLI command walks up its process ancestors and takes 
 ## Threads
 
 - One message, one id, fanned out to every recipient.
-- Replies go to everyone in the thread (every sender, every recipient and every session an owner message was typed in, so far), in the parent's mode, so peers see each other's answers without relaying.
+- A reply is stored once in the thread. It goes to whoever is waiting for it (the author of the message it answers and the session an owner message was typed in), in the parent's mode, and everyone in the thread can read it with `murmur thread`, so peers see each other's answers without relaying and nobody is woken for a reply that is not for them.
 - A message the owner typed into a session (`/murmur`) carries `via`: the tag reads `from renn via <session> to ...`.
 - Every message has a per-thread monotonic `seq`. `murmur_thread` returns first lines by default, full bodies with `full`, and only newer messages with `sinceSeq`.
 - `references` carries pointers (paths, commits, URLs) so artifacts stay in their repos.
@@ -23,7 +23,7 @@ Every hook, MCP server and CLI command walks up its process ancestors and takes 
 ```
 [murmur m42 t7 s0 from ledger-3 to archify-2, prs-5]
 <body, cut at 4000 characters with a pointer to the full text>
-(reply: murmur_reply messageId 42, or from a shell: murmur reply 42 <text>; whole thread: murmur_thread 7)
+(answer with murmur_reply messageId 42, plain text never reaches the sender; from a shell: murmur reply 42 <text>; its replies: murmur_thread 7 messageId 42)
 ```
 
 ## Groups
@@ -32,7 +32,7 @@ Targets are handles and groups. `@name` is always a group; a bare name is a hand
 
 ## Verdicts
 
-Verdicts are `agree`, `disagree` and `info`, with the body starting `AGREE`, `DISAGREE` or `INFO`. `murmur_wait` returns, for the thread's latest ask, each recipient's state, verdict and reply latency plus their historical p50 and p95, either when everyone (`all_replied`) or anyone (`any_replied`) replied, or at the timeout (`timeoutMs: 0` returns now).
+Verdicts are `agree`, `disagree` and `info`, with the body starting `AGREE`, `DISAGREE` or `INFO`. `murmur_wait` returns, for the thread's latest ask, each recipient's state, verdict and reply latency plus their historical p50 and p95, either when everyone (`all_replied`) or anyone (`any_replied`) replied, or at the timeout (`timeoutMs: 0` returns now), together with the text of the replies addressed to the waiter.
 
 ## Delivery states
 

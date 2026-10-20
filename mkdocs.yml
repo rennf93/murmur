@@ -42,24 +42,30 @@ theme:
 
 nav:
   - Home: index.md
-  - Getting Started: getting-started.md
-  - Clients:
-    - Claude Code: clients/claude.md
-    - Codex: clients/codex.md
-    - Gemini CLI: clients/gemini.md
-    - zcode: clients/zcode.md
-    - opencode: clients/opencode.md
-    - Hummin: clients/hummin.md
-  - Concepts: concepts.md
+  - Tutorial:
+    - Getting started: getting-started.md
+  - How-to guides:
+    - Set up a client:
+      - Claude Code: clients/claude.md
+      - Codex: clients/codex.md
+      - Gemini CLI: clients/gemini.md
+      - zcode: clients/zcode.md
+      - opencode: clients/opencode.md
+      - Hummin: clients/hummin.md
+    - Use /murmur and groups: using-murmur.md
+    - Consult several sessions with one message: consult.md
+    - Troubleshooting: troubleshooting.md
+    - Releasing: releasing.md
   - Reference:
     - CLI: reference/cli.md
     - MCP tools: reference/mcp.md
     - Wire protocol: reference/protocol.md
-  - Operations:
+  - Explanation:
+    - Concepts: concepts.md
+    - Design: design.md
     - Security: security.md
-    - Troubleshooting: troubleshooting.md
     - Verification: verification.md
-    - Releasing: releasing.md
+    - Benchmarks: bench/consult.md
   - Changelog: changelog.md
 
 markdown_extensions:

@@ -1,35 +1,79 @@
-<img src="docs/assets/murmur-512.png" alt="murmur" width="96">
+<div align="center">
+
+<img src="https://raw.githubusercontent.com/rennf93/murmur/master/docs/assets/murmur-512.png" alt="murmur icon" width="160">
 
 # murmur
 
-Murmur is a local message bus for AI CLI sessions that share one machine and one user account. One broker process owns a SQLite store and one Unix domain socket; every agent session joins as a named peer, and peers talk in threads. One send produces one message that fans out to any mix of handles and groups, so no session writes the same announcement twice and no session relays another's words by hand. A reply reaches everyone in the thread. Senders always see, per recipient, whether a message is still queued, was handed to the session, was proven to have reached it, or was answered.
+A local message bus so AI CLI sessions talk in group threads.
 
-It works with Claude Code, Codex, Gemini CLI, zcode, opencode and Hummin. Each joins through the deepest hook its CLI offers (see the truth table), and any process that can run a shell command can use the `murmur` CLI.
+[![npm](https://img.shields.io/npm/v/murmur-it)](https://www.npmjs.com/package/murmur-it)
+[![CI](https://github.com/rennf93/murmur/actions/workflows/ci.yml/badge.svg)](https://github.com/rennf93/murmur/actions/workflows/ci.yml)
+[![License](https://img.shields.io/npm/l/murmur-it)](https://github.com/rennf93/murmur/blob/master/LICENSE)
+[![Docs](https://img.shields.io/badge/docs-rennf93.github.io%2Fmurmur-blue)](https://rennf93.github.io/murmur/)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/rennf93/murmur/badge)](https://scorecard.dev/viewer/?uri=github.com/rennf93/murmur)
 
-Full documentation: https://rennf93.github.io/murmur/ (concepts, per-CLI pages, command, MCP and protocol reference, releasing). See also [CHANGELOG.md](CHANGELOG.md), [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+[Full documentation](https://rennf93.github.io/murmur/) | [Changelog](https://github.com/rennf93/murmur/blob/master/CHANGELOG.md) | [Contributing](https://github.com/rennf93/murmur/blob/master/CONTRIBUTING.md) | [Security](https://github.com/rennf93/murmur/blob/master/SECURITY.md)
 
-## Install
+</div>
+
+Murmur is a local message bus for AI CLI sessions that share one machine and one user account. One broker process owns a SQLite store and one Unix domain socket; every agent session joins as a named peer, and peers talk in threads. One send produces one message that fans out to any mix of handles and groups, so no session writes the same announcement twice and no session relays another's words by hand. A reply goes to whoever is waiting for it, and everyone in the thread can read it. Senders always see, per recipient, whether a message is still queued, was handed to the session, was proven to have reached it, or was answered.
+
+It works with Claude Code, Codex, Gemini CLI, zcode, opencode and Hummin. Each joins through the deepest hook its CLI offers (see the [truth table](#delivery-truth-table)), and any process that can run a shell command can use the `murmur` CLI.
+
+![Terminal recording: a group, one send, two replies from simulated peers, the thread and the status](https://raw.githubusercontent.com/rennf93/murmur/master/docs/assets/demo.gif)
+
+This is a CLI demo with simulated peers: `alice` and `bob` are registered by a hidden setup line and reply with `--as`, against an isolated broker. No agent CLI is involved. The tape is [`docs/assets/demo.tape`](https://github.com/rennf93/murmur/blob/master/docs/assets/demo.tape).
+
+## Quickstart
 
 Requires Node 20 or newer.
 
 ```
-npm install -g murmur-it # the package is murmur-it; the command it installs is murmur
-murmur init              # ~/.murmur (0700), token (0600), murmur.db, owner peer
-murmur install claude    # and/or: codex | gemini | zcode | opencode | hummin
+npm install -g murmur-it   # the package is murmur-it; the command it installs is murmur
+murmur init                # ~/.murmur (0700), token (0600), murmur.db, owner peer
+murmur install claude      # or: codex | gemini | zcode | opencode | hummin
 ```
 
-From source instead: `npm install && npm run build && npm link` in a clone (puts the same `murmur` on PATH; every hook, MCP entry and command runs plain `murmur`).
+Start two sessions, then from inside one of them send to both with a single message (handles are `<cli>-<folder>`; `murmur status` lists them):
+
+```
+/murmur claude-api,codex-web Which of you owns the migration?
+```
+
+Each session receives the message, and each reply goes to whoever is waiting for it. Everyone in the thread can read it with `murmur thread <id>`. [Getting started](https://rennf93.github.io/murmur/getting-started/) has the full walk-through.
+
+## Why
+
+The bus removes two costs and must never remove a third thing. The costs: duplicated composition, where every member of a group reformats the same fact, and sender-side relaying, where one session carries another's words to a third and garbles them. One message fans out; replies go to whoever is waiting and stay readable by the whole thread; the broker owns storage and delivery. Delivery modes are the token dial.
+
+The third thing is independent verification: a message is a claim, not evidence. Peers verify against the artifacts themselves, which is why messages carry `references`, and why every session is told so by the MCP server's instructions.
+
+Measured with `make bench-consult`: three real Claude Code sessions on haiku, the Implementer asked to consult Peer A and Peer B and report both answers, 3 runs per setup, medians, 2026-10-20.
+
+| Setup | Finished | Tokens, all sessions | API calls | Wall time |
+| --- | --- | --- | --- | --- |
+| Native `SendMessage` | 0 of 3 (peers answer in plain text, nothing comes back) | 268,272 | 7 | 5.7 s |
+| Native, peers told to reply with `SendMessage` | 3 of 3 | 510,931 | 13 | 13.8 s |
+| murmur | 3 of 3 | 362,879 | 9 | 10.1 s |
+
+Against the native setup that finishes, murmur used 29 percent fewer tokens and 4 fewer API calls. Each call costs about 38k tokens there, mostly Claude Code re-reading its own context, so the saving comes from fewer calls: one send reaches both peers, the tools are loaded up front, and the replies come back to the asker, nobody else is woken.
+
+Method and numbers: [consult benchmark](https://rennf93.github.io/murmur/bench/consult/).
+
+## Install
+
+From source instead of npm: `npm install && npm run build && npm link` in a clone (puts the same `murmur` on PATH; every hook, MCP entry and command runs plain `murmur`).
 
 The broker starts on demand: the first hook, MCP server or CLI command that finds it down starts one in the background (`murmur serve` runs it in the foreground; `murmur serve --daemon` detaches). `MURMUR_HOME` relocates the home for every component.
 
-What each installer writes (idempotent merges; every touched file gets a one-time `.bak-murmur` copy first):
+What each installer writes (idempotent merges; every touched file gets a one-time `.bak-murmur` copy first; install refuses to touch a config file that is not valid JSON):
 
 | CLI | Files | Notes |
 | --- | --- | --- |
 | claude | `~/.claude/settings.json` hooks (SessionStart, UserPromptSubmit, Stop, SessionEnd), `mcpServers.murmur` in `~/.claude.json`, `~/.claude/commands/murmur.md` | Removes the old `CHANGE-ME-per-session` handle placeholder. |
 | codex | `~/.codex/hooks.json` (SessionStart, UserPromptSubmit, Stop, SessionEnd), `[mcp_servers.murmur]` in `~/.codex/config.toml`, `~/.codex/prompts/murmur.md` | Codex asks you to trust new hooks once: open `/hooks`. The command is `/prompts:murmur`. |
 | gemini | `~/.gemini/settings.json` hooks (SessionStart, BeforeAgent, AfterAgent, SessionEnd) and `mcpServers.murmur`, `~/.gemini/commands/murmur.toml` | |
-| `zcode` | Hooks fire under workspace trust; the session announces; one message is handed over by a hook and answered | BLOCKED: the provider answers 429 "Insufficient balance or no resource package. Please recharge." and the session never announced in headless mode, so whether hooks fire under `-p` is unverified |
+| zcode | `~/.zcode/cli/config.json` (`hooks.enabled`, SessionStart, UserPromptSubmit, Stop; `mcp.servers.murmur`), `~/.zcode/commands/murmur.md`, `~/.zcode/skills/murmur/SKILL.md` | zcode has no SessionEnd hook. |
 | opencode | `~/.config/opencode/plugins/murmur.ts`, `~/.config/opencode/commands/murmur.md` | The plugin is the whole integration (tools, push, presence). |
 | hummin | `~/.hummin/agent/extensions/murmur.ts` | The extension is the whole integration, including a model-free `/murmur`. |
 
@@ -50,12 +94,12 @@ Delivery states, per recipient: `queued` (stored, nothing left the broker), `sen
 
 | CLI | Live push into a running session | Waiting messages also arrive | Evidence for `delivered` |
 | --- | --- | --- | --- |
-| Claude Code | Native messaging socket (`CLAUDE_CODE_MESSAGING_SOCKET`): the session gets the message as a peer turn; an idle session starts working on it | At SessionStart, each prompt, and at turn end (Stop continues the turn) | The message tag found in the receiver's own transcript |
-| Hummin | Extension calls `sendUserMessage` (follow-up when idle, steer mid-turn) | When the extension (re)connects | The extension confirms its session accepted it; the tag in the session file too |
-| opencode | Plugin posts the message into the session with `promptAsync` | When the plugin (re)connects | The plugin confirms the post succeeded |
-| Codex | `codex queue --thread <id>`; a running window takes it as a user turn | At SessionStart, each prompt, and at turn end (Stop continues the turn) | The tag in the receiver's rollout transcript |
-| Gemini CLI | None: Gemini has no inbound channel | At SessionStart, each prompt (BeforeAgent), and at turn end (AfterAgent continues the turn) | Handed over by the hook |
-| `zcode` | Hooks fire under workspace trust; the session announces; one message is handed over by a hook and answered | BLOCKED: the provider answers 429 "Insufficient balance or no resource package. Please recharge." and the session never announced in headless mode, so whether hooks fire under `-p` is unverified |
+| [Claude Code](https://claude.com/product/claude-code) | Native messaging socket (`CLAUDE_CODE_MESSAGING_SOCKET`): the session gets the message as a peer turn; an idle session starts working on it | At SessionStart, each prompt, and at turn end (Stop continues the turn) | The message tag found in the receiver's own transcript |
+| [Hummin](https://github.com/rennf93/hummin) | Extension calls `sendUserMessage` (follow-up when idle, steer mid-turn) | When the extension (re)connects | The extension confirms its session accepted it; the tag in the session file too |
+| [opencode](https://github.com/anomalyco/opencode) | Plugin posts the message into the session with `promptAsync` | When the plugin (re)connects | The plugin confirms the post succeeded |
+| [Codex](https://github.com/openai/codex) | `codex queue --thread <id>`; a running window takes it as a user turn | At SessionStart, each prompt, and at turn end (Stop continues the turn) | The tag in the receiver's rollout transcript |
+| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | None: Gemini has no inbound channel | At SessionStart, each prompt (BeforeAgent), and at turn end (AfterAgent continues the turn) | Handed over by the hook |
+| [zcode](https://zcode.z.ai) | None found | At SessionStart, each prompt, and at turn end (Stop continues the turn) | Handed over by the hook (zcode's hook `transcript_path` is a temporary copy, so it cannot serve as proof) |
 
 Delivery modes: `push` (default) uses every path above; `notify` stores the message and sends a small batched note; `silent` only stores. A message for a session that is down stays `queued`; when that session comes back its queued messages are pushed (or handed over at its next hook) and the sender gets a `queued_delivered` note. A session that ends with messages still unconsumed triggers a `peer_offline` note to their senders.
 
@@ -64,15 +108,15 @@ What a session sees for every message, on every path:
 ```
 [murmur m42 t7 s0 from ledger-3 to archify-2, prs-5]
 <body, cut at 4000 characters with a pointer to the full text>
-(reply: murmur_reply messageId 42, or from a shell: murmur reply 42 <text>; whole thread: murmur_thread 7)
+(answer with murmur_reply messageId 42, plain text never reaches the sender; from a shell: murmur reply 42 <text>; its replies: murmur_thread 7 messageId 42)
 ```
 
 ## Threads, groups, verdicts
 
 - One message, one id, fanned out. Targets are handles and groups: `@name` is always a group; a bare name is a handle, or the group of that name when no peer has that handle. Overlapping groups dedupe.
-- Replies go to everyone in the thread (every sender, every recipient and every session an owner message was typed in, so far), in the parent's mode, so peers see each other's answers without relaying. To consult several sessions, send once to all of them.
+- A reply is stored once in the thread and goes only to whoever is waiting for it (the author of the message it answers and the session an owner message was typed in), in the parent's mode; everyone in the thread can read it with `murmur_thread` / `murmur thread`, and `murmur_wait` returns the replies' text. `murmur_thread` with `messageId` (`murmur thread <id> --message <m>`) returns one question and its replies, not the whole thread. To consult several sessions, send once to all of them.
 - Every message has a per-thread monotonic `seq`. `murmur_thread` returns first lines by default, full bodies with `full`, and only newer messages with `sinceSeq`.
-- Verdicts: `agree`, `disagree`, `info`, with the body starting `AGREE`, `DISAGREE` or `INFO`. `murmur_wait` returns, for the thread's latest ask, each recipient's state, verdict and reply latency plus their historical p50 and p95, either when everyone (or anyone) replied or at the timeout (`timeoutMs: 0` returns now).
+- Verdicts: `agree`, `disagree`, `info`, with the body starting `AGREE`, `DISAGREE` or `INFO`. `murmur_wait` returns, for the thread's latest ask, each recipient's state, verdict and reply latency plus their historical p50 and p95, plus the text of the replies addressed to the waiter, either when everyone (or anyone) replied or at the timeout (`timeoutMs: 0` returns now).
 - `references` carries pointers (paths, commits, URLs) so artifacts stay in their repos.
 - Groups: create, list, add, remove, delete. Deleting a group never touches sessions, threads or history.
 
@@ -85,11 +129,7 @@ The human surface, as the owner:
 - `/murmur <group | @group | handle[,more]> <message>`; bare `/murmur` lists peers and groups. In Claude Code and zcode the command file runs `murmur slash --stdin` with the message in a quoted heredoc, so quotes, `$(...)`, backticks and `;` arrive verbatim (Claude Code turns a word-initial `!` into `\!` before the shell sees it; `--claude-escaped` turns it back); the model only shows the output. Hummin's `/murmur` runs with no model turn at all.
 - `murmur send <targets> <body...> [--mode push|notify|silent] [--refs a,b] [--thread <id>] [--as <handle>]`
 - `murmur reply <id> <body...> [--verdict agree|disagree|info] [--refs a,b] [--as <handle>]`
-- `murmur status`, `murmur thread <id> [--since <seq>] [--full]`, `murmur groups [list|create|add|remove|delete] ...`, `murmur name <handle>`, `murmur prune` (removes peers with no session, message, delivery, group membership or live connection, such as v0.1 leftovers, and prints their handles)
-
-## Doctrine
-
-The bus removes two costs and must never remove a third thing. The costs: duplicated composition, where every member of a group reformats the same fact, and sender-side relaying, where one session carries another's words to a third and garbles them. One message fans out; replies reach the whole thread; the broker owns storage and delivery. Delivery modes are the token dial. The third thing is independent verification: a message is a claim, not evidence. Peers verify against the artifacts themselves, which is why messages carry `references`, and why every session is told so by the MCP server's instructions.
+- `murmur status`, `murmur thread <id> [--since <seq>] [--full] [--message <id>]`, `murmur groups [list|create|add|remove|delete] ...`, `murmur name <handle>`, `murmur prune` (removes peers with no session, message, delivery, group membership or live connection, such as v0.1 leftovers, and prints their handles)
 
 ## Limits
 
@@ -115,7 +155,7 @@ The bus removes two costs and must never remove a third thing. The costs: duplic
 
 | Check | What it proves | Last result (2026-10-20) |
 | --- | --- | --- |
-| `claude` | Two sessions announce with native transports; one message to both goes sent, delivered (tag in each transcript), replied; each reply fans out to the other session and the owner; `/murmur` stores `$(...)`, backticks, quotes, `!` and `$HOME` verbatim | PASS, haiku, replies in about 3.6 s |
+| `claude` | Two sessions announce with native transports; one message to both goes sent, delivered (tag in each transcript), replied; each reply reaches the owner who asked and not the other session; `/murmur` stores `$(...)`, backticks, quotes, `!` and `$HOME` verbatim | PASS, haiku, replies in about 3.6 s |
 | `codex` | The session announces with its thread id; `codex queue` reaches the running window; transcript proof; reply through the MCP tool | PASS, gpt-5.6-luna, 6.2 s |
 | `hummin` | The extension injects, acks delivered, carries the reply; the model-free `/murmur` | PASS, zai/glm-5.3-flash, 6.0 s |
 | `opencode` | The plugin announces, injects with `promptAsync`, acks delivered, carries the reply | PASS, opencode 1.19.3, opencode/glm-5.3-flash-free, reply in 5.2 s (the readiness check can take up to 60 s on the first start after an upgrade) |

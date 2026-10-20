@@ -28,6 +28,7 @@ const PRE_EXEC_COMMAND_MD = [
   'description: Send to a murmur group or peer as the owner; bare lists peers and groups',
   'argument-hint: <group | @group | handle[,more]> <message>',
   'allowed-tools: Bash(murmur slash:*)',
+  'disable-model-invocation: true',
   '---',
   '',
   '```!',
@@ -59,6 +60,7 @@ const GEMINI_COMMAND_TOML = [
 ].join('\n');
 
 const MCP = { command: 'murmur', args: ['mcp'] };
+const CLAUDE_MCP = { ...MCP, alwaysLoad: true };
 
 interface HookCfg {
   event: string;
@@ -125,7 +127,7 @@ describe('claude', () => {
     const settingsPath = join(home, '.claude', 'settings.json');
     expect(files).toEqual([commandPath, jsonPath, settingsPath]);
     expect(readText(commandPath)).toBe(PRE_EXEC_COMMAND_MD);
-    expect(readJson(jsonPath)).toEqual({ mcpServers: { murmur: MCP } });
+    expect(readJson(jsonPath)).toEqual({ mcpServers: { murmur: CLAUDE_MCP } });
     expect(readJson(settingsPath)).toEqual({ hooks: hookMap(hooksOf('claude')) });
     expect(hooksOf('claude').map((h) => h.command)).toEqual([
       'murmur hook session-start',
@@ -153,7 +155,7 @@ describe('claude', () => {
     await installClient('claude', { home });
     const json = readJson(jsonPath);
     expect(json.theme).toBe('dark');
-    expect(json.mcpServers).toEqual({ other: { command: 'other' }, murmur: MCP });
+    expect(json.mcpServers).toEqual({ other: { command: 'other' }, murmur: CLAUDE_MCP });
     const settings = readJson(settingsPath) as { model: string; hooks: Record<string, unknown[]> };
     expect(settings.model).toBe('opus');
     expect(settings.hooks.Notification).toEqual([{ hooks: [] }]);
@@ -188,18 +190,18 @@ describe('claude', () => {
       JSON.stringify({ mcpServers: { murmur: { command: 'old', args: [], env: { MURMUR_HANDLE: 'CHANGE-ME-per-session', MURMUR_HOME: '/mine' } } } }),
     );
     await installClient('claude', { home });
-    expect(readJson(jsonPath)).toEqual({ mcpServers: { murmur: { ...MCP, env: { MURMUR_HOME: '/mine' } } } });
+    expect(readJson(jsonPath)).toEqual({ mcpServers: { murmur: { ...CLAUDE_MCP, env: { MURMUR_HOME: '/mine' } } } });
     // A real handle the user chose is kept; a placeholder-only env disappears.
     put(jsonPath, JSON.stringify({ mcpServers: { murmur: { env: { MURMUR_HANDLE: 'mine' } } } }));
     await installClient('claude', { home });
-    expect(readJson(jsonPath)).toEqual({ mcpServers: { murmur: { ...MCP, env: { MURMUR_HANDLE: 'mine' } } } });
+    expect(readJson(jsonPath)).toEqual({ mcpServers: { murmur: { ...CLAUDE_MCP, env: { MURMUR_HANDLE: 'mine' } } } });
     put(jsonPath, JSON.stringify({ mcpServers: { murmur: { env: { MURMUR_HANDLE: 'CHANGE-ME-per-session' } } } }));
     await installClient('claude', { home });
-    expect(readJson(jsonPath)).toEqual({ mcpServers: { murmur: MCP } });
+    expect(readJson(jsonPath)).toEqual({ mcpServers: { murmur: CLAUDE_MCP } });
     // A murmur entry whose env is not an object is replaced by the plain entry.
     put(jsonPath, JSON.stringify({ mcpServers: { murmur: { env: 'junk' } } }));
     await installClient('claude', { home });
-    expect(readJson(jsonPath)).toEqual({ mcpServers: { murmur: MCP } });
+    expect(readJson(jsonPath)).toEqual({ mcpServers: { murmur: CLAUDE_MCP } });
   });
 
   it('tolerates hook values that are not lists or entries without hooks', async () => {

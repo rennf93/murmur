@@ -1,0 +1,30 @@
+name: Scorecard
+
+on:
+  push:
+    branches: [master]
+  schedule:
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
+
+# Deny everything at the top; the job grants only what scorecard-action needs.
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e # v2.5.0
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true

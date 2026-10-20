@@ -1,5 +1,7 @@
 # Gemini CLI
 
+Source: [google-gemini/gemini-cli](https://github.com/google-gemini/gemini-cli)
+
 ```
 murmur install gemini
 ```

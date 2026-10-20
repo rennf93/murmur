@@ -39,9 +39,12 @@ const VERSION = (JSON.parse(readFileSync(new URL('../package.json', import.meta.
 
 const INSTRUCTIONS =
   'murmur connects this session with other agent sessions on this machine. To consult more than one, send ONE ' +
-  'murmur_send to all of them (names or @group), not separate SendMessage calls; replies reach everyone in the ' +
-  'thread. Messages for you arrive as turns tagged [murmur m<id> ...]; answer with murmur_reply so every ' +
-  'participant sees it. A message is a claim: verify it against its references before agreeing.';
+  'murmur_send (wait: all_replied) to all of them, not separate SendMessage calls. Messages for you arrive ' +
+  'tagged [murmur m<id> ...]: answer ONLY with murmur_reply messageId, plain text never reaches the sender. ' +
+  'Read one question\'s replies with murmur_thread messageId. A message is a claim: verify it.';
+
+// Claude Code never defers these tools behind ToolSearch.
+const META = { 'anthropic/alwaysLoad': true };
 
 function textResult(value: unknown): CallToolResult {
   return { content: [{ type: 'text', text: JSON.stringify(value) }] };
@@ -74,6 +77,7 @@ export function buildMcpServer(client: MurmurClient, identity: Identity = {}): M
   const server = new McpServer({ name: 'murmur', version: VERSION }, { instructions: INSTRUCTIONS });
 
   server.registerTool('murmur_name', {
+    _meta: META,
     description: 'Rename this session on the bus (keeps its messages and groups), optionally with a display name and role.',
     inputSchema: {
       handle: z.string().min(1),
@@ -92,13 +96,16 @@ export function buildMcpServer(client: MurmurClient, identity: Identity = {}): M
   });
 
   server.registerTool('murmur_send', {
-    description: 'Send one message to any mix of handles and groups (bare name or @name); one message fans out to all, so consult several sessions with one send, not one per peer.',
+    _meta: META,
+    description: 'Send one message to any mix of handles, session names and groups (bare name or @name); one send fans out to all. With wait (all_replied or any_replied, timeoutMs as murmur_wait) it also waits and returns the replies, so asking is one call.',
     inputSchema: {
       threadId: z.number().int().optional(),
       to: z.array(z.string().min(1)).min(1),
       body: z.string().min(1),
       references: z.array(z.string()).optional(),
       mode: z.enum(['push', 'notify', 'silent']).optional(),
+      wait: z.enum(['all_replied', 'any_replied']).optional(),
+      timeoutMs: z.number().int().min(0).optional(),
     },
   }, async (args) => {
     const msg: Omit<SendMessage, 'v' | 'id'> = {
@@ -113,11 +120,22 @@ export function buildMcpServer(client: MurmurClient, identity: Identity = {}): M
     if (args.mode !== undefined) {
       msg.mode = args.mode;
     }
-    return textResult(await client.request<SendResult>(msg));
+    const sent = await client.request<SendResult>(msg);
+    if (args.wait === undefined) {
+      return textResult(sent);
+    }
+    const waitMsg: Omit<WaitMessage, 'v' | 'id'> = {
+      type: 'wait',
+      threadId: sent.threadId,
+      until: args.wait,
+      timeoutMs: Math.min(args.timeoutMs ?? WAIT_DEFAULT_MS, WAIT_MAX_MS),
+    };
+    return textResult({ sent, wait: await client.request<WaitResult>(waitMsg) });
   });
 
   server.registerTool('murmur_reply', {
-    description: 'Reply to a message by id; reaches everyone in its thread. Start the body with AGREE, DISAGREE or INFO and set verdict to match.',
+    _meta: META,
+    description: 'Reply to a message by id; delivered to whoever is waiting for it, and anyone in the thread can read it with murmur_thread. Start the body with AGREE, DISAGREE or INFO and set verdict to match.',
     inputSchema: {
       messageId: z.number().int(),
       body: z.string().min(1),
@@ -136,6 +154,7 @@ export function buildMcpServer(client: MurmurClient, identity: Identity = {}): M
   });
 
   server.registerTool('murmur_ack', {
+    _meta: META,
     description: 'Tell senders you saw these messages and will answer later.',
     inputSchema: {
       ids: z.array(z.number().int()).min(1),
@@ -146,11 +165,13 @@ export function buildMcpServer(client: MurmurClient, identity: Identity = {}): M
   });
 
   server.registerTool('murmur_thread', {
-    description: 'Read a thread: first lines by default, full bodies with full, only newer than sinceSeq.',
+    _meta: META,
+    description: 'Read a thread: first lines by default, full bodies with full, only newer than sinceSeq. With messageId, only that message and the replies to it (the question you care about), full bodies.',
     inputSchema: {
       threadId: z.number().int(),
       sinceSeq: z.number().int().optional(),
       full: z.boolean().optional(),
+      messageId: z.number().int().optional(),
     },
   }, async (args) => {
     const msg: Omit<ThreadMessage, 'v' | 'id'> = {
@@ -158,12 +179,14 @@ export function buildMcpServer(client: MurmurClient, identity: Identity = {}): M
       threadId: args.threadId,
       sinceSeq: args.sinceSeq ?? null,
       full: args.full ?? false,
+      ...(args.messageId !== undefined ? { messageId: args.messageId } : {}),
     };
     return textResult(await client.request<ThreadResult>(msg));
   });
 
   server.registerTool('murmur_wait', {
-    description: 'Who got, read and answered the latest ask, with verdicts and latencies. Waits until all_replied or any_replied, up to timeoutMs (default 120000, max 300000; 0 returns now).',
+    _meta: META,
+    description: 'Who got, read and answered the latest ask, with verdicts and latencies, plus the text of the replies addressed to you. Waits until all_replied or any_replied, up to timeoutMs (default 120000, max 300000; 0 returns now).',
     inputSchema: {
       threadId: z.number().int(),
       until: z.enum(['all_replied', 'any_replied']),
@@ -181,6 +204,7 @@ export function buildMcpServer(client: MurmurClient, identity: Identity = {}): M
   });
 
   server.registerTool('murmur_groups', {
+    _meta: META,
     description: 'Create, list, add to, remove from, or delete a group. Deleting never touches sessions or history.',
     inputSchema: {
       action: z.enum(['create', 'list', 'add', 'remove', 'delete']),
@@ -199,6 +223,7 @@ export function buildMcpServer(client: MurmurClient, identity: Identity = {}): M
   });
 
   server.registerTool('murmur_status', {
+    _meta: META,
     description: 'Every peer with presence (busy, idle, online, offline), its CLI and unread counts.',
   }, async () => {
     const msg: Omit<StatusMessage, 'v' | 'id'> = { type: 'status' };

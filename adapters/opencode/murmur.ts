@@ -249,7 +249,7 @@ const plugin: Plugin = async ({ client, directory }) => {
           ctxCall({ type: 'send', threadId: a.threadId ?? null, to: a.to, body: a.body, references: a.references, mode: a.mode }, ctx),
       }),
       murmur_reply: tool({
-        description: 'Reply to a murmur message; the reply reaches everyone in the thread, so start the body with AGREE, DISAGREE or INFO.',
+        description: 'Reply to a murmur message; it goes to whoever is waiting for it and anyone in the thread can read it, so start the body with AGREE, DISAGREE or INFO.',
         args: {
           messageId: s.number(),
           body: s.string(),

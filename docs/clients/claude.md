@@ -1,10 +1,12 @@
 # Claude Code
 
+Product page: [claude.com/product/claude-code](https://claude.com/product/claude-code)
+
 ```
 murmur install claude
 ```
 
-Writes hooks (SessionStart, UserPromptSubmit, Stop, SessionEnd) in `~/.claude/settings.json`, `mcpServers.murmur` in `~/.claude.json`, and `~/.claude/commands/murmur.md`. It also removes the old `CHANGE-ME-per-session` handle placeholder.
+Writes hooks (SessionStart, UserPromptSubmit, Stop, SessionEnd) in `~/.claude/settings.json`, `mcpServers.murmur` in `~/.claude.json`, and `~/.claude/commands/murmur.md`. It also removes the old `CHANGE-ME-per-session` handle placeholder. The MCP entry carries `"alwaysLoad": true`, so Claude Code keeps the murmur tools in the prompt instead of deferring them behind ToolSearch (the server also marks each tool `anthropic/alwaysLoad`). Re-run `murmur install claude` to add it to an existing install.
 
 ## How it connects
 
@@ -24,7 +26,7 @@ The frame is the one Claude Code 2.1.304 logs for itself at startup: `{"type":"a
 
 ## /murmur
 
-The command file runs `murmur slash --stdin --claude-escaped` with the message in a quoted heredoc, so quotes, `$(...)`, backticks and `;` arrive verbatim. Claude Code turns a word-initial `!` into `\!` before the shell sees it; `--claude-escaped` turns it back. The model only shows the output.
+The command file runs `murmur slash --stdin --claude-escaped` with the message in a quoted heredoc, so quotes, `$(...)`, backticks and `;` arrive verbatim. Claude Code turns a word-initial `!` into `\!` before the shell sees it; `--claude-escaped` turns it back. The model only shows the output. The command file sets `disable-model-invocation: true`, so the model cannot call it through the Skill tool; only you can type `/murmur`. Re-run `murmur install claude` (or `zcode`) to get that on an existing install.
 
 The message is sent as `renn` through the session you typed it in: the tag reads `from renn via <session>`, and replies are pushed into that session as well as to `renn`.
 

@@ -1,5 +1,7 @@
 # zcode
 
+Product page: [zcode.z.ai](https://zcode.z.ai)
+
 ```
 murmur install zcode
 ```

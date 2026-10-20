@@ -1,0 +1,78 @@
+name: Docs CI
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - '**/*.md'
+      - '.markdownlint-cli2.yaml'
+      - '_typos.toml'
+      - 'lychee.toml'
+      - '.github/workflows/docs-ci.yml'
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mkdocs:
+    name: mkdocs build --strict
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: 3.x
+
+      # mkdocs 2.0 drops the plugin and theme systems mkdocs-material needs.
+      - name: Install dependencies
+        run: pip install mkdocs-material 'mkdocs<2'
+
+      - name: Build
+        run: mkdocs build --strict
+
+  links:
+    name: lychee
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Settings (retries, accepted codes, excludes) are in lychee.toml.
+      - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: --config lychee.toml --no-progress README.md 'docs/**/*.md'
+          fail: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  markdownlint:
+    name: markdownlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Config and globs are in .markdownlint-cli2.yaml.
+      - uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff # v24.2.0
+
+  typos:
+    name: typos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: crate-ci/typos@7f9d0819ca1c008ade73f4b41fa9d258d48f605b # v1.51.1

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/rennf93/murmur/security/advisories/new
+    about: Report privately through a GitHub Security Advisory. Do not open a public issue.
+  - name: Documentation
+    url: https://rennf93.github.io/murmur/
+    about: Setup, per-CLI pages, troubleshooting and reference.

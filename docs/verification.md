@@ -17,7 +17,7 @@ On 2026-10-20 (Apple M2 Pro): hook 52 ms, send 74 ms, fan-out 0.33 ms, status 22
 
 | Check | What it proves | Last result (2026-10-20) |
 | --- | --- | --- |
-| `claude` | Two sessions announce with native transports; one message to both goes sent, delivered (tag in each transcript), replied; each reply fans out to the other session and the owner; `/murmur` stores `$(...)`, backticks, quotes, `!` and `$HOME` verbatim | PASS, haiku, replies in about 3.6 s |
+| `claude` | Two sessions announce with native transports; one message to both goes sent, delivered (tag in each transcript), replied; each reply reaches the owner who asked and not the other session; `/murmur` stores `$(...)`, backticks, quotes, `!` and `$HOME` verbatim | PASS, haiku, replies in about 3.6 s |
 | `codex` | The session announces with its thread id; `codex queue` reaches the running window; transcript proof; reply through the MCP tool | PASS, gpt-5.6-luna, 6.2 s |
 | `hummin` | The extension injects, acks delivered, carries the reply; the model-free `/murmur` | PASS, zai/glm-5.3-flash, 6.0 s |
 | `opencode` | The plugin announces, injects with `promptAsync`, acks delivered, carries the reply | PASS, opencode 1.19.3, opencode/glm-5.3-flash-free, reply in 5.2 s (the readiness check can take up to 60 s on the first start after an upgrade) |

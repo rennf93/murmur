@@ -1,0 +1,25 @@
+# Style of this repo: long prose lines, plain lists, no emoji.
+config:
+  default: true
+  MD013: false          # prose paragraphs are one line
+  MD024:
+    siblings_only: true # Keep a Changelog repeats Added, Changed, Fixed under every version
+  MD033: false          # README hero uses inline HTML (div, img)
+  MD038: false          # the tag `[murmur m<id> ` has a meaningful trailing space
+  MD040: false          # command blocks are bare fences
+  MD041: false          # README starts with the hero block, not a heading
+  MD046: false          # mkdocs-material tabs and admonitions use indented blocks
+  MD060: false          # table column style is not enforced
+globs:
+  - "README.md"
+  - "CONTRIBUTING.md"
+  - "SECURITY.md"
+  - "SUPPORT.md"
+  - "MAINTAINERS.md"
+  - "CODE_OF_CONDUCT.md"
+  - "DESIGN.md"
+  - ".github/**/*.md"
+  - "docs/**/*.md"
+ignores:
+  - "node_modules"
+  - "site"

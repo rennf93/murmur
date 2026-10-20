@@ -1,0 +1,55 @@
+name: Bug report
+description: Something does not work as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For security problems do not open an issue. Use the private advisory form linked on the issue chooser.
+  - type: input
+    id: version
+    attributes:
+      label: murmur version
+      description: Output of `npm ls -g murmur-it`, or the commit if you run from source.
+    validations:
+      required: true
+  - type: dropdown
+    id: cli
+    attributes:
+      label: CLI involved
+      options:
+        - Claude Code
+        - Codex
+        - Gemini CLI
+        - zcode
+        - opencode
+        - Hummin
+        - Plain terminal only
+    validations:
+      required: true
+  - type: input
+    id: cli-version
+    attributes:
+      label: CLI version and OS
+      placeholder: "Claude Code 2.1.304, macOS 27"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The exact commands you ran and what came back.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: murmur status output
+      description: Paste it if it is relevant. Remove anything private.
+      render: text
