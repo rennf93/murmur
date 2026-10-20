@@ -5,7 +5,7 @@
   "type": "module",
   "private": true,
   "bin": {
-    "murmur": "dist/cli.js"
+    "murmur": "bin/murmur.js"
   },
   "engines": {
     "node": ">=20"
