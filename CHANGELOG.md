@@ -4,6 +4,17 @@ All notable changes to murmur are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] - 2026-10-20
+
+### Fixed
+
+- `murmur mcp` exits when its client goes away. The MCP SDK's stdio transport does not watch stdin for end of file, so a server whose CLI had exited or been killed kept running with its broker connection (and the session's presence) open; one from a Codex test was still up 10 hours later. The server now also returns when stdin ends or closes.
+- The MCP server reports the package version instead of a hard-coded `0.2.0`.
+
+### Changed
+
+- `publishConfig` no longer sets `provenance: true`, so a hand `npm publish` works outside CI. The release workflow still publishes with `--provenance`.
+
 ## [0.2.1-rc.1] - 2026-10-20
 
 ### Changed
@@ -50,6 +61,7 @@ All notable changes to murmur are documented here. The format follows
 - Limits: send rate, duplicate window, thread and inbox caps.
 - 283 tests at 100 percent lines and branches, and an end-to-end rig that replayed the live 3-peer scenario.
 
+[0.2.1]: https://github.com/rennf93/murmur/releases/tag/v0.2.1
 [0.2.1-rc.1]: https://github.com/rennf93/murmur/releases/tag/v0.2.1-rc.1
 [0.2.0]: https://github.com/rennf93/murmur/releases/tag/v0.2.0
 [0.1.0]: https://github.com/rennf93/murmur/releases/tag/v0.1.0

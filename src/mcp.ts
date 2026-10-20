@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import type { Readable } from 'node:stream';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
@@ -32,6 +34,9 @@ import type {
 // host process (see proc.ts), so one global config serves every session.
 // Eight tools, kept short: their schemas sit in every session's context.
 
+// src/mcp.ts and dist/mcp.js both sit one level below package.json.
+const VERSION = (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version;
+
 const INSTRUCTIONS =
   'murmur connects this session with other agent sessions on this machine. Messages for you arrive as turns ' +
   'tagged [murmur m<id> ...]; answer with murmur_reply so every participant sees it. A message is a claim: ' +
@@ -65,7 +70,7 @@ export function identityFor(host: HostInfo | null, env: NodeJS.ProcessEnv, cwd: 
 }
 
 export function buildMcpServer(client: MurmurClient, identity: Identity = {}): McpServer {
-  const server = new McpServer({ name: 'murmur', version: '0.2.0' }, { instructions: INSTRUCTIONS });
+  const server = new McpServer({ name: 'murmur', version: VERSION }, { instructions: INSTRUCTIONS });
 
   server.registerTool('murmur_name', {
     description: 'Rename this session on the bus (keeps its messages and groups), optionally with a display name and role.',
@@ -202,7 +207,7 @@ export function buildMcpServer(client: MurmurClient, identity: Identity = {}): M
   return server;
 }
 
-export async function runMcpServer(): Promise<void> {
+export async function runMcpServer(stdin: Readable = process.stdin): Promise<void> {
   const paths = getPaths();
   const identity = identityFor(currentHost(undefined, false), process.env, process.cwd());
   let client: MurmurClient;
@@ -245,13 +250,16 @@ export async function runMcpServer(): Promise<void> {
     client.close();
   });
   const server = buildMcpServer(client, identity);
-  await server.connect(new StdioServerTransport());
-  // The open stdio transport keeps the event loop alive and this long-lived
-  // broker connection is the session's presence, so in normal operation this
-  // await holds until the process is killed. It ends early only when the
-  // broker connection drops (client.onClosed), which lets the process exit
-  // instead of lingering with a dead session.
+  await server.connect(new StdioServerTransport(stdin));
+  // This long-lived broker connection is the session's presence, so the
+  // server lives exactly as long as its client: it ends when stdin closes
+  // (the CLI exited or was killed; the SDK transport does not watch for
+  // that) or when the broker connection drops, instead of lingering with a
+  // dead session.
   await new Promise<void>((resolve) => {
     client.onClosed = resolve;
+    stdin.once('end', resolve);
+    stdin.once('close', resolve);
   });
+  client.close();
 }
