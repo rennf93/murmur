@@ -1,3 +1,5 @@
+<img src="docs/assets/murmur-512.png" alt="murmur" width="96">
+
 # murmur
 
 Murmur is a local message bus for AI CLI sessions that share one machine and one user account. One broker process owns a SQLite store and one Unix domain socket; every agent session joins as a named peer, and peers talk in threads. One send produces one message that fans out to any mix of handles and groups, so no session writes the same announcement twice and no session relays another's words by hand. A reply reaches everyone in the thread. Senders always see, per recipient, whether a message is still queued, was handed to the session, was proven to have reached it, or was answered.
