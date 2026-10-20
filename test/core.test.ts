@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { MurmurCore, fullOf, percentile } from '../src/core.js';
+import { MurmurCore, fullOf, percentile, slugify } from '../src/core.js';
 import type { CoreEvents } from '../src/core.js';
 import {
   DUP_WINDOW_MS,
@@ -163,7 +163,7 @@ describe('register', () => {
     expect(peers.find((p) => p.handle === 'beta')).toMatchObject({ display: null, role: null, isOwner: false });
   });
 
-  it.each(['A', '-bad', 'a', 'a'.repeat(33), 'has space'])('rejects the invalid handle %s', (handle) => {
+  it.each(['A', '-bad', 'a', 'a'.repeat(49), 'has space'])('rejects the invalid handle %s', (handle) => {
     expectCoreError(() => core.register({ handle }), 'bad_request', 'invalid handle');
   });
 
@@ -1225,5 +1225,101 @@ describe('status from sessions', () => {
   it('reports a null client for peers without sessions', () => {
     register('plain');
     expect(peerOf('plain').client).toBeNull();
+  });
+});
+
+describe('via', () => {
+  it('stores via on a send and a reply, and reply fan-out reaches the via session', () => {
+    register('boss', 'alpha', 'beta');
+    store.upsertPeer('boss', null, null, true, 1);
+    const ask = core.send('boss', { threadId: null, to: ['beta'], body: 'q', via: 'alpha' });
+    expect(ask.result.via).toBe('alpha');
+    expect(core.threadView(ask.result.threadId, null, false).messages[0]?.via).toBe('alpha');
+    expect(ask.pushes[0]?.text).toContain('from boss via alpha to beta]');
+    const { result, pushes } = core.reply('beta', { messageId: ask.result.messageId, body: 'r' });
+    expect(pushes.map((p) => p.recipient).sort()).toEqual(['alpha', 'boss']);
+    expect(store.messageById(result.messageId)?.via).toBeNull();
+    // The replier is never a recipient of its own reply, even as the via.
+    const own = core.reply('alpha', { messageId: ask.result.messageId, body: 'mine', via: 'alpha' });
+    expect(own.pushes.map((p) => p.recipient).sort()).toEqual(['beta', 'boss']);
+    expect(store.messageById(own.result.messageId)?.via).toBe('alpha');
+  });
+});
+
+describe('slugify', () => {
+  it.each([
+    ['Ledger, Implementer, Companion - Claude 3', 'ledger-implementer-companion-claude-3'],
+    ['Archify - Guard Core Ecosystem 2', 'archify-guard-core-ecosystem-2'],
+    ['  --Hi!!  ', 'hi'],
+    ['x'.repeat(47) + ' tail', 'x'.repeat(47)],
+    ['???', ''],
+  ])('turns %s into %s', (title, slug) => {
+    expect(slugify(title)).toBe(slug);
+  });
+});
+
+describe('session titles', () => {
+  function start(pid: number, title?: string, extra: Record<string, unknown> = {}): ReturnType<MurmurCore['sessionEvent']> {
+    return core.sessionEvent({
+      event: 'session-start', client: 'claude', cliSessionId: 'id' + String(pid), host: alive(pid), cwd: '/w/proj',
+      ...(title !== undefined ? { title } : {}), ...extra,
+    });
+  }
+
+  it('names a new session after its title and shows the title as its display', () => {
+    const row = start(1, 'Ledger, Implementer - Claude 3');
+    expect(row).toMatchObject({ handle: 'ledger-implementer-claude-3', pinned: false });
+    expect(store.getPeer('ledger-implementer-claude-3')?.display).toBe('Ledger, Implementer - Claude 3');
+  });
+
+  it('falls back to the folder name for an unusable title or a held slug', () => {
+    expect(start(1, '???').handle).toBe('claude-proj');
+    expect(start(2, 'Same Name').handle).toBe('same-name');
+    expect(start(3, 'Same Name').handle).toBe('claude-proj-2');
+  });
+
+  it('follows a later /rename while the handle is automatic', () => {
+    start(1, 'First');
+    const renamed = start(1, 'Second One');
+    expect(renamed.handle).toBe('second-one');
+    expect(store.getPeer('first')).toBeNull();
+    expect(store.getPeer('second-one')?.display).toBe('Second One');
+    // The same title again changes nothing.
+    expect(start(1, 'Second One').handle).toBe('second-one');
+  });
+
+  it('keeps the handle when another live session holds the title slug', () => {
+    start(1, 'Taken');
+    const other = start(2);
+    expect(start(2, 'Taken').handle).toBe(other.handle);
+    expect(store.getPeer(other.handle)?.display).toBe('Taken');
+  });
+
+  it('pins on an explicit rename, and ignores the title afterwards', () => {
+    const row = start(1, 'Auto');
+    expect(core.renameSession(row, 'chosen').valueOf()).toBe('chosen');
+    expect(store.sessionById(row.id)?.pinned).toBe(true);
+    const later = start(1, 'Another Title');
+    expect(later.handle).toBe('chosen');
+    expect(store.getPeer('chosen')?.display).toBe('Another Title');
+    // An explicit handle on a new session pins it too.
+    const named = start(2, 'Other', { handle: 'mine' });
+    expect(named).toMatchObject({ handle: 'mine', pinned: true });
+    expect(start(2, 'Else').handle).toBe('mine');
+  });
+});
+
+describe('prune', () => {
+  it('removes only peers nothing refers to', () => {
+    store.upsertPeer('boss', null, null, true, 1);
+    register('ghost-a', 'ghost-b', 'connected', 'sender', 'receiver', 'grouped', 'sessioned');
+    core.send('sender', { threadId: null, to: ['receiver'], body: 'hi' });
+    core.groups('create', 'crew');
+    core.groups('add', 'crew', ['grouped']);
+    core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'x', host: alive(9), handle: 'sessioned' });
+    expect(core.prune(new Set(['connected']))).toEqual(['ghost-a', 'ghost-b']);
+    expect(store.listPeers().map((p) => p.handle).sort()).toEqual(['boss', 'connected', 'grouped', 'receiver', 'sender', 'sessioned']);
+    expect(core.prune(new Set())).toEqual(['connected']);
+    expect(core.prune(new Set())).toEqual([]);
   });
 });

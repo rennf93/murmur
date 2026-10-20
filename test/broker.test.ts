@@ -2710,3 +2710,154 @@ describe('socket startup', () => {
     await expect(statusOf(peer.client)).resolves.toBeDefined();
   });
 });
+
+describe('via, titles and prune', () => {
+  it('stamps via on owner sends and replies, and pushes replies into the typed-in session', async () => {
+    const stack = await buildStack();
+    addOwner(stack, 'renn');
+    const typedIn = await connectAdapter(stack, 'typed-in', 6001);
+    const target = await connectAdapter(stack, 'target-b', 6002);
+    const cli = await connectPeer(stack);
+    await req<RegisterResult>(cli.client, { type: 'register', clientKind: 'cli', owner: true, ancestors: [1, 6001] });
+    const sent = await req<SendResult>(cli.client, { type: 'send', threadId: null, to: ['target-b'], body: 'ask' });
+    expect(sent.via).toBe('typed-in');
+    expect(pushesOf(target)[0]?.payload.text).toContain('from renn via typed-in to target-b]');
+    const reply = await req<ReplyResult>(target.client, { type: 'reply', messageId: sent.messageId, body: 'answer' });
+    expect(stack.store.getDeliveries(reply.messageId).map((d) => d.recipient)).toEqual(['renn', 'typed-in']);
+    await settle(() => pushesOf(typedIn).length > 0, 'reply pushed into the typed-in session');
+    // The owner replying on the same connection is stamped too.
+    const own = await req<ReplyResult>(cli.client, { type: 'reply', messageId: sent.messageId, body: 'thanks' });
+    expect(stack.store.messageById(own.messageId)?.via).toBe('typed-in');
+    const view = await req<ThreadResult>(cli.client, { type: 'thread', threadId: sent.threadId, sinceSeq: null, full: false });
+    expect(view.messages.map((m) => m.via)).toEqual(['typed-in', null, 'typed-in']);
+    // No session among the ancestors, or no ancestors at all: no via.
+    const plain = await connectPeer(stack);
+    await req(plain.client, { type: 'register', clientKind: 'cli', owner: true, ancestors: [424242] });
+    expect((await req<SendResult>(plain.client, { type: 'send', threadId: null, to: ['target-b'], body: 'plain' })).via).toBeNull();
+    // A re-register clears the via of the connection.
+    await req(cli.client, { type: 'register', clientKind: 'cli', owner: true });
+    expect((await req<SendResult>(cli.client, { type: 'send', threadId: null, to: ['target-b'], body: 'bare' })).via).toBeNull();
+  });
+
+  it('a title renames the session and its MCP connection follows to send and hold presence', async () => {
+    const stack = await buildStack();
+    const mcp = await connectPeer(stack);
+    const host = hostRef(stack, 6010);
+    await req(mcp.client, { type: 'register', clientKind: 'mcp', host, client: 'claude' });
+    const hook = await connectPeer(stack);
+    const base = { type: 'session', client: 'claude', cliSessionId: 'c-6010', host };
+    const first = await req<SessionResult>(hook.client, { ...base, event: 'session-start', cwd: '/w/proj' });
+    expect(first.handle).toBe('claude-proj');
+    const peer = await connectPeer(stack, { handle: 'someone' });
+    const sendAs = async (body: string): Promise<string> => {
+      const sent = await req<SendResult>(mcp.client, { type: 'send', threadId: null, to: ['someone'], body });
+      return senderOf(stack, sent.threadId)[0] as string;
+    };
+    expect(await sendAs('before')).toBe('claude-proj');
+    const renamed = await req<SessionResult>(hook.client, { ...base, event: 'prompt', title: 'Live Peer A' });
+    expect(renamed.handle).toBe('live-peer-a');
+    expect(await sendAs('after')).toBe('live-peer-a');
+    const presence = (stack.broker as unknown as { presence: Map<string, unknown> }).presence;
+    expect(presence.has('live-peer-a')).toBe(true);
+    expect(presence.has('claude-proj')).toBe(false);
+    const status = await statusOf(peer.client);
+    expect(status.peers.find((p) => p.handle === 'live-peer-a')).toMatchObject({ display: 'Live Peer A', presence: 'busy' });
+    // An explicit name pins; later titles only change the display.
+    await expect(req<RegisterResult>(mcp.client, { type: 'register', clientKind: 'mcp', host, handle: 'chosen' })).resolves.toEqual({
+      handle: 'chosen',
+      owner: false,
+    });
+    expect(await sendAs('chosen')).toBe('chosen');
+    await expect(req<RegisterResult>(mcp.client, { type: 'register', clientKind: 'mcp', host, handle: 'chosen' })).resolves.toEqual({
+      handle: 'chosen',
+      owner: false,
+    });
+    const pinned = await req<SessionResult>(hook.client, { ...base, event: 'stop', title: 'Live Peer B' });
+    expect(pinned.handle).toBe('chosen');
+    expect((await statusOf(peer.client)).peers.find((p) => p.handle === 'chosen')?.display).toBe('Live Peer B');
+  });
+
+  it('a title joining an existing peer still moves the MCP connection when only an ended session keeps the old name', async () => {
+    const stack = await buildStack();
+    const hook = await connectPeer(stack);
+    const old = { type: 'session', client: 'claude', cliSessionId: 'c-6020', host: hostRef(stack, 6020), cwd: '/w/proj' };
+    await req(hook.client, { ...old, event: 'session-start' });
+    await req(hook.client, { ...old, event: 'session-end' });
+    stack.store.upsertPeer('live-peer-a', null, null, false, 1);
+    await connectPeer(stack, { handle: 'someone' });
+    const host = hostRef(stack, 6021);
+    const mcp = await connectPeer(stack);
+    await req(mcp.client, { type: 'register', clientKind: 'mcp', host, client: 'claude' });
+    const base = { type: 'session', client: 'claude', cliSessionId: 'c-6021', host, cwd: '/w/proj' };
+    expect((await req<SessionResult>(hook.client, { ...base, event: 'session-start' })).handle).toBe('claude-proj');
+    expect((await req<SessionResult>(hook.client, { ...base, event: 'prompt', title: 'Live Peer A' })).handle).toBe('live-peer-a');
+    const sent = await req<SendResult>(mcp.client, { type: 'send', threadId: null, to: ['someone'], body: 'hi' });
+    expect(senderOf(stack, sent.threadId)[0]).toBe('live-peer-a');
+  });
+
+  it('a title rename carries pending delivery proof to the new handle', async () => {
+    const dir = mkdtempSync(join('/tmp', 'mm-'));
+    const transcript = join(dir, 'bob.jsonl');
+    writeFileSync(transcript, 'earlier line\n');
+    try {
+      const fake = fakeNative();
+      const stack = await buildStack(fake.fn, { proofPollMs: 20 });
+      const alice = await connectPeer(stack, { handle: 'alice' });
+      const hook = await connectPeer(stack);
+      const base = { type: 'session', client: 'claude', cliSessionId: 'c-6030', host: hostRef(stack, 6030) };
+      const first = await req<SessionResult>(hook.client, {
+        ...base,
+        event: 'session-start',
+        cwd: '/w/proof',
+        transcriptPath: transcript,
+        native: { socketPath: '/tmp/rn.sock', token: 'rn' },
+      });
+      const sent = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: [first.handle], body: 'prove me' });
+      expect(stack.store.getDeliveries(sent.messageId)[0]?.state).toBe('sent');
+      const renamed = await req<SessionResult>(hook.client, { ...base, event: 'prompt', title: 'Proof Renamed' });
+      expect(renamed.handle).toBe('proof-renamed');
+      appendFileSync(transcript, (fake.calls[0]?.text ?? '') + '\n');
+      await settle(() => stack.store.getDeliveries(sent.messageId)[0]?.state === 'delivered', 'proof delivered after rename');
+      expect(stack.store.getDeliveries(sent.messageId)[0]?.recipient).toBe('proof-renamed');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a title rename moves a queued notification batch to the new handle', async () => {
+    fakeWaitWindow();
+    const stack = await buildStack();
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    const adapter = await connectPeer(stack);
+    const base = { type: 'session', client: 'claude', cliSessionId: 'c-6031', host: hostRef(stack, 6031) };
+    const first = await req<SessionResult>(adapter.client, { ...base, event: 'session-start', cwd: '/w/note', listen: true });
+    await req<SendResult>(alice.client, { type: 'send', threadId: null, to: [first.handle], body: 'fyi', mode: 'notify' });
+    const renamed = await req<SessionResult>(adapter.client, { ...base, event: 'prompt', title: 'Note Renamed', listen: true });
+    expect(renamed.handle).toBe('note-renamed');
+    await advanceUntil(() => notificationsOf(adapter).length > 0, 'notification after rename');
+    expect(notificationsOf(adapter)[0]?.payload).toHaveLength(1);
+  });
+
+  it('rejects a title that is not a string', async () => {
+    const stack = await buildStack();
+    const conn = await connectPeer(stack);
+    await expect(
+      req(conn.client, { type: 'session', event: 'prompt', client: 'claude', cliSessionId: 's', host: hostRef(stack, 6011), title: 5 }),
+    ).rejects.toMatchObject({ code: 'bad_request', message: 'title must be a string' });
+  });
+
+  it('prune removes unreferenced peers and spares the connected, the owner and the used', async () => {
+    const stack = await buildStack();
+    addOwner(stack, 'renn');
+    for (const handle of ['claude-0a1b2c3d', 'claude-4e5f6a7b']) {
+      stack.store.upsertPeer(handle, null, null, false, 1);
+    }
+    await connectPeer(stack, { handle: 'still-here' });
+    const cli = await connectPeer(stack);
+    await req(cli.client, { type: 'register', clientKind: 'cli', owner: true });
+    await expect(req(cli.client, { type: 'prune' })).resolves.toEqual({ removed: ['claude-0a1b2c3d', 'claude-4e5f6a7b'] });
+    await expect(req(cli.client, { type: 'prune' })).resolves.toEqual({ removed: [] });
+    expect(stack.store.getPeer('still-here')).not.toBeNull();
+    expect(stack.store.getPeer('renn')).not.toBeNull();
+  });
+});

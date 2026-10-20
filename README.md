@@ -1,3 +1,5 @@
+<img src="docs/assets/murmur-512.png" alt="murmur" width="96">
+
 # murmur
 
 Murmur is a local message bus for AI CLI sessions that share one machine and one user account. One broker process owns a SQLite store and one Unix domain socket; every agent session joins as a named peer, and peers talk in threads. One send produces one message that fans out to any mix of handles and groups, so no session writes the same announcement twice and no session relays another's words by hand. A reply reaches everyone in the thread. Senders always see, per recipient, whether a message is still queued, was handed to the session, was proven to have reached it, or was answered.
@@ -38,7 +40,9 @@ Every hook, MCP server and CLI command walks up its process ancestors and takes 
 - A new session is named `<cli>-<folder>` (`claude-murmur`, `codex-guard-core`), then `-2`, `-3` for more live sessions in that folder. A name whose sessions have all ended is reused, so a restarted session in the same folder rejoins its groups and inbox.
 - Rename with the `murmur_name` tool, or `murmur name <handle>` from the session's shell. A rename keeps every message, delivery and group membership. Taking a name held by another live session is refused; taking one held by an ended session joins that identity.
 - Resume (same CLI session id, new process) and clear (new id, same process) keep the name.
-- `murmur send` and `murmur reply` run from an agent's shell speak as that agent's session; run from a plain terminal they speak as the owner. `--as <handle>` overrides. `/murmur` always speaks as the owner, because it is you typing.
+- `murmur send` and `murmur reply` run from an agent's shell speak as that agent's session; run from a plain terminal they speak as the owner. `--as <handle>` overrides. `/murmur` always speaks as the owner, because it is you typing, and shows the session you typed it in: the tag reads `from renn via <session>`, and replies are pushed into that session as well as to `renn`. From a plain terminal there is no session and no `via`.
+- A Claude session takes the name the user gave it (its `/rename` title): the hook reads the latest `customTitle` from the tail of the transcript, the handle becomes its slug (`Ledger, Implementer, Companion - Claude 3` is `ledger-implementer-companion-claude-3`) and the display name the full title. The handle follows later renames only while it is automatic; `murmur_name` and `murmur name` pin it. A slug held by another live session keeps the current handle.
+- Handles are 1 to 48 characters: `^[a-z0-9][a-z0-9-]{1,47}$`.
 
 ## Delivery truth table
 
@@ -66,7 +70,7 @@ What a session sees for every message, on every path:
 ## Threads, groups, verdicts
 
 - One message, one id, fanned out. Targets are handles and groups: `@name` is always a group; a bare name is a handle, or the group of that name when no peer has that handle. Overlapping groups dedupe.
-- Replies go to everyone in the thread (every sender and recipient so far), in the parent's mode, so peers see each other's answers without relaying.
+- Replies go to everyone in the thread (every sender, every recipient and every session an owner message was typed in, so far), in the parent's mode, so peers see each other's answers without relaying. To consult several sessions, send once to all of them.
 - Every message has a per-thread monotonic `seq`. `murmur_thread` returns first lines by default, full bodies with `full`, and only newer messages with `sinceSeq`.
 - Verdicts: `agree`, `disagree`, `info`, with the body starting `AGREE`, `DISAGREE` or `INFO`. `murmur_wait` returns, for the thread's latest ask, each recipient's state, verdict and reply latency plus their historical p50 and p95, either when everyone (or anyone) replied or at the timeout (`timeoutMs: 0` returns now).
 - `references` carries pointers (paths, commits, URLs) so artifacts stay in their repos.
@@ -81,7 +85,7 @@ The human surface, as the owner:
 - `/murmur <group | @group | handle[,more]> <message>`; bare `/murmur` lists peers and groups. In Claude Code and zcode the command file runs `murmur slash --stdin` with the message in a quoted heredoc, so quotes, `$(...)`, backticks and `;` arrive verbatim (Claude Code turns a word-initial `!` into `\!` before the shell sees it; `--claude-escaped` turns it back); the model only shows the output. Hummin's `/murmur` runs with no model turn at all.
 - `murmur send <targets> <body...> [--mode push|notify|silent] [--refs a,b] [--thread <id>] [--as <handle>]`
 - `murmur reply <id> <body...> [--verdict agree|disagree|info] [--refs a,b] [--as <handle>]`
-- `murmur status`, `murmur thread <id> [--since <seq>] [--full]`, `murmur groups [list|create|add|remove|delete] ...`, `murmur name <handle>`
+- `murmur status`, `murmur thread <id> [--since <seq>] [--full]`, `murmur groups [list|create|add|remove|delete] ...`, `murmur name <handle>`, `murmur prune` (removes peers with no session, message, delivery, group membership or live connection, such as v0.1 leftovers, and prints their handles)
 
 ## Doctrine
 

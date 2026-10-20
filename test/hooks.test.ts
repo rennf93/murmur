@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import type { Socket } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -376,5 +376,46 @@ describe('failure tolerance', () => {
     } finally {
       await close();
     }
+  });
+});
+
+describe('claude session titles', () => {
+  // The shape Claude writes on /rename; agent-name entries are a different type.
+  const entry = (customTitle: unknown): string => JSON.stringify({ type: 'custom-title', customTitle, sessionId: 's' }) + '\n';
+
+  async function startWith(client: HookClient, transcript: string | null, stack?: Stack): Promise<string> {
+    const st = stack ?? (await buildStack());
+    const dir = freshHome();
+    const path = join(dir, 'transcript.jsonl');
+    if (transcript !== null) {
+      writeFileSync(path, transcript);
+    }
+    await runHook('session-start', JSON.stringify({ session_id: 's', transcript_path: path, cwd: '/work/proj' }), envFor(st), CLIENT_OPT(client));
+    return st.store.sessionByHost(HOST.hostPid, HOST.hostStart)?.handle as string;
+  }
+
+  it('takes the last customTitle from the transcript', async () => {
+    const lines =
+      entry('Old') +
+      '{"type":"user","note":"custom-title but another entry"}\n' +
+      '{"type":"agent-name","agentName":"clear-conversation","custom-title":1}\n' +
+      '{"type":"custom-title" broken\n' +
+      entry('Ledger - Claude 3') +
+      entry(7);
+    expect(await startWith('claude', lines)).toBe('ledger-claude-3');
+  });
+
+  it('reads only the tail of a large transcript, skipping the line it cuts', async () => {
+    const filler = 'x'.repeat(1000) + '\n';
+    const big = entry('Too Early') + filler.repeat(300) + entry('Tail Name');
+    expect(await startWith('claude', big)).toBe('tail-name');
+    const cut = 'y'.repeat(300_000) + entry('cut line').slice(5) + entry('Kept');
+    expect(await startWith('claude', cut, await buildStack())).toBe('kept');
+  });
+
+  it('means no title for a missing file, no entry, or a client other than claude', async () => {
+    expect(await startWith('claude', null)).toBe('claude-proj');
+    expect(await startWith('claude', '{"type":"user"}\n', await buildStack())).toBe('claude-proj');
+    expect(await startWith('codex', entry('Nope'), await buildStack())).toBe('codex-proj');
   });
 });

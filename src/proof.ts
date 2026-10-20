@@ -67,6 +67,17 @@ export class ProofWatcher {
     }
   }
 
+  // The recipient's handle changed: its pending watches follow it.
+  rename(from: string, to: string): void {
+    for (const [key, watch] of [...this.watches]) {
+      if (watch.recipient === from) {
+        this.watches.delete(key);
+        watch.recipient = to;
+        this.watches.set(String(watch.messageId) + '\u0000' + to, watch);
+      }
+    }
+  }
+
   stop(): void {
     if (this.timer !== null) {
       clearInterval(this.timer);

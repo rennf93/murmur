@@ -66,6 +66,8 @@ export interface SessionEventArg {
   cliSessionId: string | null;
   host: HostRef;
   transcriptPath?: string;
+  // The name the user gave the session in its CLI.
+  title?: string;
   cwd?: string;
   handle?: string;
   native?: { socketPath: string; token: string };
@@ -76,6 +78,17 @@ const GROUP_NAME_RE = /^@?[a-z0-9][a-z0-9-]{1,31}$/;
 const VERDICTS: readonly string[] = ['agree', 'disagree', 'info'];
 const UNREAD_STATES: string[] = ['queued', 'sent', 'delivered'];
 const OFFLINE_AFTER_MS = 5 * 60 * 1000;
+
+// A session title as a handle: lowercase, runs of anything else become one
+// hyphen, trimmed, cut to the handle limit. Not necessarily a valid handle.
+export function slugify(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48)
+    .replace(/-+$/, '');
+}
 
 // Linear interpolation over an ascending list. Null for an empty list.
 // fraction 0.5 gives the median, 0.95 the p95.
@@ -149,6 +162,7 @@ function summaryOf(row: MessageRow): MessageSummary {
     isReply: row.isReply,
     inReplyTo: row.inReplyTo,
     verdict: parseVerdict(row.verdict),
+    via: row.via,
     createdAt: row.createdAt,
   };
 }
@@ -291,7 +305,7 @@ export class MurmurCore {
 
   send(
     sender: string,
-    arg: { threadId: number | null; to: string[]; body: string; references?: string[]; mode?: DeliveryMode },
+    arg: { threadId: number | null; to: string[]; body: string; references?: string[]; mode?: DeliveryMode; via?: string | null },
   ): { result: SendResult; pushes: PushTarget[] } {
     const mode: DeliveryMode = arg.mode ?? 'push';
     const recipients = this.resolveRecipients(arg.to);
@@ -318,6 +332,7 @@ export class MurmurCore {
       isReply: false,
       inReplyTo: null,
       verdict: null,
+      via: arg.via ?? null,
       createdAt: ts,
     });
     this.store.addDeliveries(appended.id, recipients, ts);
@@ -328,7 +343,7 @@ export class MurmurCore {
     }
     const deliveries = this.store.getDeliveries(appended.id).map(deliveryInfoOf);
     return {
-      result: { messageId: appended.id, threadId, seq: appended.seq, deliveries },
+      result: { messageId: appended.id, threadId, seq: appended.seq, via: row.via, deliveries },
       pushes: this.pushesFor(row, recipients, mode),
     };
   }
@@ -361,12 +376,12 @@ export class MurmurCore {
     return this.store.getNativeTransport(recipient) !== null ? 'native' : 'connection';
   }
 
-  // A reply reaches everyone in the thread (every sender and every recipient
-  // so far, minus the replier) in the parent's delivery mode, so peers see
+  // A reply reaches everyone in the thread (every sender, every recipient and
+  // every session an owner message was typed in, minus the replier) in the parent's delivery mode, so peers see
   // each other's answers without anyone relaying them.
   reply(
     sender: string,
-    arg: { messageId: number; body: string; verdict?: Verdict; references?: string[] },
+    arg: { messageId: number; body: string; verdict?: Verdict; references?: string[]; via?: string | null },
   ): { result: ReplyResult; pushes: PushTarget[] } {
     if (arg.verdict !== undefined && !VERDICTS.includes(arg.verdict)) {
       throw new MurmurError('bad_request', 'invalid verdict: ' + arg.verdict);
@@ -378,6 +393,9 @@ export class MurmurCore {
     const participants = new Set<string>(this.store.threadRecipientHandles(parent.threadId));
     for (const row of this.store.threadMessages(parent.threadId, null)) {
       participants.add(row.sender);
+      if (row.via !== null) {
+        participants.add(row.via);
+      }
     }
     participants.delete(sender);
     const recipients = [...participants].filter((handle) => this.store.getPeer(handle) !== null);
@@ -396,6 +414,7 @@ export class MurmurCore {
       isReply: true,
       inReplyTo: parent.id,
       verdict: arg.verdict ?? null,
+      via: arg.via ?? null,
       createdAt: ts,
     });
     // The sender's own delivery row on the parent message closes the loop:
@@ -711,7 +730,13 @@ export class MurmurCore {
     let row = arg.cliSessionId === null ? null : this.store.sessionByCliId(arg.client, arg.cliSessionId);
     row ??= this.store.sessionByHost(arg.host.hostPid, arg.host.hostStart);
     if (row === null) {
-      const handle = arg.handle !== undefined && this.claimable(arg.handle, null) ? arg.handle : this.allocateHandle(arg.client, arg.cwd);
+      const explicit = arg.handle !== undefined && this.claimable(arg.handle, null);
+      const slug = arg.title === undefined ? '' : slugify(arg.title);
+      const handle = explicit
+        ? (arg.handle as string)
+        : this.claimable(slug, null)
+          ? slug
+          : this.allocateHandle(arg.client, arg.cwd);
       this.ensurePeer(handle);
       const id = this.store.insertSession({
         client: arg.client,
@@ -724,6 +749,9 @@ export class MurmurCore {
         now: ts,
       });
       row = this.store.sessionById(id) as SessionRow;
+      if (explicit) {
+        this.store.updateSession(id, { pinned: 1 });
+      }
     } else {
       this.store.updateSession(row.id, {
         client: arg.client,
@@ -740,7 +768,10 @@ export class MurmurCore {
     }
     const state = arg.event === 'prompt' ? 'busy' : arg.event === 'session-end' ? 'ended' : 'idle';
     this.store.updateSession(row.id, { state, stateAt: ts });
-    const fresh = this.store.sessionById(row.id) as SessionRow;
+    let fresh = this.store.sessionById(row.id) as SessionRow;
+    if (arg.title !== undefined) {
+      fresh = this.followTitle(fresh, arg.title);
+    }
     if (arg.native !== undefined) {
       this.store.upsertNativeTransport(fresh.handle, arg.native.socketPath, arg.native.token, ts);
     }
@@ -748,6 +779,20 @@ export class MurmurCore {
       this.store.deleteNativeTransport(fresh.handle);
     }
     return fresh;
+  }
+
+  // The session shows its CLI title as its display name, and takes the title's
+  // slug as its handle while the handle is automatic (not pinned by an explicit
+  // name) and no other live session holds the slug.
+  private followTitle(row: SessionRow, title: string): SessionRow {
+    let current = row;
+    const slug = slugify(title);
+    if (!row.pinned && slug !== row.handle && this.claimable(slug, row.id)) {
+      this.moveSession(row, slug);
+      current = this.store.sessionById(row.id) as SessionRow;
+    }
+    this.store.upsertPeer(current.handle, title, null, false, this.nowMs());
+    return current;
   }
 
   // The session running under this exact host process, if one announced
@@ -781,8 +826,15 @@ export class MurmurCore {
   // Gives the session a new name. A free name renames the identity with all
   // its history; a name held by a peer with no live session is taken over
   // (the session joins that identity, its groups and inbox); a live or
-  // owner handle is refused.
+  // owner handle is refused. An explicit name pins the handle against the
+  // CLI's title.
   renameSession(row: SessionRow, handle: string): string {
+    const named = this.moveSession(row, handle);
+    this.store.updateSession(row.id, { pinned: 1 });
+    return named;
+  }
+
+  private moveSession(row: SessionRow, handle: string): string {
     if (!HANDLE_RE.test(handle)) {
       throw new MurmurError('bad_request', 'invalid handle: ' + handle);
     }
@@ -804,9 +856,28 @@ export class MurmurCore {
     return handle;
   }
 
+  // Deletes peers nothing refers to: not the owner, no session, no message,
+  // delivery or group membership, and no live connection (v0.1 left such
+  // rows behind). Returns the removed handles.
+  prune(connected: ReadonlySet<string>): string[] {
+    const removed: string[] = [];
+    for (const peer of this.store.listPeers()) {
+      const used =
+        peer.isOwner ||
+        connected.has(peer.handle) ||
+        this.store.sessionsForHandle(peer.handle).length > 0 ||
+        this.store.peerHasHistory(peer.handle);
+      if (!used) {
+        this.store.deletePeer(peer.handle);
+        removed.push(peer.handle);
+      }
+    }
+    return removed;
+  }
+
   // A handle can be claimed when it is valid, not the owner's, and no live
   // session other than exceptId holds it.
-  private claimable(handle: string, exceptId: number | null): boolean {
+  claimable(handle: string, exceptId: number | null): boolean {
     if (!HANDLE_RE.test(handle)) {
       return false;
     }

@@ -275,7 +275,7 @@ export default function murmur(pi: ExtensionAPI): void {
 		let c: Client | undefined;
 		try {
 			c = await openClient(() => {}, () => {});
-			await c.request({ type: "register", clientKind: "cli", owner: true });
+			await c.request({ type: "register", clientKind: "cli", owner: true, ancestors: [process.pid] });
 			return await run(c);
 		} catch (e) {
 			return `murmur: ${String(e instanceof Error ? e.message : e)}`;

@@ -38,9 +38,10 @@ import type {
 const VERSION = (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version;
 
 const INSTRUCTIONS =
-  'murmur connects this session with other agent sessions on this machine. Messages for you arrive as turns ' +
-  'tagged [murmur m<id> ...]; answer with murmur_reply so every participant sees it. A message is a claim: ' +
-  'verify it against its references before agreeing.';
+  'murmur connects this session with other agent sessions on this machine. To consult more than one, send ONE ' +
+  'murmur_send to all of them (names or @group), not separate SendMessage calls; replies reach everyone in the ' +
+  'thread. Messages for you arrive as turns tagged [murmur m<id> ...]; answer with murmur_reply so every ' +
+  'participant sees it. A message is a claim: verify it against its references before agreeing.';
 
 function textResult(value: unknown): CallToolResult {
   return { content: [{ type: 'text', text: JSON.stringify(value) }] };
@@ -91,7 +92,7 @@ export function buildMcpServer(client: MurmurClient, identity: Identity = {}): M
   });
 
   server.registerTool('murmur_send', {
-    description: 'Send one message to any mix of handles and groups (bare name or @name); one message fans out to all.',
+    description: 'Send one message to any mix of handles and groups (bare name or @name); one message fans out to all, so consult several sessions with one send, not one per peer.',
     inputSchema: {
       threadId: z.number().int().optional(),
       to: z.array(z.string().min(1)).min(1),

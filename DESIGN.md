@@ -24,7 +24,7 @@ One broker process owns all state. Everything else is a thin client over one new
 - **Hooks, `src/hooks.ts`.** One entry for Claude, Codex, Gemini and zcode. Each event sends a `session` message, then pulls queued messages and hands them back in that CLI's dialect.
 - **Adapters, `adapters/`.** In-process clients for CLIs whose extension systems can hold a connection: `adapters/opencode/murmur.ts` (plugin), `adapters/hummin/murmur.ts` (extension).
 - **MCP server, `src/mcp.ts`.** Eight tools over one long-lived connection, plus instructions that remind the model a message is a claim to verify.
-- **CLI, `src/cli.ts`.** `init`, `serve`, `mcp`, `hook`, `send`, `reply`, `name`, `slash`, `status`, `thread`, `groups`, `install`.
+- **CLI, `src/cli.ts`.** `init`, `serve`, `mcp`, `hook`, `send`, `reply`, `name`, `slash`, `prune`, `status`, `thread`, `groups`, `install`.
 
 ## Identity
 
@@ -34,7 +34,8 @@ The fix is to identify a session by its host process. `src/proc.ts` reads the pr
 
 - `sessionEvent` (core) finds a session by the CLI's own session id (resume keeps the name), else by host (clear, which mints a new id in the same process, keeps it too), else creates it with `<cli>-<folder>` and a suffix while a live session holds the name. Names whose sessions all ended are reused, so restarts rejoin groups.
 - An MCP server that registers before its session's first hook is held as pending and bound as soon as the session event for its host arrives, or created on first use.
-- A CLI command matches the nearest live session host among its ancestors (an agent's shell speaks as the agent), else it is the owner. `/murmur` always speaks as the owner.
+- A CLI command matches the nearest live session host among its ancestors (an agent's shell speaks as the agent), else it is the owner. `/murmur` always speaks as the owner, and the live session among its ancestors rides along as the message's `via`: replies are pushed into it as well as to the owner.
+- A Claude session's own title (latest `customTitle` in the transcript tail) names it: the handle is the title's slug (at most 48 characters) while it is automatic; an explicit rename pins it. A rename also rebinds the session's live broker connections.
 - `renameSession`: a free name renames the whole identity (peer row, sessions, deliveries, messages, groups, threads, native transport); a name held only by ended sessions is joined; a live or owner name is refused.
 
 ## The delivery state machine

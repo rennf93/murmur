@@ -5,15 +5,17 @@
 Every hook, MCP server and CLI command walks up its process ancestors and takes the first one that is not a shell. That process is the session's host (claude, codex, zcode's node, gemini's node). `src/proc.ts` reads the process table once (`ps -axo pid=,ppid=,lstart=,comm=`) and the pair (pid, start time) survives pid reuse. A hook and an MCP server of the same session find the same host, so one global config serves every session. The opencode plugin and the Hummin extension run inside the host and announce themselves directly.
 
 - A new session is named `<cli>-<folder>` (`claude-murmur`, `codex-guard-core`), then `-2`, `-3` for more live sessions in that folder. A name whose sessions have all ended is reused, so a restarted session in the same folder rejoins its groups and inbox.
-- Rename with the `murmur_name` tool, or `murmur name <handle>` from the session's shell. A rename keeps every message, delivery and group membership. Taking a name held by another live session is refused; taking one held by an ended session joins that identity.
+- Rename with the `murmur_name` tool, or `murmur name <handle>` from the session's shell. A rename keeps every message, delivery and group membership, and every live connection of the session (its MCP server) follows the new name. Taking a name held by another live session is refused; taking one held by an ended session joins that identity.
 - Resume (same CLI session id, new process) and clear (new id, same process) keep the name.
-- `murmur send` and `murmur reply` run from an agent's shell speak as that agent's session; run from a plain terminal they speak as the owner. `--as <handle>` overrides. `/murmur` always speaks as the owner, because it is you typing.
-- Handles match `^[a-z0-9][a-z0-9-]{1,31}$`. `MURMUR_HANDLE` is an optional per-process override for the MCP server; an invalid or taken value is ignored.
+- `murmur send` and `murmur reply` run from an agent's shell speak as that agent's session; run from a plain terminal they speak as the owner. `--as <handle>` overrides. `/murmur` always speaks as the owner, because it is you typing, and shows the session you typed it in: the tag reads `from renn via <session>`, and replies are pushed into that session as well as to `renn`. From a plain terminal there is no session and no `via`.
+- A Claude session takes the name the user gave it (its `/rename` title): the hook reads the latest `customTitle` from the tail of the transcript, the handle becomes its slug (`Ledger, Implementer, Companion - Claude 3` is `ledger-implementer-companion-claude-3`) and the display name the full title. The handle follows later renames only while it is automatic; `murmur_name` and `murmur name` pin it. A slug held by another live session keeps the current handle.
+- Handles match `^[a-z0-9][a-z0-9-]{1,47}$` (up to 48 characters). `MURMUR_HANDLE` is an optional per-process override for the MCP server; an invalid or taken value is ignored.
 
 ## Threads
 
 - One message, one id, fanned out to every recipient.
-- Replies go to everyone in the thread (every sender and recipient so far), in the parent's mode, so peers see each other's answers without relaying.
+- Replies go to everyone in the thread (every sender, every recipient and every session an owner message was typed in, so far), in the parent's mode, so peers see each other's answers without relaying.
+- A message the owner typed into a session (`/murmur`) carries `via`: the tag reads `from renn via <session> to ...`.
 - Every message has a per-thread monotonic `seq`. `murmur_thread` returns first lines by default, full bodies with `full`, and only newer messages with `sinceSeq`.
 - `references` carries pointers (paths, commits, URLs) so artifacts stay in their repos.
 - What a session sees for every message, on every path:

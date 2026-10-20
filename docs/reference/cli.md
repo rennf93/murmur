@@ -18,6 +18,7 @@ Exit codes: `0` success, `1` usage or request error, `2` broker down (`murmur br
 | `reply <id> <body...>` | Reply into a thread. |
 | `name <handle>` | Rename the agent session this runs in. |
 | `slash [args...]` | The `/murmur` backing (args or stdin); bare prints usage, peers and groups. |
+| `prune` | Remove peers nothing refers to; prints the removed handles, or `nothing to prune`. |
 | `status` | List peers with presence and unread counts. |
 | `thread <id>` | Read a thread. |
 | `groups` | Manage groups. |
@@ -31,7 +32,7 @@ murmur send <targets> <body...> [--as <handle>] [--mode <mode>] [--refs <a,b>] [
 
 | Flag | Meaning |
 | --- | --- |
-| `--as <handle>` | Speak as this handle (scripted agents). Must match `^[a-z0-9][a-z0-9-]{1,31}$`. |
+| `--as <handle>` | Speak as this handle (scripted agents). Must match `^[a-z0-9][a-z0-9-]{1,47}$` (up to 48 characters). |
 | `--mode push\|notify\|silent` | Delivery mode; default `push`. |
 | `--refs <a,b>` | Comma-separated references (paths, commits, URLs). |
 | `--thread <id>` | Add to an existing thread (non-negative integer). |
@@ -50,7 +51,15 @@ murmur reply <message id> <body...> [--as <handle>] [--verdict agree|disagree|in
 murmur name <handle>
 ```
 
-Renames the agent session the command runs in; messages, deliveries and groups are kept.
+Renames the agent session the command runs in; messages, deliveries and groups are kept, and the session's live connections follow. An explicit name pins the handle, so a Claude session's title no longer renames it.
+
+## prune
+
+```
+murmur prune
+```
+
+Deletes peers that are not the owner and have no session rows, no sent messages, no deliveries, no group membership and no live broker connection (v0.1 left `claude-<8 hex>` rows like these). Prints the removed handles one per line, or `nothing to prune`.
 
 ## thread
 
@@ -72,7 +81,7 @@ murmur groups delete <name>
 
 ## slash
 
-`murmur slash [args...]` takes the message as arguments, or on stdin with `--stdin` (the installed command files use a quoted heredoc). `--claude-escaped` turns Claude Code's `\!` back into `!`. Always speaks as the owner. Usage line: `/murmur <group | handle[,more]> <message>`.
+`murmur slash [args...]` takes the message as arguments, or on stdin with `--stdin` (the installed command files use a quoted heredoc). `--claude-escaped` turns Claude Code's `\!` back into `!`. Always speaks as the owner, and records the agent session it was typed in (the nearest live session among the command's ancestors) as `via`; from a plain terminal `via` is empty. Usage line: `/murmur <group | handle[,more]> <message>   (sent as renn, via the session you type it in; run bare like this for peers and groups)`.
 
 ## install
 
