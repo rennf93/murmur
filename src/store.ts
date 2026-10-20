@@ -359,12 +359,16 @@ export class Store {
     db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
     db.exec(SCHEMA_SQL);
-    for (const [table, column, ddl] of ADDED_COLUMNS) {
-      const columns = db.prepare('PRAGMA table_info(' + table + ')').all() as Array<{ name: string }>;
-      if (!columns.some((c) => c.name === column)) {
-        db.exec('ALTER TABLE ' + table + ' ADD COLUMN ' + column + ' ' + ddl);
+    // Immediate: take the write lock before the check, so a second process
+    // opening the same old database waits instead of hitting a duplicate column.
+    db.transaction(() => {
+      for (const [table, column, ddl] of ADDED_COLUMNS) {
+        const columns = db.prepare('PRAGMA table_info(' + table + ')').all() as Array<{ name: string }>;
+        if (!columns.some((c) => c.name === column)) {
+          db.exec('ALTER TABLE ' + table + ' ADD COLUMN ' + column + ' ' + ddl);
+        }
       }
-    }
+    }).immediate();
     // The database holds every message and each session's native messaging
     // token: owner-only, like the token file.
     for (const file of [dbPath, dbPath + '-wal', dbPath + '-shm']) {

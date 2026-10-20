@@ -1206,6 +1206,19 @@ export class Broker {
         this.bind(conn, to, conn.live);
       }
     }
+    // A whole-identity rename moved the deliveries; pending proof and
+    // batched notifications follow them.
+    if (this.store.getPeer(from) === null) {
+      this.proof.rename(from, to);
+      const entry = this.notifyQueue.get(from);
+      if (entry !== undefined) {
+        clearTimeout(entry.timer);
+        this.notifyQueue.delete(from);
+        for (const payload of entry.payloads) {
+          this.enqueueNotification(to, payload);
+        }
+      }
+    }
   }
 
   private requireBoundHandle(conn: ConnState): string {

@@ -9,7 +9,7 @@ All notable changes to murmur are documented here. The format follows
 ### Fixed
 
 - `/murmur` now reads as coming from the owner through the session it was typed in: the message tag is `from renn via <session>`, and replies are pushed into that session as well as to `renn`. Before, replies to an owner message went only to `renn`, which has no session, so the session the human typed in never saw them. From a plain terminal (no session among the ancestors) nothing changes.
-- A rename now carries the whole session: every live broker connection bound to the old handle (the session's MCP server, an adapter) follows to the new one, so its presence and later sends use the new name.
+- A rename now carries the whole session: every live broker connection bound to the old handle (the session's MCP server, an adapter) follows to the new one, so its presence and later sends use the new name. Pending delivery proof and batched notifications follow the rename too.
 
 ### Added
 

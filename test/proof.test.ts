@@ -63,6 +63,19 @@ describe('ProofWatcher', () => {
     expect(hits).toHaveLength(1);
   });
 
+  it('rename rekeys the matching watches only', () => {
+    w.watch(5, 'bob', file, ProofWatcher.offsetOf(file));
+    w.watch(6, 'carol', file, ProofWatcher.offsetOf(file));
+    w.rename('bob', 'dave');
+    expect(w.size).toBe(2);
+    appendFileSync(file, deliveryTag(5) + deliveryTag(6) + '\n');
+    vi.advanceTimersByTime(10);
+    expect(hits).toEqual([
+      [6, 'carol'],
+      [5, 'dave'],
+    ]);
+  });
+
   it('ignores a tag that sits before the starting offset and a prefix like m50', () => {
     appendFileSync(file, deliveryTag(5));
     w.watch(5, 'bob', file, ProofWatcher.offsetOf(file));

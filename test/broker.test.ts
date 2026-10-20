@@ -2795,6 +2795,49 @@ describe('via, titles and prune', () => {
     expect(senderOf(stack, sent.threadId)[0]).toBe('live-peer-a');
   });
 
+  it('a title rename carries pending delivery proof to the new handle', async () => {
+    const dir = mkdtempSync(join('/tmp', 'mm-'));
+    const transcript = join(dir, 'bob.jsonl');
+    writeFileSync(transcript, 'earlier line\n');
+    try {
+      const fake = fakeNative();
+      const stack = await buildStack(fake.fn, { proofPollMs: 20 });
+      const alice = await connectPeer(stack, { handle: 'alice' });
+      const hook = await connectPeer(stack);
+      const base = { type: 'session', client: 'claude', cliSessionId: 'c-6030', host: hostRef(stack, 6030) };
+      const first = await req<SessionResult>(hook.client, {
+        ...base,
+        event: 'session-start',
+        cwd: '/w/proof',
+        transcriptPath: transcript,
+        native: { socketPath: '/tmp/rn.sock', token: 'rn' },
+      });
+      const sent = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: [first.handle], body: 'prove me' });
+      expect(stack.store.getDeliveries(sent.messageId)[0]?.state).toBe('sent');
+      const renamed = await req<SessionResult>(hook.client, { ...base, event: 'prompt', title: 'Proof Renamed' });
+      expect(renamed.handle).toBe('proof-renamed');
+      appendFileSync(transcript, (fake.calls[0]?.text ?? '') + '\n');
+      await settle(() => stack.store.getDeliveries(sent.messageId)[0]?.state === 'delivered', 'proof delivered after rename');
+      expect(stack.store.getDeliveries(sent.messageId)[0]?.recipient).toBe('proof-renamed');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a title rename moves a queued notification batch to the new handle', async () => {
+    fakeWaitWindow();
+    const stack = await buildStack();
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    const adapter = await connectPeer(stack);
+    const base = { type: 'session', client: 'claude', cliSessionId: 'c-6031', host: hostRef(stack, 6031) };
+    const first = await req<SessionResult>(adapter.client, { ...base, event: 'session-start', cwd: '/w/note', listen: true });
+    await req<SendResult>(alice.client, { type: 'send', threadId: null, to: [first.handle], body: 'fyi', mode: 'notify' });
+    const renamed = await req<SessionResult>(adapter.client, { ...base, event: 'prompt', title: 'Note Renamed', listen: true });
+    expect(renamed.handle).toBe('note-renamed');
+    await advanceUntil(() => notificationsOf(adapter).length > 0, 'notification after rename');
+    expect(notificationsOf(adapter)[0]?.payload).toHaveLength(1);
+  });
+
   it('rejects a title that is not a string', async () => {
     const stack = await buildStack();
     const conn = await connectPeer(stack);
