@@ -999,14 +999,14 @@ export class Broker {
 
   // queued or sent to delivered, with the queued_delivered notice to the
   // sender when the message had been waiting. False when not applicable.
-  private markDeliveredHop(messageId: number, recipient: string): boolean {
+  private markDeliveredHop(messageId: number, recipient: string, notifySender = true): boolean {
     const message = this.store.messageById(messageId);
     const delivery = this.store.getDeliveries(messageId).find((d) => d.recipient === recipient);
     if (message === null || delivery === undefined || (delivery.state !== 'queued' && delivery.state !== 'sent')) {
       return false;
     }
     this.store.markDelivered(messageId, recipient, Date.now());
-    if (delivery.state === 'queued') {
+    if (delivery.state === 'queued' && notifySender) {
       this.enqueueNotification(message.sender, {
         kind: 'queued_delivered',
         threadId: message.threadId,
@@ -1160,7 +1160,9 @@ export class Broker {
     for (const row of this.store.threadMessages(threadId, null)) {
       const delivery = this.store.getDeliveries(row.id).find((d) => d.recipient === handle);
       if (((ask !== null && row.inReplyTo === ask.id) || held?.has(row.id) === true) && delivery?.state === 'queued' && !this.inFlight.has(String(row.id) + ':' + delivery.recipient)) {
-        this.markDeliveredHop(row.id, delivery.recipient);
+        // A reply held for this wait never waited on a session that was down:
+        // no queued_delivered notice, which would wake the replier for nothing.
+        this.markDeliveredHop(row.id, delivery.recipient, held?.has(row.id) !== true);
         replies.push({ id: row.id, seq: row.seq, sender: row.sender, verdict: row.verdict as Verdict | null, body: row.deliveredBody });
       }
     }

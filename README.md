@@ -101,7 +101,7 @@ Delivery states, per recipient: `queued` (stored, nothing left the broker), `sen
 | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | None: Gemini has no inbound channel | At SessionStart, each prompt (BeforeAgent), and at turn end (AfterAgent continues the turn) | Handed over by the hook |
 | [zcode](https://zcode.z.ai) | None found | At SessionStart, each prompt, and at turn end (Stop continues the turn) | Handed over by the hook (zcode's hook `transcript_path` is a temporary copy, so it cannot serve as proof) |
 
-Delivery modes: `push` (default) uses every path above; `notify` stores the message and sends a small batched note; `silent` only stores. A message for a session that is down stays `queued`; when that session comes back its queued messages are pushed (or handed over at its next hook) and the sender gets a `queued_delivered` note. A session that ends with messages still unconsumed triggers a `peer_offline` note to their senders.
+Delivery modes: `push` (default) uses every path above; `notify` stores the message and sends a small batched note; `silent` only stores. A message for a session that is down stays `queued`; when that session comes back its queued messages are pushed (or handed over at its next hook) and the sender gets a `queued_delivered` note (not for a reply held for the asker's open `murmur_wait`: the wait result is its delivery, and the replier is not woken for it). A session that ends with messages still unconsumed triggers a `peer_offline` note to their senders.
 
 What a session sees for every message, on every path:
 

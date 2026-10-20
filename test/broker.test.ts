@@ -1018,6 +1018,39 @@ describe('wait', () => {
     }
   });
 
+  it('sends the replier no queued_delivered notice for a reply handed over in the wait', async () => {
+    fakeWaitWindow();
+    const stack = await buildStack();
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    const bob = await connectAdapter(stack, 'bob', 5091);
+    const ask = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'quick one' });
+    const pending = req<WaitResult>(alice.client, { type: 'wait', threadId: ask.threadId, until: 'any_replied', timeoutMs: 20000 });
+    await yieldTurn();
+    await yieldTurn();
+    const answer = await req<ReplyResult>(bob.client, { type: 'reply', messageId: ask.messageId, body: 'done' });
+    expect((await pending).replies.map((r) => r.id)).toEqual([answer.messageId]);
+    await vi.advanceTimersByTimeAsync(NOTIFY_BATCH_MS * 2);
+    await yieldTurn();
+    expect(notificationsOf(bob)).toHaveLength(0);
+  });
+
+  it('still sends queued_delivered for a reply that waited on a closed session and a later wait hands over', async () => {
+    fakeWaitWindow();
+    const stack = await buildStack();
+    const asker = await connectPeer(stack, { handle: 'alice' });
+    const bob = await connectAdapter(stack, 'bob', 5092);
+    const ask = await req<SendResult>(asker.client, { type: 'send', threadId: null, to: ['bob'], body: 'later' });
+    asker.client.close();
+    const answer = await req<ReplyResult>(bob.client, { type: 'reply', messageId: ask.messageId, body: 'while you were away' });
+    expect(stack.store.getDeliveries(answer.messageId).map((d) => [d.recipient, d.state])).toEqual([['alice', 'queued']]);
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    const result = await req<WaitResult>(alice.client, { type: 'wait', threadId: ask.threadId, until: 'any_replied', timeoutMs: 20000 });
+    expect(result.replies.map((r) => r.id)).toEqual([answer.messageId]);
+    const delivered = (): NotificationPayload[] => notificationsOf(bob).flatMap((ev) => ev.payload).filter((p) => p.kind === 'queued_delivered');
+    await advanceUntil(() => delivered().length > 0, 'queued_delivered for bob');
+    expect(delivered()).toMatchObject([{ fromHandle: 'alice', threadId: ask.threadId }]);
+  });
+
   it('hands over only replies to the latest ask, not other queued messages in the thread', async () => {
     const stack = await buildStack();
     const alice = await connectPeer(stack, { handle: 'alice' });
