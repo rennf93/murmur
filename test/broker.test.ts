@@ -1098,6 +1098,41 @@ describe('wait', () => {
     expect(stack.store.getDeliveries(late.messageId).map((d) => d.state)).toEqual(['sent']);
   });
 
+  it('hands over a held reply when the latest ask changes during the wait (timeout)', async () => {
+    const stack = await buildStack();
+    const alice = await connectAdapter(stack, 'alice', 5098);
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    const carol = await connectPeer(stack, { handle: 'carol' });
+    const q1 = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob', 'carol'], body: 'q1' });
+    const pending = req<WaitResult>(alice.client, { type: 'wait', threadId: q1.threadId, until: 'all_replied', timeoutMs: 300 });
+    await yieldTurn();
+    await yieldTurn();
+    const held = await req<ReplyResult>(bob.client, { type: 'reply', messageId: q1.messageId, body: 'held' });
+    await req<SendResult>(carol.client, { type: 'send', threadId: q1.threadId, to: ['bob'], body: 'q2' });
+    const result = await pending;
+    expect(result.timedOut).toBe(true);
+    expect(result.replies.map((r) => r.id)).toEqual([held.messageId]);
+    expect(stack.store.getDeliveries(held.messageId).map((d) => d.state)).toEqual(['delivered']);
+  });
+
+  it('hands over a held reply when the latest ask changes during the wait (condition met)', async () => {
+    const stack = await buildStack();
+    const alice = await connectAdapter(stack, 'alice', 5099);
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    const carol = await connectPeer(stack, { handle: 'carol' });
+    const q1 = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob', 'carol'], body: 'q1' });
+    const pending = req<WaitResult>(alice.client, { type: 'wait', threadId: q1.threadId, until: 'all_replied', timeoutMs: 20000 });
+    await yieldTurn();
+    await yieldTurn();
+    const held = await req<ReplyResult>(bob.client, { type: 'reply', messageId: q1.messageId, body: 'held' });
+    const q2 = await req<SendResult>(carol.client, { type: 'send', threadId: q1.threadId, to: ['bob'], body: 'q2' });
+    await req<ReplyResult>(bob.client, { type: 'reply', messageId: q2.messageId, body: 'to carol' });
+    const result = await pending;
+    expect(result.conditionMet).toBe(true);
+    expect(result.replies.map((r) => r.id)).toEqual([held.messageId]);
+    expect(stack.store.getDeliveries(held.messageId).map((d) => d.state)).toEqual(['delivered']);
+  });
+
   it('pushes a reply to a reply during a wait instead of holding it', async () => {
     const stack = await buildStack();
     const alice = await connectAdapter(stack, 'alice', 5096);
@@ -2051,7 +2086,7 @@ describe('shutdown and straggler guards', () => {
       socket: { destroyed: true, write: (line: string) => writes.push(line) },
       waiters: new Set<unknown>(),
     };
-    const fakeWaiter = { conn: fakeConn, id: 13, threadId: 2, until: 'all_replied', timer: undefined };
+    const fakeWaiter = { conn: fakeConn, id: 13, threadId: 2, until: 'all_replied', timer: undefined, held: new Set<number>() };
     const planted = new Set([fakeWaiter]);
     inner.waiters.set(2, planted);
     inner.checkWaiters(2);

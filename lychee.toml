@@ -7,4 +7,6 @@ exclude = [
   '^https://raw\.githubusercontent\.com/rennf93/murmur/master/docs/assets/demo\.(gif|tape)$',
   '^https://github\.com/rennf93/murmur/blob/master/docs/assets/demo\.tape$',
   '^https://rennf93\.github\.io/murmur/bench/consult/$',
+  # npmjs.com answers 403 to non-browser clients (bot protection); the package is checked with `npm view murmur-it` instead.
+  '^https://www\.npmjs\.com/',
 ]

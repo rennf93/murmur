@@ -2,6 +2,8 @@
 config:
   default: true
   MD013: false          # prose paragraphs are one line
+  MD024:
+    siblings_only: true # Keep a Changelog repeats Added, Changed, Fixed under every version
   MD033: false          # README hero uses inline HTML (div, img)
   MD038: false          # the tag `[murmur m<id> ` has a meaningful trailing space
   MD040: false          # command blocks are bare fences

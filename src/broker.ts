@@ -101,6 +101,8 @@ interface Waiter {
   threadId: number;
   until: WaitUntil;
   timer: NodeJS.Timeout;
+  // Ids of replies held back for this wait; the handover returns them even if the latest ask moved on.
+  held: Set<number>;
 }
 
 interface NotifyEntry {
@@ -898,11 +900,18 @@ export class Broker {
   // A reply answering the thread's latest ask, whose recipient has a
   // murmur_wait open on that thread, stays queued; the wait result carries it
   // (takeReplies applies the same rule). Any other reply is pushed as normal.
-  private heldForWait(message: { isReply: boolean; threadId: number; inReplyTo: number | null }, recipient: string): boolean {
+  private heldForWait(message: { id: number; isReply: boolean; threadId: number; inReplyTo: number | null }, recipient: string): boolean {
     if (!message.isReply || message.inReplyTo === null || this.store.latestAsk(message.threadId)?.id !== message.inReplyTo) {
       return false;
     }
-    return [...(this.waiters.get(message.threadId) ?? [])].some((w) => w.conn.handle === recipient);
+    let held = false;
+    for (const w of this.waiters.get(message.threadId) ?? []) {
+      if (w.conn.handle === recipient) {
+        w.held.add(message.id);
+        held = true;
+      }
+    }
+    return held;
   }
 
   private async pushOne(
@@ -1101,6 +1110,7 @@ export class Broker {
       id,
       threadId,
       until,
+      held: new Set<number>(),
       timer: setTimeout(() => this.resolveTimedOut(waiter), timeoutMs),
     };
     conn.waiters.add(waiter);
@@ -1132,12 +1142,12 @@ export class Broker {
 
   // The replies still queued for this handle in the thread, handed over in the
   // wait result and marked delivered (the wait result is the receiving-side proof).
-  private takeReplies(threadId: number, handle: string | null): WaitReply[] {
+  private takeReplies(threadId: number, handle: string | null, held?: Set<number>): WaitReply[] {
     const replies: WaitReply[] = [];
     const ask = this.store.latestAsk(threadId);
     for (const row of this.store.threadMessages(threadId, null)) {
       const delivery = this.store.getDeliveries(row.id).find((d) => d.recipient === handle);
-      if (ask !== null && row.inReplyTo === ask.id && delivery?.state === 'queued') {
+      if (((ask !== null && row.inReplyTo === ask.id) || held?.has(row.id) === true) && delivery?.state === 'queued') {
         this.markDeliveredHop(row.id, delivery.recipient);
         replies.push({ id: row.id, seq: row.seq, sender: row.sender, verdict: row.verdict as Verdict | null, body: row.deliveredBody });
       }
@@ -1181,7 +1191,7 @@ export class Broker {
         conditionMet: true,
         timedOut: false,
         matrix: this.matrixFor(threadId),
-        replies: this.takeReplies(threadId, waiter.conn.handle),
+        replies: this.takeReplies(threadId, waiter.conn.handle, waiter.held),
       });
     }
   }
@@ -1197,7 +1207,7 @@ export class Broker {
         conditionMet: false,
         timedOut: true,
         matrix: this.matrixFor(waiter.threadId),
-        replies: this.takeReplies(waiter.threadId, waiter.conn.handle),
+        replies: this.takeReplies(waiter.threadId, waiter.conn.handle, waiter.held),
       });
     } catch {
       // Never let a timer callback crash the process.
