@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
-import type { Socket } from 'node:net';
+import type { Server, Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -2008,7 +2008,7 @@ describe('write failures on a peer socket', () => {
     const originalWrite = bobSocket!.write.bind(bobSocket);
     bobSocket!.write = (() => {
       throw new Error('kaboom');
-    }) as typeof bobSocket!.write;
+    }) as Socket['write'];
     try {
       const result = await req<SendResult>(alice.client, {
         type: 'send',
@@ -2019,7 +2019,7 @@ describe('write failures on a peer socket', () => {
       const row = stack.store.getDeliveries(result.messageId).find((d) => d.recipient === 'bob');
       expect(row?.state).toBe('sent');
     } finally {
-      bobSocket!.write = originalWrite as typeof bobSocket!.write;
+      bobSocket!.write = originalWrite as Socket['write'];
     }
     expect(pushesOf(bob)).toHaveLength(0);
   });
@@ -3087,5 +3087,75 @@ describe('an in-flight push', () => {
     await yieldTurn();
     const after = await req<FetchPushResult>(a2.client, { type: 'fetch-push', handle: 'alice', limit: 10 });
     expect(after.messages.map((m) => m.id)).toEqual([held.messageId]);
+  });
+});
+
+describe('quiet error paths and shared waits', () => {
+  it('swallows server and socket errors instead of crashing', async () => {
+    const stack = await buildStack();
+    await connectPeer(stack, { handle: 'alice' });
+    const inner = stack.broker as unknown as { server: Server; conns: Set<{ socket: Socket }> };
+    expect(inner.conns.size).toBe(1);
+    expect(() => inner.server.emit('error', new Error('accept failed'))).not.toThrow();
+    for (const conn of inner.conns) {
+      expect(() => conn.socket.emit('error', new Error('reset'))).not.toThrow();
+    }
+    expect(inner.conns.size).toBe(1);
+  });
+
+  it('keeps a second waiter on the thread when the first connection closes', async () => {
+    const stack = await buildStack();
+    const alice = await connectAdapter(stack, 'alice', 5201);
+    const second = await connectPeer(stack, { handle: 'alice' });
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    const ask = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'shared' });
+    const first = req<WaitResult>(alice.client, { type: 'wait', threadId: ask.threadId, until: 'any_replied', timeoutMs: 20000 });
+    const dropped = req<WaitResult>(second.client, { type: 'wait', threadId: ask.threadId, until: 'any_replied', timeoutMs: 20000 });
+    dropped.catch(() => undefined);
+    await yieldTurn();
+    await yieldTurn();
+    second.client.close();
+    await expect(dropped).rejects.toBeDefined();
+    await req<ReplyResult>(bob.client, { type: 'reply', messageId: ask.messageId, body: 'still here' });
+    expect(await first).toMatchObject({ conditionMet: true, timedOut: false });
+  });
+
+  it('resolves two waiters on one thread from a single reply', async () => {
+    const stack = await buildStack();
+    const alice = await connectAdapter(stack, 'alice', 5203);
+    const second = await connectPeer(stack, { handle: 'alice' });
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    const ask = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'both wait' });
+    const one = req<WaitResult>(alice.client, { type: 'wait', threadId: ask.threadId, until: 'any_replied', timeoutMs: 20000 });
+    const two = req<WaitResult>(second.client, { type: 'wait', threadId: ask.threadId, until: 'any_replied', timeoutMs: 20000 });
+    await yieldTurn();
+    await yieldTurn();
+    await req<ReplyResult>(bob.client, { type: 'reply', messageId: ask.messageId, body: 'for both' });
+    expect(await one).toMatchObject({ conditionMet: true });
+    expect(await two).toMatchObject({ conditionMet: true });
+    expect((stack.broker as unknown as { waiters: Map<number, unknown> }).waiters.size).toBe(0);
+  });
+
+  it('survives a failed push of replies held for a wait whose connection closed', async () => {
+    const stack = await buildStack();
+    const alice = await connectAdapter(stack, 'alice', 5202);
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    const ask = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'drop me' });
+    const pushQueued = vi
+      .spyOn(stack.broker as unknown as { pushQueued(handle: string): Promise<void> }, 'pushQueued')
+      .mockRejectedValue(new Error('push failed'));
+    try {
+      const waiting = req<WaitResult>(alice.client, { type: 'wait', threadId: ask.threadId, until: 'any_replied', timeoutMs: 20000 });
+      waiting.catch(() => undefined);
+      await yieldTurn();
+      await yieldTurn();
+      alice.client.close();
+      await settle(() => pushQueued.mock.calls.length > 0, 'pushQueued on close');
+      await yieldTurn();
+      expect(pushQueued).toHaveBeenCalledWith('alice');
+    } finally {
+      pushQueued.mockRestore();
+    }
+    await expect(req<StatusResult>(bob.client, { type: 'status' })).resolves.toBeDefined();
   });
 });

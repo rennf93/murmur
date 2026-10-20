@@ -26,7 +26,7 @@ This is a CLI demo with simulated peers: `alice` and `bob` are registered by a h
 
 ## Quickstart
 
-Requires Node 20 or newer.
+Requires Node 22 or newer.
 
 ```
 npm install -g murmur-it   # the package is murmur-it; the command it installs is murmur

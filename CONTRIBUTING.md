@@ -8,7 +8,7 @@ You must understand your code. If you cannot explain what a change does and how 
 
 ## Setup
 
-Requires Node 20 or newer.
+Requires Node 22.12 or newer (vitest 5 needs it).
 
 ```
 npm install

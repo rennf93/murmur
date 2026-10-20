@@ -45,21 +45,18 @@ export async function nativeSend(
     const reader = new LineReader();
     let settled = false;
     let lastSocketError: string | null = null;
-    let timer: NodeJS.Timeout | null = null;
 
     const finish = (result: NativeSendResult): void => {
       if (settled) {
         return;
       }
       settled = true;
-      if (timer !== null) {
-        clearTimeout(timer);
-      }
+      clearTimeout(timer);
       socket.destroy();
       resolve(result);
     };
 
-    timer = setTimeout(() => {
+    const timer = setTimeout(() => {
       finish({ ok: false, error: 'no reply or close from ' + socketPath + ' within ' + String(limit) + 'ms' });
     }, limit);
 

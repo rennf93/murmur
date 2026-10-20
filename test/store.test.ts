@@ -410,6 +410,13 @@ describe('Store', () => {
     }
   });
 
+  it('opens a database with no files on disk without chmodding anything', () => {
+    const memory = Store.open(':memory:');
+    memory.upsertPeer('a', null, null, false, 1);
+    expect(memory.listPeers().map((p) => p.handle)).toContain('a');
+    memory.close();
+  });
+
   it('cascades a rename through every table that references the handle', () => {
     store.upsertPeer('old', null, null, false, 1);
     store.upsertPeer('other', null, null, false, 1);

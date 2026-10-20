@@ -489,6 +489,18 @@ describe('inbox', () => {
   });
 });
 
+describe('inbox ordering', () => {
+  it('reports the highest seq even when the clock ran backwards between sends', () => {
+    register('sender', 'reader');
+    const first = core.send('sender', { threadId: null, to: ['reader'], body: 'late stamp' });
+    setNow(now - 500);
+    core.send('sender', { threadId: first.result.threadId, to: ['reader'], body: 'early stamp' });
+    const inbox = core.inbox('reader', false);
+    expect(inbox.threads[0]?.messages.map((m) => m.seq)).toEqual([1, 0]);
+    expect(inbox.threads[0]?.latestSeq).toBe(1);
+  });
+});
+
 describe('threadView', () => {
   it('returns full messages with sinceSeq filtering', () => {
     register('sender', 'beta');
