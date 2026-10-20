@@ -1,16 +1,23 @@
+import { basename } from 'node:path';
+import { isAlive, liveTable } from './proc.js';
+import type { ProcTable } from './proc.js';
 import { Store } from './store.js';
-import type { DeliveryRow, MessageRow, PeerRow } from './store.js';
+import type { DeliveryRow, MessageRow, PeerRow, SessionRow } from './store.js';
 import {
   DUP_WINDOW_MS,
+  HANDLE_RE,
   MurmurError,
   RATE_MAX_SENDS,
   RATE_WINDOW_MS,
   THREAD_CAP,
   UNREAD_CAP,
   firstLine,
+  renderDelivery,
+  replyFooter,
   truncateForDelivery,
 } from './protocol.js';
 import type {
+  CliName,
   CollectResult,
   DeliveryInfo,
   DeliveryMode,
@@ -19,6 +26,7 @@ import type {
   GroupAction,
   GroupsResult,
   HookEvent,
+  HostRef,
   InboxResult,
   InboxThread,
   MessageFull,
@@ -49,9 +57,21 @@ export interface PushTarget {
   kind: 'native' | 'connection' | 'queued';
   message: MessageFull;
   footer: string;
+  text: string;
 }
 
-export const HANDLE_RE = /^[a-z0-9][a-z0-9-]{1,31}$/;
+export interface SessionEventArg {
+  event: HookEvent;
+  client: CliName;
+  cliSessionId: string | null;
+  host: HostRef;
+  transcriptPath?: string;
+  cwd?: string;
+  handle?: string;
+  native?: { socketPath: string; token: string };
+}
+
+export { HANDLE_RE };
 const GROUP_NAME_RE = /^@?[a-z0-9][a-z0-9-]{1,31}$/;
 const VERDICTS: readonly string[] = ['agree', 'disagree', 'info'];
 const UNREAD_STATES: string[] = ['queued', 'sent', 'delivered'];
@@ -133,7 +153,7 @@ function summaryOf(row: MessageRow): MessageSummary {
   };
 }
 
-function fullOf(row: MessageRow): MessageFull {
+export function fullOf(row: MessageRow): MessageFull {
   return { ...summaryOf(row), body: row.body };
 }
 
@@ -162,11 +182,15 @@ export class MurmurCore {
   // tracked here for the process lifetime and status() falls back to the
   // persisted row values when no override exists.
   private readonly hookOverrides = new Map<string, { state: 'busy' | 'idle'; at: number }>();
+  // Process table source for session liveness, asked only for the pids that
+  // matter; injectable for tests.
+  private readonly procTable: (pids: number[]) => ProcTable;
 
-  constructor(store: Store, events: CoreEvents, now?: () => number) {
+  constructor(store: Store, events: CoreEvents, now?: () => number, procTable?: (pids: number[]) => ProcTable) {
     this.store = store;
     this.events = events;
     this.nowFn = now ?? Date.now;
+    this.procTable = procTable ?? ((pids) => liveTable(pids));
   }
 
   private nowMs(): number {
@@ -193,8 +217,9 @@ export class MurmurCore {
     return { handle: arg.handle, owner: false };
   }
 
-  // Expands group entries (leading @) to their members, validates every
-  // handle, dedups while preserving order, and rejects an empty result.
+  // Expands groups to their members, validates every handle, dedups while
+  // preserving order, and rejects an empty result. @name is always a group;
+  // a bare name is a handle, or a group when no peer has that handle.
   resolveRecipients(to: string[]): string[] {
     const out: string[] = [];
     const seen = new Set<string>();
@@ -208,12 +233,12 @@ export class MurmurCore {
       }
     };
     for (const entry of to) {
-      if (!entry.startsWith('@')) {
+      const stripped = stripGroupPrefix(entry);
+      const group = this.store.listGroups().find((g) => g.name === stripped);
+      if (!entry.startsWith('@') && (group === undefined || this.store.getPeer(entry) !== null)) {
         add(entry);
         continue;
       }
-      const stripped = stripGroupPrefix(entry);
-      const group = this.store.listGroups().find((g) => g.name === stripped);
       if (group === undefined) {
         throw new MurmurError('unknown_group', 'unknown group: ' + stripped);
       }
@@ -302,18 +327,27 @@ export class MurmurCore {
       throw new MurmurError('internal', 'appended message vanished: ' + String(appended.id));
     }
     const deliveries = this.store.getDeliveries(appended.id).map(deliveryInfoOf);
+    return {
+      result: { messageId: appended.id, threadId, seq: appended.seq, deliveries },
+      pushes: this.pushesFor(row, recipients, mode),
+    };
+  }
+
+  deliveriesOf(messageId: number): DeliveryInfo[] {
+    return this.store.getDeliveries(messageId).map(deliveryInfoOf);
+  }
+
+  private pushesFor(row: MessageRow, recipients: string[], mode: DeliveryMode): PushTarget[] {
     const message = fullOf(row);
-    const footer =
-      'thread ' + String(threadId) + ' seq ' + String(appended.seq) +
-      ': reply with murmur_reply in_reply_to ' + String(appended.id) +
-      '. The full thread is readable with murmur_thread ' + String(threadId) + '.';
-    const pushes: PushTarget[] = recipients.map((recipient) => ({
+    const footer = replyFooter(message);
+    const text = renderDelivery(message, row.deliveredBody, recipients);
+    return recipients.map((recipient) => ({
       recipient,
       kind: this.pushKindFor(recipient, mode),
       message,
       footer,
+      text,
     }));
-    return { result: { messageId: appended.id, threadId, seq: appended.seq, deliveries }, pushes };
   }
 
   // Native transport row means the broker can hand the message to the
@@ -327,10 +361,13 @@ export class MurmurCore {
     return this.store.getNativeTransport(recipient) !== null ? 'native' : 'connection';
   }
 
+  // A reply reaches everyone in the thread (every sender and every recipient
+  // so far, minus the replier) in the parent's delivery mode, so peers see
+  // each other's answers without anyone relaying them.
   reply(
     sender: string,
     arg: { messageId: number; body: string; verdict?: Verdict; references?: string[] },
-  ): { result: ReplyResult } {
+  ): { result: ReplyResult; pushes: PushTarget[] } {
     if (arg.verdict !== undefined && !VERDICTS.includes(arg.verdict)) {
       throw new MurmurError('bad_request', 'invalid verdict: ' + arg.verdict);
     }
@@ -338,15 +375,24 @@ export class MurmurCore {
     if (parent === null) {
       throw new MurmurError('unknown_message', 'unknown message: ' + String(arg.messageId));
     }
+    const participants = new Set<string>(this.store.threadRecipientHandles(parent.threadId));
+    for (const row of this.store.threadMessages(parent.threadId, null)) {
+      participants.add(row.sender);
+    }
+    participants.delete(sender);
+    const recipients = [...participants].filter((handle) => this.store.getPeer(handle) !== null);
+    this.checkLimits(sender, arg.body, recipients, parent.threadId);
+    const mode = parent.mode as DeliveryMode;
     const ts = this.nowMs();
+    const truncation = truncateForDelivery(arg.body);
     const appended = this.store.appendMessage({
       threadId: parent.threadId,
       sender,
       body: arg.body,
-      deliveredBody: arg.body,
-      truncated: false,
+      deliveredBody: truncation.delivered,
+      truncated: truncation.truncated,
       refs: arg.references ?? [],
-      mode: 'push',
+      mode,
       isReply: true,
       inReplyTo: parent.id,
       verdict: arg.verdict ?? null,
@@ -367,8 +413,13 @@ export class MurmurCore {
         to: 'replied',
       });
     }
+    this.store.addDeliveries(appended.id, recipients, ts);
     this.events.onAppend({ threadId: parent.threadId, messageId: appended.id, isReply: true, sender });
-    return { result: { messageId: appended.id, threadId: parent.threadId, seq: appended.seq } };
+    const row = this.store.messageById(appended.id) as MessageRow;
+    return {
+      result: { messageId: appended.id, threadId: parent.threadId, seq: appended.seq },
+      pushes: this.pushesFor(row, recipients, mode),
+    };
   }
 
   // Marks acknowledged each id with a delivery row for this handle that sits
@@ -453,7 +504,7 @@ export class MurmurCore {
     return { handle, unreadTotal, threads };
   }
 
-  threadView(threadId: number, sinceSeq: number | null): ThreadResult {
+  threadView(threadId: number, sinceSeq: number | null, full = true): ThreadResult {
     const all = this.store.threadMessages(threadId, null);
     if (all.length === 0) {
       throw new MurmurError('unknown_thread', 'unknown thread: ' + String(threadId));
@@ -461,7 +512,7 @@ export class MurmurCore {
     const last = all[all.length - 1];
     const latestSeq = last === undefined ? 0 : last.seq;
     const rows = sinceSeq === null ? all : this.store.threadMessages(threadId, sinceSeq);
-    return { threadId, latestSeq, messages: rows.map(fullOf) };
+    return { threadId, latestSeq, messages: rows.map(full ? fullOf : summaryOf) };
   }
 
   // Matrix for the thread's latest ask: each recipient's delivery state,
@@ -513,20 +564,41 @@ export class MurmurCore {
     return { threadId, askMessageId: ask.id, recipients, verdictTally };
   }
 
-  // Presence per peer: live connection wins, then the hook state, then the
-  // five minute window over last_seen_at, then presumed-offline for a peer
-  // seen recently but not connected.
+  // Presence per peer, first match wins: a live session (its host process
+  // is running) reports busy or idle from its last lifecycle event, or
+  // online before any; then a live connection; then the legacy hook state;
+  // then the five minute window over last_seen_at, then presumed-offline.
   status(live: (handle: string) => { online: boolean }): StatusResult {
     const ts = this.nowMs();
+    const byHandle = new Map<string, SessionRow[]>();
+    for (const row of this.store.listSessions()) {
+      const held = byHandle.get(row.handle);
+      if (held === undefined) {
+        byHandle.set(row.handle, [row]);
+      } else {
+        held.push(row);
+      }
+    }
+    const table = this.safeProcTable(
+      [...byHandle.values()].flat().filter((row) => row.state !== 'ended').map((row) => row.hostPid),
+    );
     const peers: PeerStatus[] = [];
     for (const peer of this.store.listPeers()) {
       const override = this.hookOverrides.get(peer.handle);
       const hookState = override !== undefined ? override.state : normalizeHookState(peer.hookState);
       const hookAt = override !== undefined ? override.at : peer.lastHookActivityAt;
+      const sessions = byHandle.get(peer.handle) ?? [];
+      const session = sessions.find((row) => row.state !== 'ended' && isAlive(table, row.hostPid, row.hostStart));
       let presence: PresenceKind;
       let busySince: number | null = null;
       let idleSince: number | null = null;
-      if (live(peer.handle).online) {
+      if (session !== undefined && session.state === 'busy') {
+        presence = 'busy';
+        busySince = session.stateAt;
+      } else if (session !== undefined && session.state === 'idle') {
+        presence = 'idle';
+        idleSince = session.stateAt;
+      } else if (session !== undefined || live(peer.handle).online) {
         presence = 'online';
       } else if (hookState === 'busy') {
         presence = 'busy';
@@ -539,13 +611,14 @@ export class MurmurCore {
       } else {
         presence = 'presumed-offline';
       }
-      const lastActivity = freshestOf(peer.lastSeenAt, hookAt);
+      const lastActivity = freshestOf(freshestOf(peer.lastSeenAt, hookAt), sessions[0]?.updatedAt ?? null);
       peers.push({
         handle: peer.handle,
         display: peer.display,
         role: peer.role,
         isOwner: peer.isOwner,
         presence,
+        client: (sessions[0]?.client as CliName | undefined) ?? null,
         busySince,
         idleSince,
         lastActivityAgeMs: lastActivity === null ? null : ts - lastActivity,
@@ -629,6 +702,144 @@ export class MurmurCore {
     return members;
   }
 
+  // A lifecycle event from a hook or an adapter. Finds the session by the
+  // CLI's own session id (so resume keeps the handle), else by the host
+  // process (so clear, which mints a new id in the same process, keeps it
+  // too), else creates it. Returns the session and its handle.
+  sessionEvent(arg: SessionEventArg): SessionRow {
+    const ts = this.nowMs();
+    let row = arg.cliSessionId === null ? null : this.store.sessionByCliId(arg.client, arg.cliSessionId);
+    row ??= this.store.sessionByHost(arg.host.hostPid, arg.host.hostStart);
+    if (row === null) {
+      const handle = arg.handle !== undefined && this.claimable(arg.handle, null) ? arg.handle : this.allocateHandle(arg.client, arg.cwd);
+      this.ensurePeer(handle);
+      const id = this.store.insertSession({
+        client: arg.client,
+        cliSessionId: arg.cliSessionId,
+        handle,
+        hostPid: arg.host.hostPid,
+        hostStart: arg.host.hostStart,
+        transcriptPath: arg.transcriptPath ?? null,
+        cwd: arg.cwd ?? null,
+        now: ts,
+      });
+      row = this.store.sessionById(id) as SessionRow;
+    } else {
+      this.store.updateSession(row.id, {
+        client: arg.client,
+        hostPid: arg.host.hostPid,
+        hostStart: arg.host.hostStart,
+        updatedAt: ts,
+        ...(arg.cliSessionId !== null ? { cliSessionId: arg.cliSessionId } : {}),
+        ...(arg.transcriptPath !== undefined ? { transcriptPath: arg.transcriptPath } : {}),
+        ...(arg.cwd !== undefined ? { cwd: arg.cwd } : {}),
+      });
+      if (arg.handle !== undefined && arg.handle !== row.handle && this.claimable(arg.handle, row.id)) {
+        this.renameSession(row, arg.handle);
+      }
+    }
+    const state = arg.event === 'prompt' ? 'busy' : arg.event === 'session-end' ? 'ended' : 'idle';
+    this.store.updateSession(row.id, { state, stateAt: ts });
+    const fresh = this.store.sessionById(row.id) as SessionRow;
+    if (arg.native !== undefined) {
+      this.store.upsertNativeTransport(fresh.handle, arg.native.socketPath, arg.native.token, ts);
+    }
+    if (arg.event === 'session-end') {
+      this.store.deleteNativeTransport(fresh.handle);
+    }
+    return fresh;
+  }
+
+  // The session running under this exact host process, if one announced
+  // itself. With create, a missing session is made on the spot (an MCP
+  // server whose hooks never ran still gets an identity).
+  sessionForHost(host: HostRef, create?: { client: CliName; cwd?: string }): SessionRow | null {
+    const row = this.store.sessionByHost(host.hostPid, host.hostStart);
+    if (row !== null || create === undefined) {
+      return row;
+    }
+    return this.sessionEvent({ event: 'session-start', client: create.client, cliSessionId: null, host, ...(create.cwd !== undefined ? { cwd: create.cwd } : {}) });
+  }
+
+  // The nearest live session whose host is one of these ancestors (nearest
+  // first), or null: a shell command run by an agent speaks as its session.
+  sessionForAncestors(ancestors: number[]): SessionRow | null {
+    const candidates = this.store
+      .listSessions()
+      .filter((row) => row.state !== 'ended' && ancestors.includes(row.hostPid));
+    const table = this.safeProcTable(candidates.map((row) => row.hostPid));
+    const live = candidates.filter((row) => isAlive(table, row.hostPid, row.hostStart));
+    for (const pid of ancestors) {
+      const match = live.find((row) => row.hostPid === pid);
+      if (match !== undefined) {
+        return match;
+      }
+    }
+    return null;
+  }
+
+  // Gives the session a new name. A free name renames the identity with all
+  // its history; a name held by a peer with no live session is taken over
+  // (the session joins that identity, its groups and inbox); a live or
+  // owner handle is refused.
+  renameSession(row: SessionRow, handle: string): string {
+    if (!HANDLE_RE.test(handle)) {
+      throw new MurmurError('bad_request', 'invalid handle: ' + handle);
+    }
+    if (handle === row.handle) {
+      return handle;
+    }
+    if (!this.claimable(handle, row.id)) {
+      throw new MurmurError('bad_request', 'handle ' + handle + ' is taken by a live session or the owner');
+    }
+    if (this.store.getPeer(handle) === null) {
+      this.store.renamePeer(row.handle, handle);
+      return handle;
+    }
+    const others = this.store.sessionsForHandle(row.handle).filter((r) => r.id !== row.id);
+    this.store.reassignSession(row.id, row.handle, handle);
+    if (others.length === 0 && !this.store.peerHasHistory(row.handle)) {
+      this.store.deletePeer(row.handle);
+    }
+    return handle;
+  }
+
+  // A handle can be claimed when it is valid, not the owner's, and no live
+  // session other than exceptId holds it.
+  private claimable(handle: string, exceptId: number | null): boolean {
+    if (!HANDLE_RE.test(handle)) {
+      return false;
+    }
+    const peer = this.store.getPeer(handle);
+    if (peer !== null && peer.isOwner) {
+      return false;
+    }
+    const holders = this.store.sessionsForHandle(handle).filter((r) => r.id !== exceptId && r.state !== 'ended');
+    const table = this.safeProcTable(holders.map((r) => r.hostPid));
+    return !holders.some((r) => isAlive(table, r.hostPid, r.hostStart));
+  }
+
+  // <client>-<cwd basename>, then -2, -3, ... until no live session holds
+  // it. A handle whose sessions are all gone is reused, so a restarted
+  // session in the same folder rejoins its groups.
+  private allocateHandle(client: CliName, cwd: string | undefined): string {
+    const folder = cwd === undefined ? '' : basename(cwd).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    const base = (folder.length > 0 ? client + '-' + folder : client).slice(0, 28).replace(/-+$/, '');
+    let handle = base;
+    for (let n = 2; !this.claimable(handle, null); n += 1) {
+      handle = base + '-' + String(n);
+    }
+    return handle;
+  }
+
+  private safeProcTable(pids: number[]): ProcTable {
+    try {
+      return this.procTable(pids);
+    } catch {
+      return new Map();
+    }
+  }
+
   // Records a hook lifecycle event. prompt means the session is working
   // (busy); session-start and stop leave it idle. Fires nothing.
   hookState(handle: string, event: HookEvent): void {
@@ -642,25 +853,20 @@ export class MurmurCore {
     this.store.upsertNativeTransport(arg.handle, arg.socketPath, arg.token, this.nowMs());
   }
 
-  // The hook injection pull: queued or sent push-mode messages, newest
-  // first, marked delivered as they are handed out.
+  // The hook injection pull: queued push-mode messages, newest first,
+  // marked delivered as they are handed out, each with its rendered text.
   pendingPush(handle: string, limit: number): FetchPushResult {
     const ts = this.nowMs();
     const messages: MessageFull[] = [];
-    for (const entry of this.store.pendingPushFor(handle, limit)) {
-      const delivery = this.store.getDeliveries(entry.message.id).find((d) => d.recipient === handle);
-      if (delivery !== undefined && (delivery.state === 'queued' || delivery.state === 'sent')) {
-        this.store.markDelivered(entry.message.id, handle, ts);
-        this.events.onStateChange({
-          threadId: entry.message.threadId,
-          recipient: handle,
-          from: delivery.state,
-          to: 'delivered',
-        });
-      }
-      messages.push(fullOf(entry.message));
+    const texts: string[] = [];
+    for (const { message: row } of this.store.pendingPushFor(handle, limit)) {
+      this.store.markDelivered(row.id, handle, ts);
+      this.events.onStateChange({ threadId: row.threadId, recipient: handle, from: 'queued', to: 'delivered' });
+      const message = fullOf(row);
+      messages.push(message);
+      texts.push(renderDelivery(message, row.deliveredBody, this.store.getDeliveries(row.id).map((d) => d.recipient)));
     }
-    return { messages };
+    return { messages, texts };
   }
 
   // Stamps last_seen_at on authenticated activity. upsertPeer refreshes

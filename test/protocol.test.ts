@@ -8,12 +8,18 @@ import {
   encodeLine,
   firstLine,
   newToken,
+  HANDLE_RE,
+  PROOF_POLL_MS,
+  deliveryTag,
+  replyFooter,
+  renderDelivery,
+  type MessageSummary,
   truncateForDelivery,
 } from '../src/protocol.js';
 
 describe('wire constants', () => {
   it('exposes the expected protocol values', () => {
-    expect(PROTOCOL_VERSION).toBe(1);
+    expect(PROTOCOL_VERSION).toBe(2);
     expect(MAX_BODY_CHARS).toBe(4000);
     expect(FIRST_LINE_MAX).toBe(120);
   });
@@ -74,8 +80,8 @@ describe('truncateForDelivery', () => {
     const out = truncateForDelivery(body);
     expect(out.truncated).toBe(true);
     expect(out.delivered.startsWith('b'.repeat(MAX_BODY_CHARS))).toBe(true);
-    expect(out.delivered.endsWith('\n[truncated: full body stored, read with murmur read]')).toBe(true);
-    expect(out.delivered).toHaveLength(MAX_BODY_CHARS + '\n[truncated: full body stored, read with murmur read]'.length);
+    expect(out.delivered.endsWith('\n[truncated: full body stored, read it with murmur_thread full: true]')).toBe(true);
+    expect(out.delivered).toHaveLength(MAX_BODY_CHARS + '\n[truncated: full body stored, read it with murmur_thread full: true]'.length);
   });
 });
 
@@ -106,5 +112,43 @@ describe('newToken', () => {
     const token = newToken();
     expect(token).toMatch(/^[0-9a-f]{64}$/);
     expect(newToken()).not.toBe(token);
+  });
+});
+
+describe('v0.2 helpers', () => {
+  it('exposes HANDLE_RE and PROOF_POLL_MS', () => {
+    expect(PROOF_POLL_MS).toBe(120000);
+    expect(HANDLE_RE.test('claude-app')).toBe(true);
+    expect(HANDLE_RE.test('A')).toBe(false);
+    expect(HANDLE_RE.test('-ab')).toBe(false);
+  });
+
+  it('deliveryTag ends with a space so m42 never matches m420', () => {
+    expect(deliveryTag(42)).toBe('[murmur m42 ');
+    expect('[murmur m420 '.includes(deliveryTag(42))).toBe(false);
+  });
+
+  it('replyFooter names the reply and thread commands', () => {
+    expect(replyFooter({ id: 7, threadId: 3 })).toBe(
+      '(reply: murmur_reply messageId 7, or from a shell: murmur reply 7 <text>; whole thread: murmur_thread 3)',
+    );
+  });
+
+  const base: MessageSummary = {
+    id: 5, threadId: 2, seq: 1, sender: 'alice', firstLine: 'x', truncated: false,
+    references: [], isReply: false, inReplyTo: null, verdict: null, createdAt: 0,
+  };
+
+  it('renderDelivery renders the minimal form', () => {
+    expect(renderDelivery(base, 'body', ['bob'])).toBe(
+      '[murmur m5 t2 s1 from alice to bob]\nbody\n' + replyFooter(base),
+    );
+  });
+
+  it('renderDelivery renders parent, verdict, several recipients and refs', () => {
+    const m = { ...base, inReplyTo: 4, verdict: 'agree' as const, references: ['a.ts', 'b.ts'] };
+    expect(renderDelivery(m, 'body', ['bob', 'carol'])).toBe(
+      '[murmur m5 t2 s1 from alice re m4 AGREE to bob, carol]\nbody\nrefs: a.ts, b.ts\n' + replyFooter(m),
+    );
   });
 });

@@ -3,15 +3,18 @@ import { createServer } from 'node:net';
 import type { Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Broker } from '../src/broker.js';
 import { MurmurClient } from '../src/client.js';
 import { ensureHome, getPaths, readToken } from '../src/config.js';
 import type { MurmurPaths } from '../src/config.js';
 import { MurmurCore } from '../src/core.js';
-import { runHook } from '../src/hooks.js';
+import { HOOK_CLIENTS, runHook } from '../src/hooks.js';
+import type { HookClient } from '../src/hooks.js';
+import { currentHost } from '../src/proc.js';
+import type { HostInfo } from '../src/proc.js';
 import { LineReader, MAX_BODY_CHARS } from '../src/protocol.js';
-import type { ClientMessage, RegisterResult, SendResult, StatusResult } from '../src/protocol.js';
+import type { ClientMessage, RegisterResult, SendResult } from '../src/protocol.js';
 import { Store } from '../src/store.js';
 
 // runHook against a live broker. Every scenario passes an explicit env
@@ -29,7 +32,18 @@ interface Stack {
 interface HookOutput {
   hookSpecificOutput: { hookEventName: string; additionalContext: string };
 }
+interface StopOutput {
+  decision: string;
+  reason: string;
+}
 
+// Only currentHost is replaced: core and the broker still use the real process table helpers.
+vi.mock('../src/proc.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/proc.js')>();
+  return { ...actual, currentHost: vi.fn() };
+});
+
+const HOST: HostInfo = { hostPid: 4242, hostStart: 'Tue Oct 20 06:00:00 2026', ancestors: [4242] };
 const stacks: Stack[] = [];
 const homes: string[] = [];
 const clients: MurmurClient[] = [];
@@ -47,7 +61,8 @@ async function buildStack(): Promise<Stack> {
   ensureHome(paths);
   const store = Store.open(paths.dbPath);
   const core = new MurmurCore(store, { onAppend: () => {}, onStateChange: () => {} });
-  const broker = await Broker.start({ paths, store, core });
+  // No real codex or Claude socket is ever contacted: both transports refuse.
+  const broker = await Broker.start({ paths, store, core, nativeSend: () => Promise.resolve({ ok: false, error: 'no' }), wake: () => Promise.resolve(false) });
   const stack: Stack = { home, paths, token: readToken(paths), store, core, broker };
   stacks.push(stack);
   return stack;
@@ -62,23 +77,6 @@ async function connectPeer(stack: Stack, handle: string): Promise<MurmurClient> 
   clients.push(client);
   await req<RegisterResult>(client, { type: 'register', handle, clientKind: 'mcp' });
   return client;
-}
-
-async function presenceOf(viewer: MurmurClient, handle: string): Promise<string | undefined> {
-  const status = await req<StatusResult>(viewer, { type: 'status' });
-  return status.peers.find((p) => p.handle === handle)?.presence;
-}
-
-async function settle(pred: () => Promise<boolean> | boolean, label: string): Promise<void> {
-  const deadline = Date.now() + 10000;
-  while (!(await pred())) {
-    if (Date.now() > deadline) {
-      throw new Error('timed out waiting for ' + label);
-    }
-    await new Promise<void>((resolve) => {
-      setTimeout(resolve, 5);
-    });
-  }
 }
 
 function envFor(stack: Stack, extra: Record<string, string> = {}): NodeJS.ProcessEnv {
@@ -103,156 +101,244 @@ afterEach(async () => {
   }
 });
 
-describe('session-start', () => {
-  it('registers the handle as idle and skips native registration without the CLAUDE vars', async () => {
-    const stack = await buildStack();
-    const viewer = await connectPeer(stack, 'viewer');
-    const outcome = await runHook('session-start', '{}', envFor(stack));
-    expect(outcome).toEqual({ exitCode: 0, stdout: '' });
-    expect(stack.store.getPeer('claude-unknown')).not.toBeNull();
-    expect(stack.store.getNativeTransport('claude-unknown')).toBeNull();
-    await settle(async () => (await presenceOf(viewer, 'claude-unknown')) === 'idle', 'claude-unknown idle');
-  });
+const CLIENT_OPT = (client: HookClient): { client: HookClient; host: HostInfo } => ({ client, host: HOST });
 
-  it('native-registers the session when both CLAUDE messaging vars are present', async () => {
+// Queues one push message for handle from a connected peer.
+async function queueFor(stack: Stack, to: string, body: string): Promise<SendResult> {
+  const alice = await connectPeer(stack, 'alice-' + String(Math.random()).slice(2, 8));
+  return req<SendResult>(alice, { type: 'send', threadId: null, to: [to], body });
+}
+
+describe('session events', () => {
+  it('session-start records a session row from the stdin fields and allocates a handle from client and cwd', async () => {
     const stack = await buildStack();
     const outcome = await runHook(
       'session-start',
-      '{"session_id":"sess-12345678-rest"}',
-      envFor(stack, {
-        CLAUDE_CODE_MESSAGING_SOCKET: '/tmp/cc-socks/4242.sock',
-        CLAUDE_CODE_MESSAGING_TOKEN: 'cc-secret',
-      }),
+      JSON.stringify({ session_id: 'sess-1', transcript_path: '/tmp/t.jsonl', cwd: '/work/My Proj' }),
+      envFor(stack),
+      CLIENT_OPT('codex'),
     );
     expect(outcome).toEqual({ exitCode: 0, stdout: '' });
-    expect(stack.store.getPeer('claude-sess-123')).not.toBeNull();
-    expect(stack.store.getNativeTransport('claude-sess-123')).toEqual({
-      owner: 'claude-sess-123',
-      socketPath: '/tmp/cc-socks/4242.sock',
-      token: 'cc-secret',
+    const row = stack.store.sessionByHost(HOST.hostPid, HOST.hostStart);
+    expect(row).toMatchObject({
+      client: 'codex',
+      cliSessionId: 'sess-1',
+      handle: 'codex-my-proj',
+      transcriptPath: '/tmp/t.jsonl',
+      cwd: '/work/My Proj',
+      state: 'idle',
     });
   });
 
-  it('skips native registration when either var is missing or empty', async () => {
+  it('defaults the client to claude, and a bare session gets the plain client handle', async () => {
     const stack = await buildStack();
-    await runHook('session-start', '{}', envFor(stack, { MURMUR_HANDLE: 'only-socket', CLAUDE_CODE_MESSAGING_SOCKET: '/tmp/x.sock' }));
-    expect(stack.store.getPeer('only-socket')).not.toBeNull();
-    expect(stack.store.getNativeTransport('only-socket')).toBeNull();
-    await runHook('session-start', '{}', envFor(stack, { MURMUR_HANDLE: 'only-token', CLAUDE_CODE_MESSAGING_TOKEN: 'tok' }));
-    expect(stack.store.getNativeTransport('only-token')).toBeNull();
-    await runHook(
-      'session-start',
-      '{}',
-      envFor(stack, { MURMUR_HANDLE: 'empty-socket', CLAUDE_CODE_MESSAGING_SOCKET: '', CLAUDE_CODE_MESSAGING_TOKEN: 'tok' }),
-    );
-    expect(stack.store.getNativeTransport('empty-socket')).toBeNull();
-    await runHook(
-      'session-start',
-      '{}',
-      envFor(stack, { MURMUR_HANDLE: 'empty-token', CLAUDE_CODE_MESSAGING_SOCKET: '/tmp/x.sock', CLAUDE_CODE_MESSAGING_TOKEN: '' }),
-    );
-    expect(stack.store.getNativeTransport('empty-token')).toBeNull();
+    await runHook('session-start', '{}', envFor(stack), { host: HOST });
+    expect(stack.store.sessionByHost(HOST.hostPid, HOST.hostStart)?.handle).toBe('claude');
+  });
+
+  it('prompt marks the session busy, stop idle, and session-end ended with empty output', async () => {
+    const stack = await buildStack();
+    const stateOf = (): string | undefined => stack.store.sessionByHost(HOST.hostPid, HOST.hostStart)?.state;
+    await runHook('prompt', '{}', envFor(stack, { MURMUR_HANDLE: 'busy-one' }), CLIENT_OPT('claude'));
+    expect(stateOf()).toBe('busy');
+    await runHook('stop', '{}', envFor(stack, { MURMUR_HANDLE: 'busy-one' }), CLIENT_OPT('claude'));
+    expect(stateOf()).toBe('idle');
+    const ended = await runHook('session-end', '{}', envFor(stack, { MURMUR_HANDLE: 'busy-one' }), CLIENT_OPT('claude'));
+    expect(ended).toEqual({ exitCode: 0, stdout: '' });
+    expect(stateOf()).toBe('ended');
+  });
+
+  it('MURMUR_HANDLE names the session; an empty one does not', async () => {
+    const stack = await buildStack();
+    await runHook('stop', '{}', envFor(stack, { MURMUR_HANDLE: 'explicit' }), CLIENT_OPT('claude'));
+    expect(stack.store.sessionByHost(HOST.hostPid, HOST.hostStart)?.handle).toBe('explicit');
+    const other: HostInfo = { hostPid: 4243, hostStart: HOST.hostStart, ancestors: [4243] };
+    await runHook('stop', '{}', envFor(stack, { MURMUR_HANDLE: '' }), { client: 'claude', host: other });
+    expect(stack.store.sessionByHost(4243, HOST.hostStart)?.handle).toBe('claude');
+  });
+
+  it('keeps transcriptPath for every client except zcode', async () => {
+    const stack = await buildStack();
+    for (const [i, client] of HOOK_CLIENTS.entries()) {
+      const host: HostInfo = { hostPid: 5000 + i, hostStart: HOST.hostStart, ancestors: [] };
+      await runHook('session-start', '{"transcript_path":"/tmp/x.jsonl"}', envFor(stack, { MURMUR_HANDLE: 'h-' + client }), { client, host });
+      expect(stack.store.sessionByHost(host.hostPid, host.hostStart)?.transcriptPath).toBe(client === 'zcode' ? null : '/tmp/x.jsonl');
+    }
+  });
+
+  it('tolerates malformed stdin against a live broker', async () => {
+    const stack = await buildStack();
+    for (const stdin of ['{"session_id": oops', '123', '', 'null', '{"session_id":""}']) {
+      const outcome = await runHook('session-start', stdin, envFor(stack, { MURMUR_HANDLE: 'tolerant' }), CLIENT_OPT('claude'));
+      expect(outcome).toEqual({ exitCode: 0, stdout: '' });
+    }
+    expect(stack.store.getPeer('tolerant')).not.toBeNull();
   });
 });
 
-describe('prompt', () => {
-  it('returns the additionalContext JSON with the injected push bodies and marks them delivered', async () => {
+describe('native registration', () => {
+  const native = { CLAUDE_CODE_MESSAGING_SOCKET: '/tmp/cc-socks/4242.sock', CLAUDE_CODE_MESSAGING_TOKEN: 'cc-secret' };
+
+  it('registers the native transport only for claude session-start with both vars', async () => {
     const stack = await buildStack();
-    const alice = await connectPeer(stack, 'alice');
-    // The first prompt creates the peer row (nothing to inject yet).
-    const first = await runHook('prompt', '{}', envFor(stack, { MURMUR_HANDLE: 'agent-x' }));
-    expect(first).toEqual({ exitCode: 0, stdout: '' });
-    const one = await req<SendResult>(alice, { type: 'send', threadId: null, to: ['agent-x'], body: 'first body\nmore' });
-    const two = await req<SendResult>(alice, { type: 'send', threadId: null, to: ['agent-x'], body: 'second body' });
-    // Silent and notify messages are not injected by the prompt hook.
-    await req<SendResult>(alice, { type: 'send', threadId: null, to: ['agent-x'], body: 'quiet', mode: 'silent' });
-    const outcome = await runHook('prompt', 'not json at all', envFor(stack, { MURMUR_HANDLE: 'agent-x' }));
-    expect(outcome.exitCode).toBe(0);
-    const parsed = JSON.parse(outcome.stdout) as HookOutput;
-    expect(parsed.hookSpecificOutput.hookEventName).toBe('UserPromptSubmit');
-    const context = parsed.hookSpecificOutput.additionalContext;
-    expect(context).toContain(
-      'murmur message ' + String(one.messageId) + ' in thread ' + String(one.threadId) +
-        ' seq 0 from alice (reply with murmur_reply in_reply_to ' + String(one.messageId) + '):',
-    );
-    expect(context).toContain('first body\nmore');
-    expect(context).toContain('murmur message ' + String(two.messageId));
-    expect(context).toContain('second body');
-    expect(context).not.toContain('quiet');
-    // Newest first, blocks separated by a blank line.
-    expect(context.indexOf('second body')).toBeLessThan(context.indexOf('first body'));
-    expect(context.split('\n\n').length).toBeGreaterThanOrEqual(3);
-    expect(stack.store.getDeliveries(one.messageId)[0]?.state).toBe('delivered');
-    expect(stack.store.getDeliveries(two.messageId)[0]?.state).toBe('delivered');
-    // Nothing is left to inject.
-    const again = await runHook('prompt', '{}', envFor(stack, { MURMUR_HANDLE: 'agent-x' }));
-    expect(again).toEqual({ exitCode: 0, stdout: '' });
+    await runHook('session-start', '{}', envFor(stack, { MURMUR_HANDLE: 'nat', ...native }), CLIENT_OPT('claude'));
+    expect(stack.store.getNativeTransport('nat')).toEqual({ owner: 'nat', socketPath: '/tmp/cc-socks/4242.sock', token: 'cc-secret' });
+  });
+
+  it('skips it for other events, other clients, and a missing or empty var', async () => {
+    const stack = await buildStack();
+    const cases: Array<[string, HookClient, 'prompt' | 'session-start', Record<string, string>]> = [
+      ['n-prompt', 'claude', 'prompt', native],
+      ['n-codex', 'codex', 'session-start', native],
+      ['n-nosock', 'claude', 'session-start', { CLAUDE_CODE_MESSAGING_TOKEN: 't' }],
+      ['n-notoken', 'claude', 'session-start', { CLAUDE_CODE_MESSAGING_SOCKET: '/tmp/x.sock' }],
+      ['n-emptysock', 'claude', 'session-start', { CLAUDE_CODE_MESSAGING_SOCKET: '', CLAUDE_CODE_MESSAGING_TOKEN: 't' }],
+      ['n-emptytok', 'claude', 'session-start', { CLAUDE_CODE_MESSAGING_SOCKET: '/tmp/x.sock', CLAUDE_CODE_MESSAGING_TOKEN: '' }],
+    ];
+    for (const [i, [handle, client, event, vars]] of cases.entries()) {
+      const host: HostInfo = { hostPid: 6000 + i, hostStart: HOST.hostStart, ancestors: [] };
+      await runHook(event, '{}', envFor(stack, { MURMUR_HANDLE: handle, ...vars }), { client, host });
+      expect(stack.store.getNativeTransport(handle)).toBeNull();
+    }
+  });
+});
+
+describe('output dialects', () => {
+  const clientHost = (i: number): HostInfo => ({ hostPid: 7000 + i, hostStart: HOST.hostStart, ancestors: [] });
+
+  it('hands queued messages back in each client dialect for each event', async () => {
+    const stack = await buildStack();
+    let n = 0;
+    for (const client of HOOK_CLIENTS) {
+      for (const event of ['stop', 'session-start', 'prompt'] as const) {
+        n += 1;
+        const handle = 'dl-' + String(n);
+        const host = clientHost(n);
+        // Create the session first (a stop leaves it idle and returns nothing).
+        await runHook('stop', '{}', envFor(stack, { MURMUR_HANDLE: handle }), { client, host });
+        const sent = await queueFor(stack, handle, 'body ' + String(n));
+        const outcome = await runHook(event, '{}', envFor(stack, { MURMUR_HANDLE: handle }), { client, host });
+        expect(outcome.exitCode).toBe(0);
+        const parsed = JSON.parse(outcome.stdout) as Record<string, unknown>;
+        const header = 'murmur: 1 message(s) for ' + handle + '\n\n[murmur m' + String(sent.messageId) + ' ';
+        if (event === 'stop') {
+          expect(parsed).toEqual({ decision: client === 'gemini' ? 'deny' : 'block', reason: expect.stringContaining(header) });
+          expect((parsed as unknown as StopOutput).reason).toContain('body ' + String(n));
+        } else {
+          const name = event === 'session-start' ? 'SessionStart' : client === 'gemini' ? 'BeforeAgent' : 'UserPromptSubmit';
+          const out = parsed as unknown as HookOutput;
+          expect(out.hookSpecificOutput.hookEventName).toBe(name);
+          expect(out.hookSpecificOutput.additionalContext).toContain(header);
+          expect(out.hookSpecificOutput.additionalContext).toContain('body ' + String(n));
+        }
+        expect(stack.store.getDeliveries(sent.messageId)[0]?.state).toBe('delivered');
+      }
+    }
+  });
+
+  it('joins several messages and returns nothing once they are delivered', async () => {
+    const stack = await buildStack();
+    const env = envFor(stack, { MURMUR_HANDLE: 'agent-x' });
+    await runHook('stop', '{}', env, CLIENT_OPT('claude'));
+    const one = await queueFor(stack, 'agent-x', 'first body');
+    const two = await queueFor(stack, 'agent-x', 'second body');
+    const outcome = await runHook('prompt', '{}', env, CLIENT_OPT('claude'));
+    const context = (JSON.parse(outcome.stdout) as HookOutput).hookSpecificOutput.additionalContext;
+    expect(context.startsWith('murmur: 2 message(s) for agent-x')).toBe(true);
+    expect(context).toContain('[murmur m' + String(one.messageId) + ' ');
+    expect(context).toContain('[murmur m' + String(two.messageId) + ' ');
+    expect(await runHook('prompt', '{}', env, CLIENT_OPT('claude'))).toEqual({ exitCode: 0, stdout: '' });
   });
 
   it('renders the truncated delivery body for long messages', async () => {
     const stack = await buildStack();
-    const alice = await connectPeer(stack, 'alice');
-    await runHook('prompt', '{}', envFor(stack, { MURMUR_HANDLE: 'agent-long' }));
-    const body = 'z'.repeat(MAX_BODY_CHARS + 10);
-    await req<SendResult>(alice, { type: 'send', threadId: null, to: ['agent-long'], body });
-    const outcome = await runHook('prompt', '{}', envFor(stack, { MURMUR_HANDLE: 'agent-long' }));
-    const parsed = JSON.parse(outcome.stdout) as HookOutput;
-    expect(parsed.hookSpecificOutput.additionalContext).toContain('[truncated: full body stored, read with murmur read]');
-    expect(parsed.hookSpecificOutput.additionalContext).not.toContain('z'.repeat(MAX_BODY_CHARS + 1));
+    const env = envFor(stack, { MURMUR_HANDLE: 'agent-long' });
+    await runHook('stop', '{}', env, CLIENT_OPT('claude'));
+    await queueFor(stack, 'agent-long', 'z'.repeat(MAX_BODY_CHARS + 10));
+    const outcome = await runHook('prompt', '{}', env, CLIENT_OPT('claude'));
+    const context = (JSON.parse(outcome.stdout) as HookOutput).hookSpecificOutput.additionalContext;
+    expect(context).toContain('[truncated: full body stored, read it with murmur_thread full: true]');
+    expect(context).not.toContain('z'.repeat(MAX_BODY_CHARS + 1));
   });
 
-  it('marks the session busy until stop sets it idle', async () => {
+  it('returns empty output when the fetch finds nothing', async () => {
     const stack = await buildStack();
-    const viewer = await connectPeer(stack, 'viewer');
-    await runHook('prompt', '{}', envFor(stack, { MURMUR_HANDLE: 'busy-one' }));
-    await settle(async () => (await presenceOf(viewer, 'busy-one')) === 'busy', 'busy-one busy');
-    const outcome = await runHook('stop', '{}', envFor(stack, { MURMUR_HANDLE: 'busy-one' }));
+    const outcome = await runHook('session-start', '{}', envFor(stack, { MURMUR_HANDLE: 'quiet' }), CLIENT_OPT('claude'));
     expect(outcome).toEqual({ exitCode: 0, stdout: '' });
-    await settle(async () => (await presenceOf(viewer, 'busy-one')) === 'idle', 'busy-one idle');
   });
 });
 
-describe('handle resolution', () => {
-  it('prefers MURMUR_HANDLE, then the session id prefix, then claude-unknown', async () => {
+describe('host resolution', () => {
+  it('exits silently without creating anything when the host is null', async () => {
     const stack = await buildStack();
-    await runHook('stop', '{"session_id":"abcdefgh-ignored"}', envFor(stack, { MURMUR_HANDLE: 'explicit' }));
-    expect(stack.store.getPeer('explicit')).not.toBeNull();
-    expect(stack.store.getPeer('claude-abcdefgh')).toBeNull();
-    // An empty MURMUR_HANDLE does not count as explicit.
-    await runHook('stop', '{"session_id":"abcdefgh-ignored"}', envFor(stack, { MURMUR_HANDLE: '' }));
-    expect(stack.store.getPeer('claude-abcdefgh')).not.toBeNull();
-    await runHook('stop', '{"session_id":"short"}', envFor(stack));
-    expect(stack.store.getPeer('claude-short')).not.toBeNull();
-    // No usable session id in any of these.
-    await runHook('stop', '{"session_id":""}', envFor(stack));
-    await runHook('stop', '123', envFor(stack));
-    await runHook('stop', '{"other":"x"}', envFor(stack));
-    await runHook('stop', '', envFor(stack));
-    expect(stack.store.getPeer('claude-unknown')).not.toBeNull();
-    expect(stack.store.listPeers().map((p) => p.handle).sort()).toEqual([
-      'claude-abcdefgh',
-      'claude-short',
-      'claude-unknown',
-      'explicit',
-    ]);
+    const outcome = await runHook('session-start', '{}', envFor(stack, { MURMUR_HANDLE: 'nohost' }), { client: 'claude', host: null });
+    expect(outcome).toEqual({ exitCode: 0, stdout: '' });
+    expect(stack.store.getPeer('nohost')).toBeNull();
   });
 
+  it('uses currentHost when no host is passed, with and without opts', async () => {
+    const stack = await buildStack();
+    const mocked = vi.mocked(currentHost);
+    mocked.mockReturnValue(HOST);
+    await runHook('stop', '{}', envFor(stack, { MURMUR_HANDLE: 'via-current' }));
+    expect(stack.store.sessionByHost(HOST.hostPid, HOST.hostStart)?.handle).toBe('via-current');
+    mocked.mockReturnValue(null);
+    const silent = await runHook('stop', '{}', envFor(stack, { MURMUR_HANDLE: 'via-null' }), { client: 'codex' });
+    expect(silent).toEqual({ exitCode: 0, stdout: '' });
+    expect(stack.store.getPeer('via-null')).toBeNull();
+    expect(mocked).toHaveBeenCalledTimes(2);
+    mocked.mockReset();
+  });
+});
+
+describe('home resolution', () => {
   it('falls back to the process MURMUR_HOME when the env object has none', async () => {
     const stack = await buildStack();
     process.env.MURMUR_HOME = stack.home;
-    const outcome = await runHook('stop', '{}', { MURMUR_HANDLE: 'via-process-env' });
+    const outcome = await runHook('stop', '{}', { MURMUR_HANDLE: 'via-process-env' }, CLIENT_OPT('claude'));
     expect(outcome).toEqual({ exitCode: 0, stdout: '' });
     expect(stack.store.getPeer('via-process-env')).not.toBeNull();
   });
 });
 
+// A stand-in broker that answers auth, then lets the script decide.
+async function fakeBroker(
+  dir: string,
+  answer: (msg: { type?: string; id?: number }, reply: (result: unknown) => void) => void,
+): Promise<() => Promise<void>> {
+  const server = createServer((socket: Socket) => {
+    const reader = new LineReader();
+    socket.setEncoding('utf8');
+    socket.on('error', () => {});
+    socket.on('data', (chunk: string) => {
+      for (const line of reader.feed(chunk)) {
+        const msg = JSON.parse(line) as { type?: string; id?: number };
+        const reply = (result: unknown): void => {
+          socket.write(JSON.stringify({ v: 2, id: msg.id, ok: true, result }) + '\n');
+        };
+        if (msg.type === 'auth') {
+          reply(null);
+        } else {
+          answer(msg, reply);
+        }
+      }
+    });
+  });
+  await new Promise<void>((resolveListen) => {
+    server.listen(join(dir, 'bus.sock'), () => resolveListen());
+  });
+  return () =>
+    new Promise<void>((resolveClose) => {
+      server.close(() => resolveClose());
+    });
+}
+
 describe('failure tolerance', () => {
   it('returns exit 0 with empty stdout when the broker is down', async () => {
     const home = freshHome();
-    const paths = getPaths(home);
-    ensureHome(paths);
-    for (const event of ['session-start', 'prompt', 'stop'] as const) {
-      const outcome = await runHook(event, '{"session_id":"abc"}', { MURMUR_HOME: home, MURMUR_HANDLE: 'nobody' });
+    ensureHome(getPaths(home));
+    for (const event of ['session-start', 'prompt', 'stop', 'session-end'] as const) {
+      const outcome = await runHook(event, '{"session_id":"abc"}', { MURMUR_HOME: home, MURMUR_HANDLE: 'nobody' }, CLIENT_OPT('claude'));
       expect(outcome).toEqual({ exitCode: 0, stdout: '' });
     }
   });
@@ -260,56 +346,35 @@ describe('failure tolerance', () => {
   it('returns exit 0 with empty stdout when the token cannot be read', async () => {
     const home = freshHome();
     mkdirSync(home, { recursive: true });
-    const outcome = await runHook('prompt', '{}', { MURMUR_HOME: home, MURMUR_HANDLE: 'nobody' });
+    const outcome = await runHook('prompt', '{}', { MURMUR_HOME: home }, CLIENT_OPT('claude'));
     expect(outcome).toEqual({ exitCode: 0, stdout: '' });
   });
 
-  it('tolerates malformed stdin against a live broker', async () => {
-    const stack = await buildStack();
-    const outcome = await runHook('session-start', '{"session_id": oops', envFor(stack, { MURMUR_HANDLE: 'tolerant' }));
-    expect(outcome).toEqual({ exitCode: 0, stdout: '' });
-    expect(stack.store.getPeer('tolerant')).not.toBeNull();
+  it('treats a fetch-push result without texts as empty', async () => {
+    const dir = freshHome();
+    ensureHome(getPaths(dir));
+    const close = await fakeBroker(dir, (msg, reply) => reply(msg.type === 'session' ? { handle: 'fake' } : {}));
+    try {
+      const outcome = await runHook('prompt', '{}', { MURMUR_HOME: dir }, CLIENT_OPT('claude'));
+      expect(outcome).toEqual({ exitCode: 0, stdout: '' });
+    } finally {
+      await close();
+    }
   });
 
   it('gives up on the watchdog when the broker authenticates but stops replying', async () => {
-    // A peer that answers the auth handshake and then goes silent on the
-    // hook request. The hook must unblock itself after HOOK_DEADLINE_MS
-    // (10s) with exit 0 and empty stdout instead of hanging forever.
+    // The hook must unblock itself after HOOK_DEADLINE_MS (10s) with exit 0
+    // and empty stdout instead of hanging forever.
     const dir = freshHome();
-    const paths = getPaths(dir);
-    ensureHome(paths);
-    const server = createServer((socket: Socket) => {
-      const reader = new LineReader();
-      socket.setEncoding('utf8');
-      socket.on('error', () => {});
-      socket.on('data', (chunk: string) => {
-        for (const line of reader.feed(chunk)) {
-          let parsed: { type?: string; id?: number };
-          try {
-            parsed = JSON.parse(line) as { type?: string; id?: number };
-          } catch {
-            continue;
-          }
-          if (parsed.type === 'auth' && typeof parsed.id === 'number') {
-            socket.write(JSON.stringify({ v: 1, id: parsed.id, ok: true, result: null }) + '\n');
-          }
-          // The hook request itself is never answered.
-        }
-      });
-    });
-    const socketPath = join(dir, 'bus.sock');
-    await new Promise<void>((resolveListen) => {
-      server.listen(socketPath, () => resolveListen());
-    });
+    ensureHome(getPaths(dir));
+    const close = await fakeBroker(dir, () => {});
     try {
       const started = Date.now();
-      const outcome = await runHook('prompt', '{}', { MURMUR_HOME: dir, MURMUR_HANDLE: 'stuck' });
+      const outcome = await runHook('prompt', '{}', { MURMUR_HOME: dir }, CLIENT_OPT('claude'));
       expect(Date.now() - started).toBeGreaterThanOrEqual(9900);
       expect(outcome).toEqual({ exitCode: 0, stdout: '' });
     } finally {
-      await new Promise<void>((resolveClose) => {
-        server.close(() => resolveClose());
-      });
+      await close();
     }
   });
 });

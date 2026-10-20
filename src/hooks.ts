@@ -1,168 +1,155 @@
-import { MurmurClient } from './client.js';
+import { connectBroker } from './client.js';
 import { getPaths, readToken } from './config.js';
-import { truncateForDelivery } from './protocol.js';
-import type {
-  FetchPushMessage,
-  FetchPushResult,
-  HookEvent,
-  HookMessage,
-  MessageFull,
-  NativeRegisterMessage,
-} from './protocol.js';
+import { currentHost } from './proc.js';
+import type { HostInfo } from './proc.js';
+import type { FetchPushMessage, FetchPushResult, HookEvent, SessionMessage, SessionResult } from './protocol.js';
 
 export interface HookOutcome {
   exitCode: number;
   stdout: string;
 }
 
-// Hard cap on the broker interaction. A hook runs inline inside a Claude
-// session and must never block it. MurmurClient.connect is already bounded
-// (3s default), but a broker that accepts the connection and then stops
-// replying could stall a request forever, so this watchdog destroys the
-// socket, which rejects every pending request and lets the hook return.
+// The CLIs that drive murmur through command hooks. All four send the same
+// stdin fields (session_id, transcript_path, cwd); they differ in event
+// names (mapped by the installer onto murmur's four events) and in how a
+// hook hands text back to the model.
+export type HookClient = 'claude' | 'codex' | 'gemini' | 'zcode';
+export const HOOK_CLIENTS: readonly HookClient[] = ['claude', 'codex', 'gemini', 'zcode'];
+
+// Hard cap on the broker interaction. A hook runs inline inside a session
+// and must never block it. MurmurClient.connect is already bounded (3s), but
+// a broker that accepts and then stops replying could stall a request
+// forever, so this watchdog destroys the socket, which rejects every
+// pending request and lets the hook return.
 const HOOK_DEADLINE_MS = 10000;
 
 const FETCH_PUSH_LIMIT = 10;
 
+interface HookInput {
+  sessionId: string | null;
+  transcriptPath: string | null;
+  cwd: string | null;
+}
+
 // Entry point used by every client's hook config. It must never block or
-// fail a session: any broker error, broker down, unreadable stdin, or
-// unexpected failure resolves with exit 0 and empty stdout. On success it
-// also resolves with exit 0; only the prompt event may carry stdout (the
-// UserPromptSubmit additionalContext JSON line).
-export async function runHook(event: HookEvent, stdinText: string, env: NodeJS.ProcessEnv): Promise<HookOutcome> {
+// fail a session: any broker error, broker down, unreadable stdin, unknown
+// host or unexpected failure resolves with exit 0 and empty stdout.
+export async function runHook(
+  event: HookEvent,
+  stdinText: string,
+  env: NodeJS.ProcessEnv,
+  opts?: { client?: HookClient; host?: HostInfo | null },
+): Promise<HookOutcome> {
   try {
-    const sessionId = parseSessionId(stdinText);
-    const handle = resolveHandle(env, sessionId);
+    const client = opts?.client ?? 'claude';
+    const host = opts?.host === undefined ? currentHost(undefined, false) : opts.host;
+    if (host === null) {
+      return { exitCode: 0, stdout: '' };
+    }
+    const input = parseInput(stdinText);
     const home = env.MURMUR_HOME;
     const paths = typeof home === 'string' ? getPaths(home) : getPaths();
     const token = readToken(paths);
-    const client = await MurmurClient.connect({ socketPath: paths.socketPath, token });
+    const conn = await connectBroker({ socketPath: paths.socketPath, token });
     const watchdog = setTimeout(() => {
-      client.close();
+      conn.close();
     }, HOOK_DEADLINE_MS);
     try {
-      await sendHookEvent(client, event, handle, sessionId);
-      if (event === 'session-start') {
-        await registerNative(client, env, handle);
+      const { handle } = await conn.request<SessionResult>(sessionMessage(event, client, input, host, env));
+      if (event === 'session-end') {
         return { exitCode: 0, stdout: '' };
       }
-      if (event === 'prompt') {
-        return await fetchAndRender(client, handle);
+      const msg: Omit<FetchPushMessage, 'v' | 'id'> = { type: 'fetch-push', handle, limit: FETCH_PUSH_LIMIT };
+      const result = await conn.request<FetchPushResult>(msg);
+      const texts = result.texts ?? [];
+      if (texts.length === 0) {
+        return { exitCode: 0, stdout: '' };
       }
-      // stop: hook event only.
-      return { exitCode: 0, stdout: '' };
+      const text = 'murmur: ' + String(texts.length) + ' message(s) for ' + handle + '\n\n' + texts.join('\n\n');
+      return { exitCode: 0, stdout: JSON.stringify(outputFor(client, event, text)) };
     } finally {
       clearTimeout(watchdog);
-      client.close();
+      conn.close();
     }
   } catch {
-    // Never fail or block a session because of murmur. This catches broker
-    // down, broker closed, bad token, the watchdog firing, and anything
-    // unexpected.
+    // Never fail or block a session because of murmur.
     return { exitCode: 0, stdout: '' };
   }
 }
 
-async function sendHookEvent(
-  client: MurmurClient,
+function sessionMessage(
   event: HookEvent,
-  handle: string,
-  sessionId: string | null,
-): Promise<void> {
-  const msg: Omit<HookMessage, 'v' | 'id'> = { type: 'hook', event, handle };
-  if (sessionId !== null) {
-    msg.sessionHint = sessionId;
+  client: HookClient,
+  input: HookInput,
+  host: HostInfo,
+  env: NodeJS.ProcessEnv,
+): Omit<SessionMessage, 'v' | 'id'> {
+  const msg: Omit<SessionMessage, 'v' | 'id'> = {
+    type: 'session',
+    event,
+    client,
+    cliSessionId: input.sessionId,
+    host: { hostPid: host.hostPid, hostStart: host.hostStart },
+  };
+  // zcode hands hooks a synthetic transcript it deletes afterwards, so it
+  // cannot serve as delivery proof.
+  if (input.transcriptPath !== null && client !== 'zcode') {
+    msg.transcriptPath = input.transcriptPath;
   }
-  await client.request<void>(msg);
-}
-
-// session-start only: when this Claude process exposed its native messaging
-// socket and token to us (both env vars present), tell the broker where to
-// reach this session for native sends.
-async function registerNative(client: MurmurClient, env: NodeJS.ProcessEnv, handle: string): Promise<void> {
+  if (input.cwd !== null) {
+    msg.cwd = input.cwd;
+  }
+  const explicit = env.MURMUR_HANDLE;
+  if (typeof explicit === 'string' && explicit.length > 0) {
+    msg.handle = explicit;
+  }
+  // A Claude session exposes its own messaging socket to the processes it
+  // spawns; registering it lets the broker push straight into the session.
   const socketPath = env.CLAUDE_CODE_MESSAGING_SOCKET;
-  const token = env.CLAUDE_CODE_MESSAGING_TOKEN;
-  if (typeof socketPath !== 'string' || socketPath.length === 0) {
-    return;
+  const nativeToken = env.CLAUDE_CODE_MESSAGING_TOKEN;
+  if (client === 'claude' && event === 'session-start' && nonEmpty(socketPath) && nonEmpty(nativeToken)) {
+    msg.native = { socketPath, token: nativeToken };
   }
-  if (typeof token !== 'string' || token.length === 0) {
-    return;
-  }
-  const msg: Omit<NativeRegisterMessage, 'v' | 'id'> = {
-    type: 'native-register',
-    handle,
-    socketPath,
-    token,
-  };
-  await client.request<void>(msg);
+  return msg;
 }
 
-// prompt only: drain up to FETCH_PUSH_LIMIT pushed messages for the handle
-// and render them as one UserPromptSubmit additionalContext JSON line. No
-// messages means empty stdout.
-async function fetchAndRender(client: MurmurClient, handle: string): Promise<HookOutcome> {
-  const msg: Omit<FetchPushMessage, 'v' | 'id'> = { type: 'fetch-push', handle, limit: FETCH_PUSH_LIMIT };
-  const result = await client.request<FetchPushResult>(msg);
-  if (result.messages.length === 0) {
-    return { exitCode: 0, stdout: '' };
+function nonEmpty(value: string | undefined): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+// How each CLI takes text back from a hook. Start and prompt events add it
+// to the model's context; stop asks the CLI to keep going with the text as
+// the next instruction, so messages that arrived mid-turn are handled
+// without waiting for the user.
+function outputFor(client: HookClient, event: HookEvent, text: string): Record<string, unknown> {
+  if (event === 'stop') {
+    return { decision: client === 'gemini' ? 'deny' : 'block', reason: text };
   }
-  const joined = result.messages.map(renderMessage).join('\n\n');
-  return {
-    exitCode: 0,
-    stdout: JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: 'UserPromptSubmit',
-        additionalContext: joined,
-      },
-    }),
-  };
+  let hookEventName = event === 'session-start' ? 'SessionStart' : 'UserPromptSubmit';
+  if (client === 'gemini' && event === 'prompt') {
+    hookEventName = 'BeforeAgent';
+  }
+  return { hookSpecificOutput: { hookEventName, additionalContext: text } };
 }
 
-function renderMessage(m: MessageFull): string {
-  const header =
-    'murmur message ' +
-    String(m.id) +
-    ' in thread ' +
-    String(m.threadId) +
-    ' seq ' +
-    String(m.seq) +
-    ' from ' +
-    m.sender +
-    ' (reply with murmur_reply in_reply_to ' +
-    String(m.id) +
-    '):';
-  return header + '\n\n' + truncateForDelivery(m.body).delivered;
-}
-
-// Reads the Claude hook payload from stdin. It carries session_id among
-// other fields; a parse failure or a missing id is ignored and the caller
-// falls back to the unknown handle.
-function parseSessionId(stdinText: string): string | null {
+// Reads the hook payload from stdin. A parse failure or missing field reads
+// as null.
+function parseInput(stdinText: string): HookInput {
   let parsed: unknown;
   try {
     parsed = JSON.parse(stdinText);
   } catch {
-    return null;
+    parsed = null;
   }
-  if (typeof parsed !== 'object' || parsed === null) {
-    return null;
-  }
-  const sessionId = (parsed as Record<string, unknown>).session_id;
-  if (typeof sessionId === 'string' && sessionId.length > 0) {
-    return sessionId;
-  }
-  return null;
+  const rec = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
+  return {
+    sessionId: stringField(rec, 'session_id'),
+    transcriptPath: stringField(rec, 'transcript_path'),
+    cwd: stringField(rec, 'cwd'),
+  };
 }
 
-// MURMUR_HANDLE wins when set, else claude- plus the first 8 chars of the
-// session id, else claude-unknown.
-function resolveHandle(env: NodeJS.ProcessEnv, sessionId: string | null): string {
-  const explicit = env.MURMUR_HANDLE;
-  if (typeof explicit === 'string' && explicit.length > 0) {
-    return explicit;
-  }
-  if (sessionId !== null) {
-    return 'claude-' + sessionId.slice(0, 8);
-  }
-  return 'claude-unknown';
+function stringField(rec: Record<string, unknown>, key: string): string | null {
+  const value = rec[key];
+  return typeof value === 'string' && value.length > 0 ? value : null;
 }

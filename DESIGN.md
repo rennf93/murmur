@@ -2,86 +2,76 @@
 
 ## Architecture
 
-One broker process owns all state. Everything else is a thin client over one newline-delimited JSON protocol on a single Unix domain socket.
+One broker process owns all state. Everything else is a thin client over one newline-delimited JSON protocol (version 2) on one Unix domain socket.
 
 ```
-Claude session A            Claude session B            zcode session
-  |  hooks (3 events)          |  hooks + native socket    |  Bash + skill
-  |  + MCP facade (11 tools)   |                           |
-  v                            v                           v
-  +------------------------ murmur CLI (human) ----------+
-                          |            |
-                          v            v
-                    MurmurCore (policy)  <--- drives --->  Broker (sockets)
-                                          |
-                                        Store (SQLite, WAL)
-                                          |
-                                  native transport rows
-                                          v
-                              /tmp/cc-socks/<pid>.sock  (peer sessions)
+ Claude / Codex / Gemini / zcode session      opencode session        Hummin session
+   hooks (murmur hook ... --client X)           plugin (in process)     extension (in process)
+   MCP server (murmur mcp)                       |                       |
+   shell: murmur send / reply / name             |                       |
+          \__________________ one socket, token auth ____________________/
+                                   |
+                       Broker (sockets, routing, proof)
+                                   |
+                       MurmurCore (policy)  ->  Store (SQLite, WAL)
+                                   |
+        push transports: adapter connection | Claude native socket | codex queue
 ```
 
-- **Broker, `src/broker.ts`.** The Unix socket server. Per-connection state machine: the first line must be `auth` against the token file, then every line is one request. A byte-exact guard rejects any line over 1 MiB and destroys the connection. Lines on one connection are dispatched strictly in order (each handler awaits the previous), so a client cannot interleave its own requests. The broker owns the presence map (handle to live connection, bound by `register` and `hook`), executes pushes after sends, batches notifications per recipient on a 60 second flush timer, and keeps per-thread waiters that it re-checks after every mutation. All policy lives in MurmurCore; the broker drives it and relays the returned push targets.
-- **Policy core, `src/core.ts`.** `MurmurCore` owns every decision and no sockets: recipient resolution (handles plus `@groups`, order-preserving dedup), rate, duplicate and cap limits, thread and seq allocation, delivery state transitions, ask collection with reply latency percentiles, presence tiers, and groups. The send-rate and duplicate windows are in memory by design: limits reset when the broker restarts, while messages persist.
-- **Store, `src/store.ts`.** SQLite via better-sqlite3, WAL mode, fully synchronous. Tables: `peers`, `groups`, `group_members`, `threads`, `messages` (with `UNIQUE (thread_id, seq)` and separate `body` and `delivered_body` columns), `deliveries` (primary key message id plus recipient, one state machine per row), and `native_transports` (per-owner socket path and token, upserted at session-start).
-- **MCP facade, `src/mcp.ts`.** Eleven tools (`murmur_register`, `murmur_send`, `murmur_reply`, `murmur_ack`, `murmur_read`, `murmur_inbox`, `murmur_thread`, `murmur_collect`, `murmur_wait`, `murmur_groups`, `murmur_status`), each mapping to one broker request on a single long-lived connection. That connection is the session's presence on the bus: it stays open for the life of the MCP server and the process registers under `MURMUR_HANDLE` (or `anon-<pid>`).
-- **CLI, `src/cli.ts`.** `init`, `serve [--daemon]`, `mcp`, `hook`, `send`, `status`, `thread`, `groups`, `install`. Every subcommand is parse argv, connect, request, print. `send` registers as the owner handle `renn` (display `renn (owner)`); the read-side commands connect auth-only and bind no handle.
-- **Hooks, `src/hooks.ts`.** One entry point for three events, installed per client. `session-start` reports the event and, when the session exposes `CLAUDE_CODE_MESSAGING_SOCKET` and `CLAUDE_CODE_MESSAGING_TOKEN`, registers that socket as the handle's native transport. `prompt` drains up to 10 pending push-mode messages (queued or sent) and renders them as one UserPromptSubmit `additionalContext` JSON line; empty stdout when there is nothing. `stop` reports idle. A 10 second watchdog bounds the whole interaction and every failure path resolves exit 0 with empty stdout: murmur must never block or fail a session.
-- **Native transport, `src/native.ts`.** The broker-to-live-session sender. Connects to the peer session's messaging socket, writes an auth line then a message line (newline-delimited JSON), and resolves ok on a non-error reply line, a non-JSON first line, or a clean close; resolves failed on connect error, write error, an error-object reply, or the 5 second timeout. Never throws.
-- **Shared client, `src/client.ts`.** Request/reply with per-connection monotonic ids (auth takes id 1), server events surfaced to an optional handler, and `broker_down` / `broker_closed` classification that the CLI turns into its one troubleshooting line.
+- **Broker, `src/broker.ts`.** The socket server. First line must be `auth`; a 1 MiB guard per line; each connection's lines are handled strictly in order. It routes pushes, watches transcripts for delivery proof (`src/proof.ts`), batches notifications, and resolves waiters. Only long-lived connections (an MCP server or an adapter) count as presence; a hook's or a CLI command's short connection carries an identity for its own requests and never unseats them.
+- **Policy core, `src/core.ts`.** Every decision, no sockets: sessions and identity, recipient resolution, rate, duplicate and cap limits, threads and `seq`, delivery states, reply fan-out, collect with latency percentiles, presence, groups.
+- **Store, `src/store.ts`.** SQLite via better-sqlite3, WAL, synchronous. Tables: `peers`, `sessions`, `groups`, `group_members`, `threads`, `messages` (`UNIQUE (thread_id, seq)`), `deliveries` (one state machine per message and recipient), `native_transports`. Files are 0600.
+- **Hooks, `src/hooks.ts`.** One entry for Claude, Codex, Gemini and zcode. Each event sends a `session` message, then pulls queued messages and hands them back in that CLI's dialect.
+- **Adapters, `adapters/`.** In-process clients for CLIs whose extension systems can hold a connection: `adapters/opencode/murmur.ts` (plugin), `adapters/hummin/murmur.ts` (extension).
+- **MCP server, `src/mcp.ts`.** Eight tools over one long-lived connection, plus instructions that remind the model a message is a claim to verify.
+- **CLI, `src/cli.ts`.** `init`, `serve`, `mcp`, `hook`, `send`, `reply`, `name`, `slash`, `status`, `thread`, `groups`, `install`.
 
-A send flows like this: client sends `send` with targets, body, optional mode, references, thread id; core resolves recipients, checks limits (a rejected send consumes no rate slot and no duplicate fingerprint), appends the message in a transaction that allocates `seq`, and inserts one queued delivery per recipient; the broker then executes the returned push targets (native, live connection, or nothing), so delivery states are already settled when the sender sees the ok reply; notifications are batched; waiters are re-checked.
+## Identity
+
+The problem v0.1 had: a per-session handle lived in a global MCP config, so every session either shared one name or failed to start, and hooks named the same session differently, splitting presence and push from send and reply.
+
+The fix is to identify a session by its host process. `src/proc.ts` reads the process table once (`ps -axo pid=,ppid=,lstart=,comm=`), walks up from the calling process, and takes the first ancestor that is not a shell. A hook and an MCP server of one session are both children (directly or through a shell) of the same CLI process, so they compute the same host. The pair (pid, start time) survives pid reuse.
+
+- `sessionEvent` (core) finds a session by the CLI's own session id (resume keeps the name), else by host (clear, which mints a new id in the same process, keeps it too), else creates it with `<cli>-<folder>` and a suffix while a live session holds the name. Names whose sessions all ended are reused, so restarts rejoin groups.
+- An MCP server that registers before its session's first hook is held as pending and bound as soon as the session event for its host arrives, or created on first use.
+- A CLI command matches the nearest live session host among its ancestors (an agent's shell speaks as the agent), else it is the owner. `/murmur` always speaks as the owner.
+- `renameSession`: a free name renames the whole identity (peer row, sessions, deliveries, messages, groups, threads, native transport); a name held only by ended sessions is joined; a live or owner name is refused.
 
 ## The delivery state machine
 
-One row per (message, recipient) in `deliveries`. States: `queued`, `sent`, `delivered`, `acknowledged`, `replied`. Queued, sent, and delivered count as unread for the inbox and the inbox cap.
+One row per (message, recipient). `queued -> sent -> delivered -> acknowledged`, with `replied` reachable from any state.
 
-- **`queued` (birth).** Created by `addDeliveries` at send time with state `queued` and every timestamp NULL (`src/store.ts:386`). Proof of state: the row exists; nothing has happened yet, and that is the point.
-- **`queued` to `sent`.** Two writers, both inside the broker's push execution, which runs before the send reply (`src/broker.ts:524`):
-  - native: a transport row exists and `nativeSend` resolved ok. The broker stamps `sent` and then `delivered` in one breath, waking thread waiters after each hop (`src/broker.ts:707`).
-  - connection: the push event line was written to the recipient's live socket (`src/broker.ts:713`).
-  Proof: `sentAt` stamped, state `sent`. A vanished or failed native path skips silently and the row stays `queued`; the stored message is never rolled back.
-- **`queued` or `sent` to `delivered`.** Three movers: `murmur_read`, which returns full bodies and marks delivered in the same step (`src/core.ts:402`); the hook pull `fetch-push`, which hands out up to 10 pending push-mode messages and marks delivered as it does (`src/core.ts:647`); and the native second hop above. Proof: `deliveredAt` stamped. The queued-to-delivered hop is observable to the sender as a `queued_delivered` notification (`src/broker.ts:664`).
-- **`delivered` or `sent` to `acknowledged`.** `murmur_ack` from the recipient; eligibility is a delivery row for that handle in exactly `delivered` or `sent` (`src/core.ts:376`). Proof: `ackedAt` stamped, and the reply's `acknowledged` list echoes precisely the ids that were eligible (`src/broker.ts:572`).
-- **any state to `replied`.** The recipient replies to a parent message: core finds the replier's own delivery row on the parent and stamps `replied` with latency measured from the parent's creation (`src/core.ts:355`). No prior-state eligibility check. Proof: `repliedAt` and `latencyMs` stamped; the latency feeds `murmur_collect`'s per-peer p50 and p95 reply latencies (`src/core.ts:62`, `src/core.ts:493`).
-- **Waiters.** After every mutation the broker drives (sends, replies, acks, reads, fetch-push, push state hops), it re-evaluates each thread's waiters against the thread's latest ask: `all_replied` wants every recipient delivery replied, `any_replied` at least one; an ask with no recipients never holds (`src/broker.ts:850`). The ask is the newest non-reply message of the thread (`src/store.ts:467`).
+- **`queued`.** Born at send. Nothing left the broker.
+- **`sent`.** A transport accepted the message: a listening adapter connection got the push event, the Claude session's socket took the frame and closed cleanly, or `codex queue` exited 0. Nothing more is claimed.
+- **`delivered`.** Evidence from the receiving side, one of: the message tag `[murmur m<id> ` found in the receiver's own transcript after the push (Claude, Codex, Hummin); the adapter confirming its session accepted the message (opencode, Hummin); the hook pull handing it to the CLI; `murmur_read`. A queued message that reaches `delivered` sends the sender a `queued_delivered` note.
+- **`acknowledged`.** `murmur_ack` from a recipient whose row is `sent` or `delivered`.
+- **`replied`.** The recipient replied to that message; latency is measured from the message's creation and feeds per-peer p50 and p95.
+- **Pull only takes `queued`.** A `sent` message already went through a transport; pulling it again would put it in the session's context twice.
+- **Waiters** re-evaluate after every state change against the thread's latest ask (`all_replied` or `any_replied`).
+
+## The Claude native path: evidence
+
+v0.1 framed native pushes as `{"type":"message","message":...}` from a guess, saw zero bytes back in every probe, and counted a clean close as delivered. The rawest material settled it:
+
+1. **The binary.** Claude Code 2.1.304 logs its own injection recipe at startup: `{"type":"auth","token":...}` then `{"type":"user","message":{"role":"user","content":"hello"}}`, newline-delimited. Its inbox dispatches on `user`, `peer`, `control` and a few control frames, and logs "Received unhandled message type" for anything else. The session never writes back to an injector, which is why the spike saw silence.
+2. **A live spike (2026-10-20).** An idle interactive haiku session in tmux received the documented frame over its socket and answered within 13 seconds. Its transcript stored the message as a user entry with `origin: {kind: "peer"}`, wrapped as "Another Claude session sent a message ... not typed by your user", so Claude itself keeps peer messages from carrying user authority.
+3. **A live two-session run (2026-10-20, isolated `MURMUR_HOME`).** Two interactive haiku sessions announced themselves through the installed hooks as `claude-murmur` and `claude-murmur-2` (client claude, idle, transcript paths, native transports). The owner sent one message to both. Both deliveries went `queued -> sent -> delivered` (tag found in each transcript) `-> replied` in about 9 seconds; each session called `murmur_reply` through the MCP server, which had bound itself to the right session by host. Each reply was pushed to the other session and to the owner, and the thread read back as three messages in `seq` order.
+
+The check is `scripts/live/claude.mjs`; README's Verification section lists every live check and its last result.
+
+## Other CLIs: what each offers
+
+Researched from each installed binary or package first, docs second.
+
+- **Codex 0.154.0.** Hooks (SessionStart, UserPromptSubmit, Stop, SessionEnd) with `session_id` and `transcript_path`; `additionalContext` injection; Stop `decision: block` continues the turn. `codex queue --thread <id> --message` queues a message for a session. Rollout transcripts are JSONL.
+- **Gemini CLI 0.58.0.** Hooks (SessionStart, BeforeAgent, AfterAgent, SessionEnd); `additionalContext` on SessionStart and BeforeAgent; AfterAgent `decision: deny` sends the reason as a new prompt. No inbound channel into a running session. MCP children get no session id, which the host rule makes irrelevant.
+- **zcode 0.16.9 (Z.AI).** Claude-compatible hook output under `hooks.events` in `~/.zcode/cli/config.json` (off by default; the installer enables it); no SessionEnd; the hook's `transcript_path` is a temporary copy deleted after the hook, so it cannot serve as proof. Commands support the fenced pre-run block.
+- **opencode 1.17.8.** Plugins get an SDK client, events (`session.created`, `session.status`, `session.idle`, `session.deleted`) and custom tools with the calling session's id; `promptAsync` posts a user message into a session.
+- **Hummin 1.6.4.** Extensions load in process, can hold a socket (as its Telegram hub extension already does), inject with `sendUserMessage` (steer or follow-up), register tools, and register commands that run without a model turn.
 
 ## Credits
 
-Murmur ports ideas from three named sources. Everything else in the repo is original to this build.
-
-### roboco A2A
-
-- **Pull inbox with collect-then-mark reads.** Reading is the delivery boundary: `murmur_read` and the hook's `fetch-push` both return full bodies and move the delivery to `delivered` in the same step, so nothing is ever marked without being handed over (`src/core.ts:402`, `src/core.ts:647`).
-- **Identical-in-flight dedup.** A send that repeats the same sender, body, and recipient set within 60 seconds is rejected with `duplicate`, which catches agent loops that re-send while waiting (`src/core.ts:243`).
-- **Context, not commands.** The prompt hook injects rendered messages as UserPromptSubmit `additionalContext`: prose addressed to the model, with reply instructions in the header, never imperative tool calls the session is forced to run (`src/hooks.ts:100`).
-- **Best-effort fan-out that never rolls back the stored message.** Push failures leave the delivery `queued` and move on; the append happens first and nothing ever deletes a stored message to unwind a failed fan-out (`src/broker.ts:691`).
-
-### Claude Code native cross-session messaging
-
-- **Per-session Unix sockets.** Each live Claude session exposes its own messaging socket and token; murmur's session-start hook registers that pair as the handle's native transport, stored per owner in `native_transports` (`src/hooks.ts:82`, `src/store.ts:575`).
-- **Loop protections.** The same three guards, at broker scale: per-sender rate limit (20 per 60 seconds), dropped identical repeats (the 60 second duplicate window), and queue caps (500 messages per thread, 200 unread deliveries per inbox).
-- **Permission doctrine.** Messages can never approve prompts. A murmur delivery is context a session reads, never a permission decision; hooks carry no approval semantics and exit 0 on every path (`src/hooks.ts:58`).
-
-### The live 3-peer run of 2026-10-19
-
-Three sessions on one bus for a day produced the shape decisions below; each is a direct answer to something that went wrong or went well in that run.
-
-- **Threads instead of relaying.** Peers answer inside one thread id rather than each carrying the conversation to the next session, so no session is a single point of garbling and every participant reads the same ordered history.
-- **Verdict enum from unanimous-consent workflows.** The `agree` / `disagree` / `info` verdicts and `murmur_collect`'s tally exist because the run's consent asks needed a scannable, machine-checkable stance per peer instead of prose mining (`src/core.ts:503`).
-- **References field from pointer-first messaging.** Messages carry pointers and artifacts stay in their repos, which kept the run's bodies small and its claims checkable (`MessageSummary.references`, `src/protocol.ts:50`).
-- **Seq numbers eliminating crossed-message confusion.** Per-thread monotonic `seq`, unique per thread, plus `murmur thread --since <seq>` incremental reads, ended the "which message are you answering" misses of the pre-murmur runs (`src/store.ts:166`, `src/store.ts:359`).
-
-## Spike: the native messaging path
-
-The wire shapes for the native path (`auth` line, `message` line, newline-delimited JSON) are a documented guess from the official docs, and the spike was run to confirm or replace them. Spike outcome, as recorded at `src/native.ts:10`: the peer never emitted a single byte in any probe, against a wrong token, the real token, newline-delimited, NUL-delimited, and delimiter-free writes; no banner, no ack, no error. The reply framing is therefore unobservable, and the evidence does not justify changing the schema, so the documented default stands. The two builder functions at the top of `src/native.ts` are the only framing code, so a future spike outcome is applied by editing those alone.
-
-Status on this machine: the native path is live as the first-choice transport and falls back cleanly. Live per-session sockets exist under `/tmp/cc-socks/`, one per claude session pid (21 present today, 2026-10-20, each `srw-------`; `11534.sock` is held by a live `claude` session, 2.1.303 still running, installed CLI now 2.1.304). Each session hands `CLAUDE_CODE_MESSAGING_SOCKET`, that pid-named socket, plus `CLAUDE_CODE_MESSAGING_TOKEN` to the child processes it spawns, which is the pair the session-start hook registers as the handle's native transport (`src/hooks.ts:83`). A session that registers gets native pushes with both `sentAt` and `deliveredAt` stamped at send time. Because the spike never saw a reply byte, an ok verdict can rest on the documented heuristics (non-error reply line, non-JSON first line, or clean close, `src/native.ts:105`), so the honest reading is: the send path is exercised and marked delivered, while the peer's parse of the message remains unverified by any observed reply. Any failure (error reply, write error, timeout, vanished transport row) silently leaves the delivery `queued`, and the message surfaces through the prompt hook pull instead, which is the guaranteed floor for every peer kind.
-
-## Post-build changes
-
-1. **The bin wrapper and the symlinked entry (commit 9c32ede).** The first build relied on the in-module entry guard at the bottom of `src/cli.ts`, which compares `import.meta.url` against `process.argv[1]`. Through `npm link` the guard never fires: node resolves `argv[1]` through the symlink (`.../bin/murmur`), while `import.meta.url` keeps the real path inside the repo, so the linked `murmur` command imported the module and exited without running the CLI. The fix is `bin/murmur.js`, a small wrapper with a shebang that imports `runCli` from `dist/cli.js` and calls it explicitly. Lesson: the in-module entry guard cannot survive a symlinked bin; the entry decision belongs in a wrapper that names the CLI call itself.
-2. **Install wiring executed 2026-10-20 on the live machine.** `murmur install claude` wrote `~/.claude/commands/murmur.md`, merged `mcpServers.murmur` into `~/.claude.json`, and merged the three hooks into `~/.claude/settings.json`; the two pre-existing files carry `.bak-murmur` backups made before the first murmur write, and the diffs were verified surgical (the command file was new, so it had nothing to back up). `murmur install zcode` wrote the skill, `murmur install hummin` printed the hand-wiring steps, the broker daemon was started, and a live smoke passed.
-3. **The `--as` flag on `murmur send`.** The CLI send registered and sent only as the owner (`renn`, display `renn (owner)`). `murmur send --as <handle>` validates the handle against the peer handle regex, registers it with no display and client kind `cli`, and sends from it. Why: CLI replies from scripted agents must not attribute to the owner; a zcode session replying through the plain CLI would otherwise speak as renn.
-4. **zcode identity: MCP-first, CLI fallback.** Where a client supports MCP servers, the MCP facade is the identity-correct path: one long-lived connection registered under the session's own handle. The CLI skill with `--as <your-handle>` is the fallback for clients without MCP.
-5. **Slash UX hardened after live feedback (hint plus bare-command discovery).** Trying `/murmur` live showed two gaps: the autocomplete hint did not spell out the `/murmur <@group | handle> <message>` syntax, and nothing in the command revealed which groups and peers exist. The command file now carries an explicit `argument-hint`, and its backing is a new `murmur slash` subcommand: bare, it prints the usage line, then the peers exactly as `murmur status` prints them, then the groups exactly as `murmur groups list` prints them (reusing those print paths, so the views cannot drift); `slash status` and `slash groups` delegate, and any other arguments are a plain `murmur send`.
+- **roboco A2A:** reading as the delivery boundary (pull marks delivered as it hands out), identical-in-flight dedup, context not commands (hook injection is prose with reply instructions), best-effort fan-out that never rolls back a stored message.
+- **Claude Code native messaging:** per-session sockets as the push transport, the documented injection frame, peer labeling of injected messages, and the loop guards (rate limit, duplicate window, queue caps).
+- **Hummin's Telegram hub extension:** the in-process adapter shape (socket client, `sendUserMessage` with steer or follow-up, tools, reconnect).
+- **The live 3-peer run of 2026-10-19:** threads instead of relaying, the verdict enum for consent asks, references for pointer-first messages, `seq` for crossed messages, and the requirement that senders always know who received what.

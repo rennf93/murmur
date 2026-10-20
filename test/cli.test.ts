@@ -12,6 +12,8 @@ import { MurmurClient } from '../src/client.js';
 import { ensureHome, getPaths, readToken } from '../src/config.js';
 import type { MurmurPaths } from '../src/config.js';
 import { MurmurCore } from '../src/core.js';
+import { INSTALL_CLIENTS } from '../src/install.js';
+import type { HostInfo, ProcInfo } from '../src/proc.js';
 import type { ClientMessage, RegisterResult, SendResult, ServerEvent } from '../src/protocol.js';
 import { Store } from '../src/store.js';
 
@@ -51,6 +53,16 @@ vi.mock('../src/mcp.js', () => ({
     }
   },
 }));
+
+// currentHost is what identity depends on (hooks, send, reply, name); the
+// broker keeps the real process helpers but reads a fixed table, so the
+// sessions the tests announce are "alive" without real processes.
+const hostState = vi.hoisted(() => ({ host: null as unknown }));
+
+vi.mock('../src/proc.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/proc.js')>();
+  return { ...actual, currentHost: () => hostState.host };
+});
 
 const osState = vi.hoisted(() => ({ home: '' }));
 
@@ -108,6 +120,20 @@ async function withStdin<T>(text: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
+// Announces an agent session to the broker the way a session-start hook does.
+async function startSession(handle: string, host: HostInfo, client = 'claude'): Promise<void> {
+  const conn = await MurmurClient.connect({ socketPath: paths.socketPath, token });
+  clients.push(conn);
+  await req(conn, {
+    type: 'session',
+    event: 'session-start',
+    client,
+    cliSessionId: null,
+    host: { hostPid: host.hostPid, hostStart: host.hostStart },
+    handle,
+  });
+}
+
 async function settle(pred: () => boolean | Promise<boolean>, label: string): Promise<void> {
   const deadline = Date.now() + 10000;
   while (!(await pred())) {
@@ -119,6 +145,12 @@ async function settle(pred: () => boolean | Promise<boolean>, label: string): Pr
     });
   }
 }
+
+const FAKE_TABLE = new Map<number, ProcInfo>([
+  [9001, { ppid: 1, start: 'S1', comm: 'claude' }],
+  [9002, { ppid: 1, start: 'S2', comm: 'codex' }],
+]);
+const hostOf = (pid: number, start: string, ancestors: number[] = [pid]): HostInfo => ({ hostPid: pid, hostStart: start, ancestors });
 
 let home = '';
 let paths: MurmurPaths;
@@ -159,12 +191,13 @@ beforeAll(async () => {
   const code = await runCli(['init'], initCapture.io);
   expect(code).toBe(0);
   store = Store.open(paths.dbPath);
-  const core = new MurmurCore(store, { onAppend: () => {}, onStateChange: () => {} });
+  const core = new MurmurCore(store, { onAppend: () => {}, onStateChange: () => {} }, undefined, () => FAKE_TABLE);
   broker = await Broker.start({ paths, store, core });
   token = readToken(paths);
 });
 
 afterEach(() => {
+  hostState.host = null;
   process.env.MURMUR_HOME = home;
   if (savedHandle === undefined) {
     delete process.env.MURMUR_HANDLE;
@@ -282,7 +315,7 @@ describe('usage and unknown commands', () => {
     expect(await runCli([], cap.io)).toBe(1);
     expect(cap.out).toEqual([]);
     expect(cap.err.join('')).toContain('usage: murmur <command> [args]');
-    expect(cap.err.join('')).toContain('install <claude|zcode|hummin>');
+    expect(cap.err.join('')).toContain('install <claude|codex|gemini|zcode|opencode|hummin>');
   });
 
   it('names an unknown command and exits 1', async () => {
@@ -334,8 +367,6 @@ describe('send', () => {
     expect(row?.sender).toBe('renn');
     expect(row?.mode).toBe('push');
     expect(store.getDeliveries(messageId).map((d) => d.recipient)).toEqual(['alice', 'bob']);
-    // The owner registration from send refreshed renn's display.
-    expect(store.getPeer('renn')?.display).toBe('renn (owner)');
     expect(store.getPeer('renn')?.isOwner).toBe(true);
   });
 
@@ -431,7 +462,7 @@ describe('status', () => {
     expect(bob).toBe('bob online unread 2 Bob B');
     // The CLI connection for send has already closed: renn is seen recently
     // but has no live connection.
-    expect(renn).toBe('renn presumed-offline unread 0 renn (owner)');
+    expect(renn).toBe('renn presumed-offline unread 0');
   });
 });
 
@@ -535,7 +566,7 @@ describe('slash', () => {
     expect(cap.err).toEqual([]);
     expect(cap.out.join('')).toBe(
       [
-        '/murmur <@group | handle[,more]> <message>   (run bare like this for peers and groups)',
+        '/murmur <group | handle[,more]> <message>   (run bare like this for peers and groups)',
         '',
         'peers:',
         ...peerLines,
@@ -553,7 +584,7 @@ describe('slash', () => {
     expect(await runCli(['status'], direct.io)).toBe(0);
     expect(viaSlash.err).toEqual([]);
     expect(viaSlash.out.join('')).toBe(direct.out.join(''));
-    expect(viaSlash.out.join('')).toMatch(/^renn \S+ unread 0 renn \(owner\)$/m);
+    expect(viaSlash.out.join('')).toMatch(/^renn \S+ unread 0/m);
     const groupsViaSlash = capture();
     expect(await runCli(['slash', 'groups'], groupsViaSlash.io)).toBe(0);
     expect(groupsViaSlash.out.join('')).toBe('demo: alice, bob\n');
@@ -600,13 +631,27 @@ describe('slash', () => {
   });
 });
 
+const HOOK_USAGE = 'usage: murmur hook <session-start|prompt|stop|session-end> [--client claude|codex|gemini|zcode]\n';
+
 describe('hook', () => {
   it('rejects an unknown hook event', async () => {
     const cap = capture();
     expect(await runCli(['hook', 'bogus'], cap.io)).toBe(1);
-    expect(cap.err.join('')).toBe('usage: murmur hook <session-start|prompt|stop>\n');
+    expect(cap.err.join('')).toBe(HOOK_USAGE);
     const none = capture();
     expect(await runCli(['hook'], none.io)).toBe(1);
+  });
+
+  it('parses --client and rejects an unknown or valueless client before reading stdin', async () => {
+    for (const argv of [['hook', 'prompt', '--client', 'vim'], ['hook', 'prompt', '--client'], ['hook', '--client', 'codex']]) {
+      const cap = capture();
+      expect(await runCli(argv, cap.io)).toBe(1);
+      expect(cap.err.join('')).toBe(HOOK_USAGE);
+    }
+    // A valid client reaches the hook; with no host it is silent.
+    const cap = capture();
+    expect(await withStdin('{}', () => runCli(['hook', 'session-end', '--client', 'gemini'], cap.io))).toBe(0);
+    expect(cap.out.join('')).toBe('');
   });
 
   it('fails cleanly when stdin errors', async () => {
@@ -629,7 +674,7 @@ describe('hook', () => {
   });
 
   it('prompt prints the fetch-push additionalContext JSON line', async () => {
-    const hooked = await connectPeer('hooked');
+    await connectPeer('hooked');
     const alice = clients[0];
     expect(alice).toBeDefined();
     const sent = await req<SendResult>(alice as MurmurClient, {
@@ -638,20 +683,21 @@ describe('hook', () => {
       to: ['hooked'],
       body: 'injected for the prompt',
     });
-    await settle(() => hooked.events.some((ev) => ev.event === 'push'), 'push to hooked');
     process.env.MURMUR_HANDLE = 'hooked';
+    hostState.host = hostOf(9001, 'S1');
     const cap = capture();
-    const code = await withStdin('{"session_id":"abcdef123456"}', () => runCli(['hook', 'prompt'], cap.io));
+    const code = await withStdin('{"session_id":"abcdef123456"}', () => runCli(['hook', 'prompt', '--client', 'codex'], cap.io));
     expect(code).toBe(0);
     const text = cap.out.join('');
     expect(text.endsWith('\n')).toBe(true);
     const parsed = JSON.parse(text) as { hookSpecificOutput: { hookEventName: string; additionalContext: string } };
     expect(parsed.hookSpecificOutput.hookEventName).toBe('UserPromptSubmit');
     expect(parsed.hookSpecificOutput.additionalContext).toContain(
-      'murmur message ' + String(sent.messageId) + ' in thread ' + String(sent.threadId) + ' seq 0 from alice',
+      'murmur: 1 message(s) for hooked\n\n[murmur m' + String(sent.messageId) + ' t' + String(sent.threadId) + ' s0 from alice',
     );
     expect(parsed.hookSpecificOutput.additionalContext).toContain('injected for the prompt');
     expect(store.getDeliveries(sent.messageId)[0]?.state).toBe('delivered');
+    expect(store.sessionByHost(9001, 'S1')).toMatchObject({ client: 'codex', handle: 'hooked', cliSessionId: 'abcdef123456' });
     // A second prompt has nothing to inject and prints nothing.
     const empty = capture();
     expect(await withStdin('', () => runCli(['hook', 'prompt'], empty.io))).toBe(0);
@@ -688,9 +734,9 @@ describe('serve', () => {
     expect(spawnState.unrefs).toBe(2);
   });
 
-  it('runs a broker in the foreground until SIGTERM', async () => {
-    const serveHome = mkdtempSync(join(tmpdir(), 'murmur-cli-serve-'));
-    extraHomes.push(serveHome);
+  // Runs `murmur serve` in this process against serveHome until SIGTERM,
+  // calling during() once the broker accepts connections.
+  async function serveOnce(serveHome: string, during: (servePaths: MurmurPaths, out: string) => Promise<void>): Promise<void> {
     const servePaths = getPaths(serveHome);
     process.env.MURMUR_HOME = serveHome;
     const termBefore = process.listeners('SIGTERM');
@@ -716,19 +762,7 @@ describe('serve', () => {
     }
     await expect(req(probe, { type: 'status' })).resolves.toBeDefined();
     probe.close();
-    expect(cap.out.join('')).toBe(servePaths.socketPath + '\n');
-    // The served broker handles real traffic through the CLI entry. The
-    // printed delivery state is the pre-push snapshot (queued).
-    const send = capture();
-    expect(await runCli(['send', 'renn', 'hello', 'serve'], send.io)).toBe(0);
-    expect(send.out.join('')).toContain('renn: queued');
-    expect(send.out.join('')).toMatch(/message \d+ thread \d+ seq 0/);
-    // The prompt hook pulls the queued message for renn, marking it delivered.
-    process.env.MURMUR_HANDLE = 'renn';
-    const prompt = capture();
-    expect(await withStdin('', () => runCli(['hook', 'prompt'], prompt.io))).toBe(0);
-    const promptJson = JSON.parse(prompt.out.join('')) as { hookSpecificOutput: { additionalContext: string } };
-    expect(promptJson.hookSpecificOutput.additionalContext).toContain('hello serve');
+    await during(servePaths, cap.out.join(''));
     process.emit('SIGTERM', 'SIGTERM');
     // A second signal while stopping is ignored.
     process.emit('SIGINT', 'SIGINT');
@@ -743,6 +777,51 @@ describe('serve', () => {
       if (!intBefore.includes(listener)) {
         process.off('SIGINT', listener);
       }
+    }
+  }
+
+  it('runs a broker in the foreground, seeds the owner when init never ran, and serves real traffic', async () => {
+    const serveHome = mkdtempSync(join(tmpdir(), 'murmur-cli-serve-'));
+    extraHomes.push(serveHome);
+    await serveOnce(serveHome, async (servePaths, printed) => {
+      expect(printed).toBe(servePaths.socketPath + '\n');
+      const status = capture();
+      expect(await runCli(['status'], status.io)).toBe(0);
+      expect(status.out.join('')).toContain('renn ');
+      const send = capture();
+      expect(await runCli(['send', 'renn', 'hello', 'serve'], send.io)).toBe(0);
+      expect(send.out.join('')).toContain('renn: queued');
+      expect(send.out.join('')).toMatch(/message \d+ thread \d+ seq 0/);
+      // A hook on the served broker pulls a queued message (a state change).
+      expect(await runCli(['send', '--as', 'probe-a', 'renn', 'hi'], capture().io)).toBe(0);
+      expect(await runCli(['send', '--as', 'probe-b', 'probe-a', 'for', 'the', 'hook'], capture().io)).toBe(0);
+      process.env.MURMUR_HANDLE = 'probe-a';
+      hostState.host = hostOf(9001, 'S1');
+      const prompt = capture();
+      expect(await withStdin('', () => runCli(['hook', 'prompt'], prompt.io))).toBe(0);
+      expect(prompt.out.join('')).toContain('for the hook');
+    });
+    const seeded = Store.open(getPaths(serveHome).dbPath);
+    try {
+      expect(seeded.listPeers().filter((peer) => peer.isOwner).map((peer) => [peer.handle, peer.display])).toEqual([
+        ['renn', 'renn (owner)'],
+      ]);
+    } finally {
+      seeded.close();
+    }
+  });
+
+  it('keeps an existing owner peer when init already ran', async () => {
+    const serveHome = mkdtempSync(join(tmpdir(), 'murmur-cli-serve-'));
+    extraHomes.push(serveHome);
+    process.env.MURMUR_HOME = serveHome;
+    expect(await runCli(['init'], capture().io)).toBe(0);
+    await serveOnce(serveHome, async () => {});
+    const kept = Store.open(getPaths(serveHome).dbPath);
+    try {
+      expect(kept.listPeers().filter((peer) => peer.isOwner).map((peer) => [peer.handle, peer.display])).toEqual([['renn', null]]);
+    } finally {
+      kept.close();
     }
   });
 });
@@ -765,12 +844,15 @@ describe('mcp', () => {
 });
 
 describe('install', () => {
+  const USAGE = 'usage: murmur install <' + INSTALL_CLIENTS.join('|') + '>\n';
+
   it('rejects an unknown client', async () => {
     const cap = capture();
     expect(await runCli(['install', 'vim'], cap.io)).toBe(1);
-    expect(cap.err.join('')).toBe('usage: murmur install <claude|zcode|hummin>\n');
+    expect(cap.err.join('')).toBe(USAGE);
     const none = capture();
     expect(await runCli(['install'], none.io)).toBe(1);
+    expect(none.err.join('')).toBe(USAGE);
   });
 
   it('exits 1 with the plain error when ~/.claude.json is not valid JSON', async () => {
@@ -791,32 +873,195 @@ describe('install', () => {
       join(osState.home, '.claude.json'),
       join(osState.home, '.claude', 'settings.json'),
     ]);
-    for (const file of files) {
-      expect(existsSync(file)).toBe(true);
-    }
     const claudeJson = JSON.parse(readFileSync(join(osState.home, '.claude.json'), 'utf8')) as {
       mcpServers: Record<string, unknown>;
     };
-    expect(claudeJson.mcpServers.murmur).toEqual({
-      command: 'murmur',
-      args: ['mcp'],
-      env: { MURMUR_HANDLE: 'CHANGE-ME-per-session' },
-    });
+    expect(claudeJson.mcpServers.murmur).toEqual({ command: 'murmur', args: ['mcp'] });
   });
 
-  it('writes the zcode skill and prints hummin wiring', async () => {
-    const zcode = capture();
-    expect(await runCli(['install', 'zcode'], zcode.io)).toBe(0);
-    const skill = join(osState.home, '.zcode', 'skills', 'murmur', 'SKILL.md');
-    expect(zcode.out.join('')).toBe(skill + '\n');
-    expect(readFileSync(skill, 'utf8')).toContain('name: murmur');
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    const hummin = capture();
-    expect(await runCli(['install', 'hummin'], hummin.io)).toBe(0);
-    expect(hummin.out).toEqual([]);
-    expect(logSpy.mock.calls.length).toBeGreaterThanOrEqual(4);
-    expect(String(logSpy.mock.calls[0]?.[0])).toContain('hummin has no automatic wiring');
+  it.each([...INSTALL_CLIENTS])('accepts %s and prints what it wrote', async (client) => {
+    const cap = capture();
+    expect(await runCli(['install', client], cap.io)).toBe(0);
+    expect(cap.err).toEqual([]);
+    const lines = cap.out.join('').split('\n').filter((l) => l.length > 0);
+    expect(lines.length).toBeGreaterThan(0);
+    const written = lines.filter((l) => l.startsWith(osState.home));
+    expect(written.length).toBeGreaterThan(0);
+    for (const file of written) {
+      expect(existsSync(file)).toBe(true);
+    }
+    // Everything that is not a path is a step for the user (codex trust).
+    expect(lines.length - written.length).toBe(client === 'codex' ? 1 : 0);
   });
+});
+
+describe('send identity', () => {
+  it('speaks as the nearest live session among the ancestors, else as the owner', async () => {
+    await connectPeer('id-target');
+    await startSession('id-claude', hostOf(9001, 'S1'));
+    hostState.host = hostOf(9100, 'X', [9100, 9001, 1]);
+    const viaSession = capture();
+    expect(await runCli(['send', 'id-target', 'from', 'a', 'session'], viaSession.io)).toBe(0);
+    const id = Number(/^message (\d+)/m.exec(viaSession.out.join(''))?.[1]);
+    expect(store.messageById(id)?.sender).toBe('id-claude');
+    // No ancestor is a live session host: the owner speaks.
+    hostState.host = hostOf(9100, 'X', [9100, 9200]);
+    const viaOwner = capture();
+    expect(await runCli(['send', 'id-target', 'owner', 'here'], viaOwner.io)).toBe(0);
+    expect(store.messageById(Number(/^message (\d+)/m.exec(viaOwner.out.join(''))?.[1]))?.sender).toBe('renn');
+    // No host at all (ps unavailable) also falls back to the owner.
+    hostState.host = null;
+    const noHost = capture();
+    expect(await runCli(['send', 'id-target', 'still', 'owner'], noHost.io)).toBe(0);
+    expect(store.messageById(Number(/^message (\d+)/m.exec(noHost.out.join(''))?.[1]))?.sender).toBe('renn');
+    // --as beats the session.
+    hostState.host = hostOf(9001, 'S1');
+    const asFlag = capture();
+    expect(await runCli(['send', '--as', 'id-explicit', 'id-target', 'explicit'], asFlag.io)).toBe(0);
+    expect(store.messageById(Number(/^message (\d+)/m.exec(asFlag.out.join(''))?.[1]))?.sender).toBe('id-explicit');
+  });
+});
+
+describe('reply', () => {
+  it('replies into the thread as a session with a verdict and refs, and as the owner without a host', async () => {
+    const alice = clients[0] as MurmurClient;
+    const owner = await connectPeer('reply-peer');
+    const sent = await req<SendResult>(alice, { type: 'send', threadId: null, to: ['renn', 'reply-peer'], body: 'question' });
+    expect(owner.client).toBeDefined();
+    await startSession('reply-claude', hostOf(9002, 'S2'), 'codex');
+    // The session reply goes to the whole thread minus the replier.
+    hostState.host = hostOf(9002, 'S2');
+    const cap = capture();
+    expect(await runCli(['reply', String(sent.messageId), 'I', 'agree', '--verdict', 'agree', '--refs', 'a, b,'], cap.io)).toBe(0);
+    expect(cap.err).toEqual([]);
+    const match = /^message (\d+) thread (\d+) seq (\d+)$/.exec(cap.out.join('').trim());
+    expect(match).not.toBeNull();
+    const row = store.messageById(Number(match?.[1]));
+    expect(row).toMatchObject({ sender: 'reply-claude', body: 'I agree', verdict: 'agree', isReply: true, inReplyTo: sent.messageId });
+    expect(JSON.parse(row?.refsJson ?? '[]')).toEqual(['a', 'b']);
+    // The owner, no host.
+    hostState.host = null;
+    const asOwner = capture();
+    expect(await runCli(['reply', String(sent.messageId), 'plain', 'reply'], asOwner.io)).toBe(0);
+    expect(store.messageById(Number(/^message (\d+)/.exec(asOwner.out.join(''))?.[1]))).toMatchObject({ sender: 'renn', verdict: null });
+    // --as speaks as that peer.
+    const asFlag = capture();
+    expect(await runCli(['reply', '--as', 'reply-peer', String(sent.messageId), 'from', 'flag'], asFlag.io)).toBe(0);
+    expect(store.messageById(Number(/^message (\d+)/.exec(asFlag.out.join(''))?.[1]))?.sender).toBe('reply-peer');
+  });
+
+  it('rejects bad input without reaching the broker, and relays broker errors', async () => {
+    const noValue = capture();
+    expect(await runCli(['reply', '1', 'x', '--verdict'], noValue.io)).toBe(1);
+    expect(noValue.err.join('')).toContain('murmur reply: flag --verdict needs a value');
+    const badAs = capture();
+    expect(await runCli(['reply', '--as', 'Bad_One', '1', 'x'], badAs.io)).toBe(1);
+    expect(badAs.err.join('')).toBe('invalid handle: Bad_One\n');
+    for (const argv of [['reply'], ['reply', 'abc', 'x'], ['reply', '-3', 'x'], ['reply', '1']]) {
+      const cap = capture();
+      expect(await runCli(argv, cap.io)).toBe(1);
+      expect(cap.err.join('')).toContain('murmur reply: need a message id and a body');
+    }
+    const unknown = capture();
+    expect(await runCli(['reply', '987654', 'x'], unknown.io)).toBe(1);
+    expect(unknown.out).toEqual([]);
+    expect(unknown.err.join('')).toContain('987654');
+  });
+});
+
+describe('name', () => {
+  it('validates the handle and the host before connecting', async () => {
+    for (const argv of [['name'], ['name', 'Bad_Handle']]) {
+      const cap = capture();
+      expect(await runCli(argv, cap.io)).toBe(1);
+      expect(cap.err.join('')).toContain('murmur name: need a valid handle');
+    }
+    hostState.host = null;
+    const noHost = capture();
+    expect(await runCli(['name', 'fine-name'], noHost.io)).toBe(1);
+    expect(noHost.err.join('')).toBe('murmur name: cannot find the agent session this runs in\n');
+  });
+
+  it('renames the session of the current host and refuses the owner handle', async () => {
+    await startSession('name-before', hostOf(9001, 'S1'));
+    hostState.host = hostOf(9001, 'S1');
+    const cap = capture();
+    expect(await runCli(['name', 'name-after'], cap.io)).toBe(0);
+    expect(cap.out.join('')).toBe('name-after\n');
+    expect(store.sessionByHost(9001, 'S1')?.handle).toBe('name-after');
+    const refused = capture();
+    expect(await runCli(['name', 'renn'], refused.io)).toBe(1);
+    expect(refused.err.join('')).toContain('taken by a live session or the owner');
+  });
+
+  it('fails instead of printing an empty name when no hook announced the host yet', async () => {
+    hostState.host = hostOf(9002, 'S9');
+    const cap = capture();
+    expect(await runCli(['name', 'too-early'], cap.io)).toBe(1);
+    expect(cap.out.join('')).toBe('');
+    expect(cap.err.join('')).toContain('has not announced itself yet');
+    expect(store.getPeer('too-early')).toBeNull();
+  });
+});
+
+describe('slash input forms', () => {
+  it('--stdin reads "<targets> <body...>" from stdin and sends as the owner, body verbatim', async () => {
+    await connectPeer('stdin-target');
+    hostState.host = hostOf(9001, 'S1');
+    const cap = capture();
+    const code = await withStdin("stdin-target hello 'quoted' $(not run)\nsecond line\n", () => runCli(['slash', '--stdin'], cap.io));
+    expect(code).toBe(0);
+    const lines = cap.out.join('').split('\n').filter((l) => l.length > 0);
+    expect(lines[0]).toBe('stdin-target: queued');
+    const row = store.messageById(Number(/^message (\d+)/.exec(lines[1] ?? '')?.[1]));
+    // Owner identity even though the host is a live session.
+    expect(row).toMatchObject({ sender: 'renn', body: "hello 'quoted' $(not run)\nsecond line" });
+    expect(store.getPeer('renn')?.display).toBe('renn (owner)');
+  });
+
+  it('--claude-escaped undoes Claude\'s "\\!" before a word-initial "!" and leaves other backslashes', async () => {
+    await connectPeer('bang-target');
+    const cap = capture();
+    // What Claude hands over for "!first ok\n!line a!b c\!d \\x".
+    const input = 'bang-target \\!first ok\n\\!line a!b c\\!d \\\\x\n';
+    expect(await withStdin(input, () => runCli(['slash', '--stdin', '--claude-escaped'], cap.io))).toBe(0);
+    const id = Number(/message (\d+)/.exec(cap.out.join(''))?.[1]);
+    expect(store.messageById(id)?.body).toBe('!first ok\n!line a!b c\\!d \\\\x');
+  });
+
+  it('a single argument with whitespace is split into targets and body', async () => {
+    await connectPeer('oneword-target');
+    const cap = capture();
+    expect(await runCli(['slash', 'oneword-target   spaced  body here'], cap.io)).toBe(0);
+    const lines = cap.out.join('').split('\n').filter((l) => l.length > 0);
+    expect(store.messageById(Number(/^message (\d+)/.exec(lines[1] ?? '')?.[1]))?.body).toBe('spaced  body here');
+  });
+
+  it('a lone word from stdin or one argument runs the matching view or reports the missing body', async () => {
+    const viaStdin = capture();
+    expect(await withStdin('status\n', () => runCli(['slash', '--stdin'], viaStdin.io))).toBe(0);
+    const direct = capture();
+    expect(await runCli(['status'], direct.io)).toBe(0);
+    expect(viaStdin.out.join('')).toBe(direct.out.join(''));
+    const groups = capture();
+    expect(await withStdin('groups', () => runCli(['slash', '--stdin'], groups.io))).toBe(0);
+    const missing = capture();
+    expect(await withStdin('alice', () => runCli(['slash', '--stdin'], missing.io))).toBe(1);
+    expect(missing.err.join('')).toContain('murmur send: missing body');
+  });
+
+  it('empty stdin or a whitespace-only argument falls through to the bare discovery view', async () => {
+    for (const run of [
+      () => withStdin('  \n', () => runCli(['slash', '--stdin'], cap.io)),
+      () => runCli(['slash', '   '], cap.io),
+    ]) {
+      cap = capture();
+      expect(await run()).toBe(0);
+      expect(cap.out.join('')).toContain('\npeers:\n');
+      expect(cap.out.join('')).toContain('\ngroups:\n');
+    }
+  });
+  let cap: Capture;
 });
 
 describe('broker down', () => {

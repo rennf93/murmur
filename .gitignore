@@ -6,3 +6,4 @@ coverage/
 *.db-shm
 .env
 serve.log
+site/

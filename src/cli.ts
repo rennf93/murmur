@@ -1,14 +1,14 @@
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { Broker } from './broker.js';
-import { MurmurClient, isBrokerDown } from './client.js';
+import { MurmurClient, connectBroker, isBrokerDown } from './client.js';
 import { ensureHome, getPaths, readToken } from './config.js';
-import { HANDLE_RE, MurmurCore } from './core.js';
 import type { CoreEvents } from './core.js';
-import { runHook } from './hooks.js';
-import { installClient } from './install.js';
-import { runMcpServer } from './mcp.js';
-import { MurmurError } from './protocol.js';
+import { HOOK_CLIENTS, runHook } from './hooks.js';
+import type { HookClient } from './hooks.js';
+import { INSTALL_CLIENTS, installClient } from './install.js';
+import type { InstallClient } from './install.js';
+import { currentHost } from './proc.js';
+import { HANDLE_RE, MurmurError } from './protocol.js';
 import type {
   DeliveryMode,
   GroupAction,
@@ -17,13 +17,14 @@ import type {
   HookEvent,
   RegisterMessage,
   RegisterResult,
+  ReplyMessage,
+  ReplyResult,
   SendMessage,
   SendResult,
   StatusResult,
   ThreadMessage,
   ThreadResult,
 } from './protocol.js';
-import { Store } from './store.js';
 
 // The murmur command line. Every subcommand is a thin driver over the broker
 // protocol: parse argv, connect, request, print. runCli takes an injectable
@@ -41,10 +42,12 @@ const OWNER_DISPLAY = 'renn (owner)';
 
 const SEND_USAGE =
   'usage: murmur send <targets> <body...> [--as <handle>] [--mode <mode>] [--refs <a,b>] [--thread <id>]';
+const REPLY_USAGE = 'usage: murmur reply <message id> <body...> [--as <handle>] [--verdict agree|disagree|info] [--refs <a,b>]';
+const NAME_USAGE = 'usage: murmur name <handle>   (renames the agent session this runs in)';
 const THREAD_USAGE = 'usage: murmur thread <id> [--since <n>] [--full]';
 const GROUPS_USAGE =
   'usage: murmur groups [list] | groups create <name> | groups add <name> <members...> | groups remove <name> <members...> | groups delete <name>';
-const SLASH_USAGE = '/murmur <@group | handle[,more]> <message>   (run bare like this for peers and groups)';
+const SLASH_USAGE = '/murmur <group | handle[,more]> <message>   (run bare like this for peers and groups)';
 
 export async function runCli(argv: string[], io?: CliIo): Promise<number> {
   // The default io is captured at call time and touches only the real
@@ -82,12 +85,18 @@ async function dispatch(argv: string[], out: Sink, err: Sink): Promise<number> {
     case 'serve':
       return cmdServe(argv.slice(1), out);
     case 'mcp':
-      await runMcpServer();
+      // The MCP SDK and zod cost more to load than everything else here, and
+      // only this command needs them; hooks and sends run on every prompt.
+      await (await import('./mcp.js')).runMcpServer();
       return 0;
     case 'hook':
       return cmdHook(argv.slice(1), out, err);
     case 'send':
-      return cmdSend(argv.slice(1), out, err);
+      return cmdSend(argv.slice(1), out, err, 'session');
+    case 'reply':
+      return cmdReply(argv.slice(1), out, err);
+    case 'name':
+      return cmdName(argv.slice(1), out, err);
     case 'slash':
       return cmdSlash(argv.slice(1), out, err);
     case 'status':
@@ -113,19 +122,22 @@ function printUsage(err: Sink): void {
     '  init                     create the murmur home and the owner peer',
     '  serve [--daemon]         start the broker and print the socket path',
     '  mcp                      serve the murmur MCP server over stdio',
-    '  hook <event>             run one client hook (session-start, prompt, stop)',
+    '  hook <event> [--client <cli>]  run one hook (session-start, prompt, stop, session-end)',
     '  send <targets> <body...> send a message; flags: --as, --mode, --refs, --thread',
-    '  slash [args...]          the /murmur backing: bare prints usage, peers and groups',
+    '  reply <id> <body...>     reply into a thread; flags: --as, --verdict, --refs',
+    '  name <handle>            rename the agent session this runs in',
+    '  slash [args...]          the /murmur backing (args or stdin); bare prints peers and groups',
     '  status                   list peers with presence and unread counts',
     '  thread <id> [--since <n>] [--full]',
     '  groups [list] | groups create <name> | groups add <name> <members...>',
     '         | groups remove <name> <members...> | groups delete <name>',
-    '  install <claude|zcode|hummin>',
+    '  install <' + INSTALL_CLIENTS.join('|') + '>',
   ];
   err(lines.join('\n') + '\n');
 }
 
 async function cmdInit(out: Sink): Promise<number> {
+  const { Store } = await import('./store.js');
   const paths = getPaths();
   ensureHome(paths);
   const store = Store.open(paths.dbPath);
@@ -147,9 +159,18 @@ async function cmdServe(args: string[], out: Sink): Promise<number> {
     child.unref();
     return 0;
   }
+  const [{ Store }, { MurmurCore }, { Broker }] = await Promise.all([
+    import('./store.js'),
+    import('./core.js'),
+    import('./broker.js'),
+  ]);
   const paths = getPaths();
   ensureHome(paths);
   const store = Store.open(paths.dbPath);
+  // An autostarted broker may run before murmur init ever did.
+  if (!store.listPeers().some((peer) => peer.isOwner)) {
+    store.upsertPeer(OWNER_HANDLE, OWNER_DISPLAY, null, true, Date.now());
+  }
   const events: CoreEvents = {
     onAppend: () => {},
     onStateChange: () => {},
@@ -179,17 +200,19 @@ async function cmdServe(args: string[], out: Sink): Promise<number> {
 }
 
 function isHookEvent(value: string): value is HookEvent {
-  return value === 'session-start' || value === 'prompt' || value === 'stop';
+  return value === 'session-start' || value === 'prompt' || value === 'stop' || value === 'session-end';
 }
 
 async function cmdHook(args: string[], out: Sink, err: Sink): Promise<number> {
   const event = args[0];
-  if (event === undefined || !isHookEvent(event)) {
-    err('usage: murmur hook <session-start|prompt|stop>\n');
+  const clientFlag = args.indexOf('--client');
+  const client = clientFlag === -1 ? 'claude' : args[clientFlag + 1];
+  if (event === undefined || !isHookEvent(event) || !HOOK_CLIENTS.includes(client as HookClient)) {
+    err('usage: murmur hook <session-start|prompt|stop|session-end> [--client ' + HOOK_CLIENTS.join('|') + ']\n');
     return 1;
   }
   const stdinText = await readAllStdin();
-  const outcome = await runHook(event, stdinText, process.env);
+  const outcome = await runHook(event, stdinText, process.env, { client: client as HookClient });
   out(withNewline(outcome.stdout));
   return outcome.exitCode;
 }
@@ -217,85 +240,123 @@ function readAllStdin(): Promise<string> {
   });
 }
 
-async function cmdSend(args: string[], out: Sink, err: Sink): Promise<number> {
-  let asHandle: string | null = null;
-  let mode: DeliveryMode | undefined;
-  let refs: string[] | undefined;
-  let threadId: number | null = null;
-  let flagsOk = true;
+// Who a CLI command speaks as. --as wins. Otherwise a command run inside an
+// agent session (any ancestor is a live session's host) speaks as that
+// session, and one run from a plain terminal speaks as the owner. The
+// /murmur surface is the human typing, so it always speaks as the owner.
+type Speaker = 'session' | 'owner';
+
+function identityMessage(asHandle: string | null, speaker: Speaker): Omit<RegisterMessage, 'v' | 'id'> {
+  if (asHandle !== null) {
+    return { type: 'register', handle: asHandle, clientKind: 'cli' };
+  }
+  if (speaker === 'owner') {
+    return { type: 'register', owner: true, display: OWNER_DISPLAY, clientKind: 'cli' };
+  }
+  return { type: 'register', clientKind: 'cli', ancestors: currentHost()?.ancestors ?? [] };
+}
+
+interface ParsedFlags {
+  values: Map<string, string>;
+  positionals: string[];
+}
+
+// Splits --flag value pairs from positionals. Null (after printing why)
+// when a flag is missing its value.
+function parseFlags(args: string[], flags: string[], usage: string, name: string, err: Sink): ParsedFlags | null {
+  const values = new Map<string, string>();
   const positionals: string[] = [];
   for (let i = 0; i < args.length; i += 1) {
-    const arg = args[i];
-    if (arg === undefined) {
-      break;
-    }
-    if (arg === '--as' || arg === '--mode' || arg === '--refs' || arg === '--thread') {
+    const arg = args[i] as string;
+    if (flags.includes(arg)) {
       const value = args[i + 1];
       if (value === undefined) {
-        err('murmur send: flag ' + arg + ' needs a value\n' + SEND_USAGE + '\n');
-        return 1;
+        err('murmur ' + name + ': flag ' + arg + ' needs a value\n' + usage + '\n');
+        return null;
       }
+      values.set(arg, value);
       i += 1;
-      if (arg === '--as') {
-        asHandle = value;
-      } else if (arg === '--mode') {
-        // The broker validates the mode value against the wire enum.
-        mode = value as DeliveryMode;
-      } else if (arg === '--refs') {
-        refs = value
-          .split(',')
-          .map((part) => part.trim())
-          .filter((part) => part.length > 0);
-      } else {
-        const parsed = Number(value);
-        if (!Number.isInteger(parsed) || parsed < 0) {
-          err('murmur send: --thread needs a non-negative integer, got: ' + value + '\n');
-          flagsOk = false;
-        } else {
-          threadId = parsed;
-        }
-      }
       continue;
     }
     positionals.push(arg);
   }
-  if (!flagsOk) {
+  return { values, positionals };
+}
+
+function splitRefs(value: string | undefined): string[] | undefined {
+  return value
+    ?.split(',')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+}
+
+function validAs(value: string | undefined, err: Sink): string | null | false {
+  if (value === undefined) {
+    return null;
+  }
+  if (!HANDLE_RE.test(value)) {
+    // Rejected locally with the same message the broker would produce,
+    // before any connection is made.
+    err('invalid handle: ' + value + '\n');
+    return false;
+  }
+  return value;
+}
+
+async function cmdSend(args: string[], out: Sink, err: Sink, speaker: Speaker): Promise<number> {
+  const parsed = parseFlags(args, ['--as', '--mode', '--refs', '--thread'], SEND_USAGE, 'send', err);
+  if (parsed === null) {
     return 1;
   }
-  if (asHandle !== null && !HANDLE_RE.test(asHandle)) {
-    // Rejected locally with the same message the broker's register
-    // validation would produce, before any connection is made.
-    err('invalid handle: ' + asHandle + '\n');
+  let threadId: number | null = null;
+  const threadValue = parsed.values.get('--thread');
+  if (threadValue !== undefined) {
+    const value = Number(threadValue);
+    if (!Number.isInteger(value) || value < 0) {
+      err('murmur send: --thread needs a non-negative integer, got: ' + threadValue + '\n');
+      return 1;
+    }
+    threadId = value;
+  }
+  const asHandle = validAs(parsed.values.get('--as'), err);
+  if (asHandle === false) {
     return 1;
   }
-  const targetsArg = positionals[0];
+  const targetsArg = parsed.positionals[0];
   if (targetsArg === undefined) {
     err('murmur send: missing targets\n' + SEND_USAGE + '\n');
     return 1;
   }
-  const body = positionals.slice(1).join(' ');
+  const body = parsed.positionals.slice(1).join(' ');
   if (body.length === 0) {
     err('murmur send: missing body\n' + SEND_USAGE + '\n');
     return 1;
   }
+  return sendAs(identityMessage(asHandle, speaker), targetsArg, body, threadId, parsed.values, out);
+}
+
+async function sendAs(
+  identity: Omit<RegisterMessage, 'v' | 'id'>,
+  targetsArg: string,
+  body: string,
+  threadId: number | null,
+  flags: Map<string, string>,
+  out: Sink,
+): Promise<number> {
   const to = targetsArg
     .split(',')
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
   const client = await connectCli();
   try {
-    // Default identity is the owner. With --as the session registers under
-    // its own handle with no display name, so its replies never speak as the
-    // owner.
-    const reg: Omit<RegisterMessage, 'v' | 'id'> =
-      asHandle === null
-        ? { type: 'register', handle: OWNER_HANDLE, display: OWNER_DISPLAY, clientKind: 'cli' }
-        : { type: 'register', handle: asHandle, clientKind: 'cli' };
-    await client.request<RegisterResult>(reg);
+    await client.request<RegisterResult>(identity);
     const msg: Omit<SendMessage, 'v' | 'id'> = { type: 'send', threadId, to, body };
+    const mode = flags.get('--mode');
     if (mode !== undefined) {
-      msg.mode = mode;
+      // The broker validates the mode value against the wire enum.
+      msg.mode = mode as DeliveryMode;
     }
+    const refs = splitRefs(flags.get('--refs'));
     if (refs !== undefined) {
       msg.references = refs;
     }
@@ -312,12 +373,76 @@ async function cmdSend(args: string[], out: Sink, err: Sink): Promise<number> {
   }
 }
 
-// Auth-only connection for commands that never need a bound handle. Only
-// send registers, because registration refreshes the peer row.
+async function cmdReply(args: string[], out: Sink, err: Sink): Promise<number> {
+  const parsed = parseFlags(args, ['--as', '--verdict', '--refs'], REPLY_USAGE, 'reply', err);
+  if (parsed === null) {
+    return 1;
+  }
+  const asHandle = validAs(parsed.values.get('--as'), err);
+  if (asHandle === false) {
+    return 1;
+  }
+  const idArg = parsed.positionals[0];
+  const messageId = Number(idArg);
+  const body = parsed.positionals.slice(1).join(' ');
+  if (idArg === undefined || !Number.isInteger(messageId) || messageId < 0 || body.length === 0) {
+    err('murmur reply: need a message id and a body\n' + REPLY_USAGE + '\n');
+    return 1;
+  }
+  const client = await connectCli();
+  try {
+    await client.request<RegisterResult>(identityMessage(asHandle, 'session'));
+    const msg: Omit<ReplyMessage, 'v' | 'id'> = { type: 'reply', messageId, body };
+    const verdict = parsed.values.get('--verdict');
+    if (verdict !== undefined) {
+      // The broker validates the verdict against the wire enum.
+      msg.verdict = verdict as ReplyMessage['verdict'] & string;
+    }
+    const refs = splitRefs(parsed.values.get('--refs'));
+    if (refs !== undefined) {
+      msg.references = refs;
+    }
+    const result = await client.request<ReplyResult>(msg);
+    out('message ' + String(result.messageId) + ' thread ' + String(result.threadId) + ' seq ' + String(result.seq) + '\n');
+    return 0;
+  } finally {
+    client.close();
+  }
+}
+
+// Renames the agent session this command runs in (its host process).
+async function cmdName(args: string[], out: Sink, err: Sink): Promise<number> {
+  const handle = args[0];
+  const host = currentHost(undefined, false);
+  if (handle === undefined || !HANDLE_RE.test(handle)) {
+    err('murmur name: need a valid handle (a-z, 0-9, -)\n' + NAME_USAGE + '\n');
+    return 1;
+  }
+  if (host === null) {
+    err('murmur name: cannot find the agent session this runs in\n');
+    return 1;
+  }
+  const client = await connectCli();
+  try {
+    const msg: Omit<RegisterMessage, 'v' | 'id'> = {
+      type: 'register',
+      clientKind: 'cli',
+      handle,
+      host: { hostPid: host.hostPid, hostStart: host.hostStart },
+    };
+    const result = await client.request<RegisterResult>(msg);
+    out(result.handle + '\n');
+    return 0;
+  } finally {
+    client.close();
+  }
+}
+
+// Auth-only connection; each command registers the identity it needs.
 async function connectCli(): Promise<MurmurClient> {
   const paths = getPaths();
   const token = readToken(paths);
-  return MurmurClient.connect({ socketPath: paths.socketPath, token });
+  return connectBroker({ socketPath: paths.socketPath, token });
 }
 
 // One formatted line per peer, exactly as the status view prints them. The
@@ -327,7 +452,7 @@ async function statusLines(): Promise<string[]> {
   try {
     const result = await client.request<StatusResult>({ type: 'status' });
     return result.peers.map((peer) => {
-      let line = peer.handle + ' ' + peer.presence + ' unread ' + String(peer.unread);
+      let line = peer.handle + ' ' + peer.presence + (peer.client === null ? '' : ' ' + peer.client) + ' unread ' + String(peer.unread);
       if (peer.display !== null) {
         line += ' ' + peer.display;
       }
@@ -391,7 +516,7 @@ async function cmdThread(args: string[], out: Sink, err: Sink): Promise<number> 
     const msg: Omit<ThreadMessage, 'v' | 'id'> = { type: 'thread', threadId, sinceSeq, full };
     const result = await client.request<ThreadResult>(msg);
     for (const message of result.messages) {
-      const text = full ? message.body : message.firstLine;
+      const text = full ? (message.body as string) : message.firstLine;
       out(String(message.seq) + ' ' + message.sender + ' ' + text + '\n');
     }
     return 0;
@@ -458,20 +583,38 @@ async function cmdGroups(args: string[], out: Sink, err: Sink): Promise<number> 
   return 0;
 }
 
-// The backing of the /murmur command. Bare, it is the discovery surface: the
-// usage line, then the peers exactly as status prints them, then the groups
-// exactly as the groups list prints them. 'status' and 'groups' delegate to
-// those views; anything else is a plain send with the same parsing.
+// The backing of the /murmur command, always speaking as the owner. The
+// whole argument text arrives either on stdin (--stdin: the command file
+// feeds it through a quoted heredoc so no shell ever parses the message)
+// or as one shell-escaped word (gemini): the first word is the targets,
+// the rest is the body, verbatim. Bare, it is the discovery surface:
+// usage, then peers as status prints them, then groups as the groups list
+// prints them.
 async function cmdSlash(args: string[], out: Sink, err: Sink): Promise<number> {
-  const sub = args[0];
+  let words = args;
+  const oneWord = args.length === 1 && /\s/.test(args[0] as string);
+  if (args[0] === '--stdin' || oneWord) {
+    let text = (oneWord ? (args[0] as string) : await readAllStdin()).trim();
+    // Claude Code rewrites a "!" that starts a word in $ARGUMENTS to "\!"
+    // (its guard against injected shell blocks); undo exactly that.
+    if (args[1] === '--claude-escaped') {
+      text = text.replace(/(^|\s)\\!/g, '$1!');
+    }
+    const match = /^(\S+)\s+([\s\S]+)$/.exec(text);
+    if (match !== null) {
+      return sendAs(identityMessage(null, 'owner'), match[1] as string, match[2] as string, null, new Map(), out);
+    }
+    words = text.length === 0 ? [] : [text];
+  }
+  const sub = words[0];
   if (sub === 'status') {
     return cmdStatus(out);
   }
   if (sub === 'groups') {
-    return cmdGroups(args.slice(1), out, err);
+    return cmdGroups(words.slice(1), out, err);
   }
   if (sub !== undefined) {
-    return cmdSend(args, out, err);
+    return cmdSend(words, out, err, 'owner');
   }
   const peers = await statusLines();
   const groups = await groupsLines('list');
@@ -487,19 +630,14 @@ async function cmdSlash(args: string[], out: Sink, err: Sink): Promise<number> {
   return 0;
 }
 
-function isInstallClient(value: string): value is 'claude' | 'zcode' | 'hummin' {
-  return value === 'claude' || value === 'zcode' || value === 'hummin';
-}
-
 async function cmdInstall(args: string[], out: Sink, err: Sink): Promise<number> {
   const name = args[0];
-  if (name === undefined || !isInstallClient(name)) {
-    err('usage: murmur install <claude|zcode|hummin>\n');
+  if (name === undefined || !INSTALL_CLIENTS.includes(name as InstallClient)) {
+    err('usage: murmur install <' + INSTALL_CLIENTS.join('|') + '>\n');
     return 1;
   }
-  const files = await installClient(name);
-  for (const file of files) {
-    out(file + '\n');
+  for (const line of await installClient(name as InstallClient)) {
+    out(line + '\n');
   }
   return 0;
 }

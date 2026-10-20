@@ -7,32 +7,29 @@ export interface NativeSendResult {
   error: string | null;
 }
 
-// Framing for the Claude native messaging socket. The two builders below
-// are the ONLY framing code in this file: nativeSend writes exactly the
-// lines they return and frames nothing itself, so a spike outcome can be
-// applied by editing these functions alone. The shapes are a documented
-// guess from the official docs (newline-delimited JSON). Spike outcome:
-// the peer never emitted a single byte in any probe (no banner, no ack,
-// no error, against a wrong token, the real token, newline-delimited,
-// NUL-delimited, and delimiter-free writes), so the reply framing is
-// unobservable and the evidence does NOT justify changing the schema.
-// Documented default stands.
+// Framing for the Claude native messaging socket, as Claude Code itself
+// documents it in its log line "Inject messages": an auth line, then
+// {"type":"user","message":{"role":"user","content":...}}, newline-delimited
+// JSON. Any other type is dropped by the session ("Received unhandled
+// message type"). Verified live 2026-10-20 against 2.1.304: an idle session
+// took the message as a peer turn and answered it. The session never
+// writes back, so success here only means the write was accepted; proof
+// of delivery comes from the receiver's transcript (proof.ts).
 export function buildAuthLine(token: string): string {
   return encodeLine({ type: 'auth', token });
 }
 
 export function buildMessageLine(text: string): string {
-  return encodeLine({ type: 'message', message: text });
+  return encodeLine({ type: 'user', message: { role: 'user', content: text } });
 }
 
 const DEFAULT_TIMEOUT_MS = 5000;
 
 // Sends one message to a live Claude session over its native messaging
 // socket (the /tmp/cc-socks/<pid>.sock socket the session exposes).
-// Connects, writes the auth line then the message line, then waits for a
-// reply line, a close, or the timeout. Resolves ok true when the peer
-// accepted the send: a reply line arrived that is not an error object, or
-// the socket closed cleanly. Resolves ok false with the error text on
+// Connects, writes the auth line and the message line, half-closes, then
+// waits for the close or the timeout. Resolves ok true on a clean close or a
+// reply line that is not an error object; ok false with the error text on
 // connect failure, write failure, an error-object reply, or timeout.
 // Never throws.
 export async function nativeSend(
@@ -73,8 +70,9 @@ export async function nativeSend(
 
     socket.once('connect', () => {
       try {
-        socket.write(buildAuthLine(token));
-        socket.write(buildMessageLine(text));
+        // end() flushes both lines and half-closes, which is the session's
+        // cue to process the buffer and hang up.
+        socket.end(buildAuthLine(token) + buildMessageLine(text));
       } catch (err) {
         finish({ ok: false, error: 'write to ' + socketPath + ' failed: ' + (err as Error).message });
       }

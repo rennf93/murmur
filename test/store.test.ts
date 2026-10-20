@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -52,7 +52,10 @@ function appendMessage(threadId: number, opts: AppendOpts = {}): { id: number; s
 // get(), exercising the defensive fallbacks against an impossible-by-SQLite
 // state. The real statement handles everything else.
 function withMissingGetRow(matches: (sql: string) => boolean, run: () => void): void {
-  const anyStore = store as unknown as { db: Database.Database };
+  const anyStore = store as unknown as { db: Database.Database; statements: Map<string, unknown> };
+  // Statements are cached per SQL text: start from an empty cache so the
+  // patched prepare is reached, and drop what it produced afterwards.
+  anyStore.statements.clear();
   const realPrepare = anyStore.db.prepare.bind(anyStore.db);
   const patched = ((sql: string) => {
     const stmt = realPrepare(sql);
@@ -68,6 +71,7 @@ function withMissingGetRow(matches: (sql: string) => boolean, run: () => void): 
     run();
   } finally {
     anyStore.db.prepare = realPrepare;
+    anyStore.statements.clear();
   }
 }
 
@@ -80,7 +84,7 @@ describe('Store', () => {
           name: string;
         }>
       ).map((r) => r.name);
-      for (const table of ['deliveries', 'group_members', 'groups', 'messages', 'native_transports', 'peers', 'threads']) {
+      for (const table of ['deliveries', 'group_members', 'groups', 'messages', 'native_transports', 'peers', 'sessions', 'threads']) {
         expect(tables).toContain(table);
       }
       expect(raw.pragma('journal_mode', { simple: true })).toBe('wal');
@@ -103,7 +107,7 @@ describe('Store', () => {
       hookState: null,
     });
     store.upsertPeer('alpha', null, null, true, 20);
-    expect(store.getPeer('alpha')).toMatchObject({ display: null, role: null, isOwner: true, lastSeenAt: 20 });
+    expect(store.getPeer('alpha')).toMatchObject({ display: 'Alpha', role: 'dev', isOwner: true, lastSeenAt: 20 });
     store.upsertPeer('alpha', 'Again', 'boss', false, 30);
     expect(store.getPeer('alpha')).toMatchObject({ display: 'Again', role: 'boss', isOwner: true, lastSeenAt: 30 });
     store.upsertPeer('beta', null, null, false, 40);
@@ -316,7 +320,7 @@ describe('Store', () => {
     store.markReplied(m4.id, 'r', 9, 5);
     expect(store.pendingPushFor('r', 10).map((e) => e.message.id)).toEqual([m2.id, m1.id]);
     store.updateDelivery(m1.id, 'r', { state: 'sent' });
-    expect(store.pendingPushFor('r', 10).map((e) => e.message.id)).toEqual([m2.id, m1.id]);
+    expect(store.pendingPushFor('r', 10).map((e) => e.message.id)).toEqual([m2.id]);
     expect(store.pendingPushFor('nobody', 10)).toEqual([]);
   });
 
@@ -394,5 +398,147 @@ describe('Store', () => {
       expect(appendMessage(tid, {}).seq).toBe(0);
     });
     expect(store.threadMessages(tid, null).map((m) => m.seq)).toEqual([0]);
+  });
+
+  it('restricts the database and its wal and shm files to the owner', () => {
+    store.upsertPeer('a', null, null, false, 1);
+    for (const file of [dbPath, dbPath + '-wal', dbPath + '-shm']) {
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it('cascades a rename through every table that references the handle', () => {
+    store.upsertPeer('old', null, null, false, 1);
+    store.upsertPeer('other', null, null, false, 1);
+    const sid = store.insertSession({
+      client: 'claude', cliSessionId: 'c1', handle: 'old', hostPid: 5, hostStart: 'S', transcriptPath: null, cwd: null, now: 1,
+    });
+    store.createGroup('dev', 1);
+    store.addMember('dev', 'old', 1);
+    const tid = store.createThread('old', 1);
+    const m = appendMessage(tid, { sender: 'old' });
+    const m2 = appendMessage(tid, { sender: 'other' });
+    store.addDeliveries(m2.id, ['old'], 1);
+    store.upsertNativeTransport('old', '/n.sock', 't', 1);
+    store.renamePeer('old', 'fresh');
+    expect(store.sessionById(sid)?.handle).toBe('fresh');
+    expect(store.listGroups()[0]?.members).toEqual(['fresh']);
+    expect(store.messageById(m.id)?.sender).toBe('fresh');
+    expect(store.getDeliveries(m2.id)[0]?.recipient).toBe('fresh');
+    expect(store.getNativeTransport('fresh')?.token).toBe('t');
+    const raw = new Database(dbPath, { readonly: true });
+    try {
+      expect(raw.prepare('SELECT created_by FROM threads WHERE id = ?').get(tid)).toEqual({ created_by: 'fresh' });
+    } finally {
+      raw.close();
+    }
+  });
+
+  it('inserts, finds, lists and patches sessions', () => {
+    const a = store.insertSession({
+      client: 'claude', cliSessionId: 'c1', handle: 'h', hostPid: 10, hostStart: 'T', transcriptPath: '/t', cwd: '/w', now: 5,
+    });
+    const b = store.insertSession({
+      client: 'codex', cliSessionId: null, handle: 'h', hostPid: 10, hostStart: 'T', transcriptPath: null, cwd: null, now: 9,
+    });
+    expect(store.sessionById(a)).toEqual({
+      id: a, client: 'claude', cliSessionId: 'c1', handle: 'h', hostPid: 10, hostStart: 'T',
+      transcriptPath: '/t', cwd: '/w', state: null, stateAt: null, startedAt: 5, updatedAt: 5,
+    });
+    expect(store.sessionById(999)).toBeNull();
+    expect(store.sessionByCliId('claude', 'c1')?.id).toBe(a);
+    expect(store.sessionByCliId('codex', 'c1')).toBeNull();
+    expect(store.sessionByHost(10, 'T')?.id).toBe(b);
+    expect(store.sessionByHost(10, 'other')).toBeNull();
+    expect(store.sessionsForHandle('h').map((r) => r.id)).toEqual([b, a]);
+    expect(store.sessionsForHandle('nobody')).toEqual([]);
+    expect(store.listSessions().map((r) => r.id)).toEqual([b, a]);
+    store.updateSession(a, {});
+    expect(store.sessionById(a)?.client).toBe('claude');
+    store.updateSession(a, {
+      client: 'gemini', cliSessionId: 'c2', hostPid: 11, hostStart: 'U', transcriptPath: null, cwd: null,
+      state: 'busy', stateAt: 20, updatedAt: 30,
+    });
+    expect(store.sessionById(a)).toEqual({
+      id: a, client: 'gemini', cliSessionId: 'c2', handle: 'h', hostPid: 11, hostStart: 'U',
+      transcriptPath: null, cwd: null, state: 'busy', stateAt: 20, startedAt: 5, updatedAt: 30,
+    });
+  });
+
+  it('reassigns a session, moving the native transport to the target handle', () => {
+    const id = store.insertSession({
+      client: 'claude', cliSessionId: null, handle: 'from', hostPid: 1, hostStart: 'T', transcriptPath: null, cwd: null, now: 1,
+    });
+    store.upsertNativeTransport('from', '/f.sock', 'tf', 1);
+    store.upsertNativeTransport('to', '/t.sock', 'tt', 1);
+    store.reassignSession(id, 'from', 'to');
+    expect(store.sessionById(id)?.handle).toBe('to');
+    expect(store.getNativeTransport('from')).toBeNull();
+    expect(store.getNativeTransport('to')).toEqual({ owner: 'to', socketPath: '/f.sock', token: 'tf' });
+  });
+
+  it('reports history and deletes a peer with its native transport', () => {
+    store.upsertPeer('p', null, null, false, 1);
+    expect(store.peerHasHistory('p')).toBe(false);
+    store.createGroup('g', 1);
+    store.addMember('g', 'p', 1);
+    expect(store.peerHasHistory('p')).toBe(true);
+    store.removeMember('g', 'p');
+    const tid = store.createThread('x', 1);
+    appendMessage(tid, { sender: 'p' });
+    expect(store.peerHasHistory('p')).toBe(true);
+    const other = appendMessage(tid, { sender: 'x' });
+    store.addDeliveries(other.id, ['q'], 1);
+    expect(store.peerHasHistory('q')).toBe(true);
+    store.upsertNativeTransport('p', '/s', 't', 1);
+    store.deletePeer('p');
+    expect(store.getPeer('p')).toBeNull();
+    expect(store.getNativeTransport('p')).toBeNull();
+  });
+  // Each hot read or write must reach its rows through an index. The SQL is
+  // taken from the statement cache after one call, so the plan checked is the
+  // plan that runs.
+  it('plans every hot statement without a full table scan', () => {
+    const anyStore = store as unknown as { statements: Map<string, unknown> };
+    const plansOf = (call: () => void): string[] => {
+      anyStore.statements.clear();
+      call();
+      const raw = new Database(dbPath);
+      try {
+        return [...anyStore.statements.keys()].flatMap((sql) => {
+          const marks = Array.from({ length: (sql.match(/\?/g) ?? []).length }, () => 1);
+          const rows = raw.prepare('EXPLAIN QUERY PLAN ' + sql).all(...marks) as Array<{ detail: string }>;
+          return rows.map((r) => r.detail);
+        });
+      } finally {
+        raw.close();
+      }
+    };
+    store.upsertPeer('a', null, null, false, 1);
+    const tid = store.createThread('a', 1);
+    const { id } = appendMessage(tid, { sender: 'a' });
+    store.addDeliveries(id, ['b'], 1);
+    store.insertSession({ client: 'claude', cliSessionId: 'x', handle: 'b', hostPid: 1, hostStart: 'S', transcriptPath: null, cwd: null, now: 1 });
+    const calls: Array<[string, () => void]> = [
+      ['pendingPushFor', () => store.pendingPushFor('b', 10)],
+      ['deliveryStatesForRecipient', () => store.deliveryStatesForRecipient('b', ['queued', 'sent'])],
+      ['getDeliveries', () => store.getDeliveries(id)],
+      ['inboxFor', () => store.inboxFor('b', true)],
+      ['replyLatencies', () => store.replyLatencies('b')],
+      ['threadRecipientHandles', () => store.threadRecipientHandles(tid)],
+      ['threadMessages', () => store.threadMessages(tid, 0)],
+      ['latestAsk', () => store.latestAsk(tid)],
+      ['messageCount', () => store.messageCount(tid)],
+      ['messageById', () => store.messageById(id)],
+      ['appendMessage', () => appendMessage(tid)],
+      ['sessionByHost', () => store.sessionByHost(1, 'S')],
+      ['sessionByCliId', () => store.sessionByCliId('claude', 'x')],
+      ['sessionsForHandle', () => store.sessionsForHandle('b')],
+      ['markDelivered', () => store.markDelivered(id, 'b', 2)],
+    ];
+    for (const [name, call] of calls) {
+      const scans = plansOf(call).filter((detail) => /^SCAN\b/.test(detail));
+      expect(scans, name).toEqual([]);
+    }
   });
 });
