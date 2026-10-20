@@ -245,6 +245,15 @@ describe('checkLimits', () => {
     expectCoreError(() => core.checkLimits('s', 'x', ['free-peer', 'hoarder'], null), 'cap_inbox', 'hoarder');
     expect(() => core.checkLimits('s2', 'x', ['free-peer'], null)).not.toThrowError();
   });
+
+  it('counts only deliveries that have not reached the session toward the inbox cap', () => {
+    // A reply handed over in a wait, or read, stays delivered until an ack.
+    unreadDeliveries('asker', UNREAD_CAP);
+    for (const row of store.inboxFor('asker', true).messages) {
+      store.markDelivered(row.id, 'asker', 5_000);
+    }
+    expect(() => core.checkLimits('s', 'x', ['asker'], null)).not.toThrowError();
+  });
 });
 
 describe('send', () => {

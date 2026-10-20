@@ -77,6 +77,10 @@ export { HANDLE_RE };
 const GROUP_NAME_RE = /^@?[a-z0-9][a-z0-9-]{1,31}$/;
 const VERDICTS: readonly string[] = ['agree', 'disagree', 'info'];
 const UNREAD_STATES: string[] = ['queued', 'sent', 'delivered'];
+// The inbox cap guards the backlog not yet proven in the session: a
+// delivered message is in the session, and counting it would let replies that
+// are never acked fill the cap and block every later reply to the asker.
+const BACKLOG_STATES: string[] = ['queued', 'sent'];
 const OFFLINE_AFTER_MS = 5 * 60 * 1000;
 
 // A session title as a handle: lowercase, runs of anything else become one
@@ -308,9 +312,9 @@ export class MurmurCore {
       throw new MurmurError('cap_thread', 'thread ' + String(threadId) + ' already holds ' + String(THREAD_CAP) + ' messages');
     }
     for (const recipient of recipients) {
-      const unread = this.store.deliveryStatesForRecipient(recipient, UNREAD_STATES);
-      if (unread >= UNREAD_CAP) {
-        throw new MurmurError('cap_inbox', 'recipient ' + recipient + ' already has ' + String(unread) + ' unread deliveries');
+      const backlog = this.store.deliveryStatesForRecipient(recipient, BACKLOG_STATES);
+      if (backlog >= UNREAD_CAP) {
+        throw new MurmurError('cap_inbox', 'recipient ' + recipient + ' already has ' + String(backlog) + ' deliveries waiting (queued or sent)');
       }
     }
     recent.push(ts);
