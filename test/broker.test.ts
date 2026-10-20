@@ -22,6 +22,7 @@ import {
   deliveryTag,
   encodeLine,
   renderDelivery,
+  replyFooter,
 } from '../src/protocol.js';
 import type {
   AckResult,
@@ -509,10 +510,7 @@ describe('send and push', () => {
     expect(push.payload.message.id).toBe(result.messageId);
     expect(push.payload.message.body).toBe('first line\nsecond line');
     expect(push.payload.message.references).toEqual(['carol']);
-    expect(push.payload.footer).toBe(
-      '(reply: murmur_reply messageId ' + String(result.messageId) + ', or from a shell: murmur reply ' +
-        String(result.messageId) + ' <text>; whole thread: murmur_thread ' + String(result.threadId) + ')',
-    );
+    expect(push.payload.footer).toBe(replyFooter({ id: result.messageId, threadId: result.threadId }));
     expect(push.payload.text).toBe(
       renderDelivery(push.payload.message, 'first line\nsecond line', ['bob']),
     );
@@ -879,6 +877,12 @@ describe('thread and collect over the wire', () => {
     });
     expect(since.messages).toHaveLength(1);
     expect(since.messages[0]?.firstLine).toBe('m1');
+    await expect(
+      req(alice.client, { type: 'thread', threadId: first.threadId, sinceSeq: null, full: true, messageId: 'x' }),
+    ).rejects.toMatchObject({ code: 'bad_request' });
+    await expect(
+      req(alice.client, { type: 'thread', threadId: first.threadId, sinceSeq: null, full: true, messageId: 98765 }),
+    ).rejects.toMatchObject({ code: 'bad_request' });
     await expect(req(alice.client, { type: 'thread', threadId: 777, sinceSeq: null, full: true })).rejects.toMatchObject({
       code: 'unknown_thread',
     });
@@ -930,6 +934,7 @@ describe('wait', () => {
     });
     expect(result).toMatchObject({ threadId: ask.threadId, conditionMet: true, timedOut: false });
     expect(result.matrix[0]).toMatchObject({ recipient: 'bob', state: 'replied' });
+    expect(result.replies.map((r) => [r.sender, r.body])).toEqual([['bob', 'done']]);
   });
 
   it('releases any_replied when a reply arrives from another connection', async () => {
@@ -986,6 +991,143 @@ describe('wait', () => {
     const result = await pending;
     expect(result).toMatchObject({ threadId: ask.threadId, conditionMet: true, timedOut: false });
     expect(result.matrix.map((r) => r.recipient).sort()).toEqual(['bob', 'carol']);
+  });
+
+  it('holds replies for an active wait, returns them in the result and marks them delivered (all_replied)', async () => {
+    const stack = await buildStack();
+    const alice = await connectAdapter(stack, 'alice', 5090);
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    const carol = await connectPeer(stack, { handle: 'carol' });
+    const ask = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob', 'carol'], body: 'both' });
+    const pending = req<WaitResult>(alice.client, { type: 'wait', threadId: ask.threadId, until: 'all_replied', timeoutMs: 20000 });
+    await yieldTurn();
+    await yieldTurn();
+    const first = await req<ReplyResult>(bob.client, { type: 'reply', messageId: ask.messageId, body: 'one', verdict: 'agree' });
+    const second = await req<ReplyResult>(carol.client, { type: 'reply', messageId: ask.messageId, body: 'y'.repeat(MAX_BODY_CHARS + 5) });
+    const result = await pending;
+    expect(result.conditionMet).toBe(true);
+    expect(result.replies.map((r) => [r.id, r.sender, r.verdict, r.seq])).toEqual([
+      [first.messageId, 'bob', 'agree', 1],
+      [second.messageId, 'carol', null, 2],
+    ]);
+    expect(result.replies[0]?.body).toBe('one');
+    expect(result.replies[1]?.body).toContain('[truncated');
+    expect(pushesOf(alice).filter((p) => p.payload.message.isReply)).toHaveLength(0);
+    for (const id of [first.messageId, second.messageId]) {
+      expect(stack.store.getDeliveries(id).map((d) => [d.recipient, d.state])).toEqual([['alice', 'delivered']]);
+    }
+  });
+
+  it('hands over only replies to the latest ask, not other queued messages in the thread', async () => {
+    const stack = await buildStack();
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    const first = await req<SendResult>(bob.client, { type: 'send', threadId: null, to: ['alice'], body: 'bob asks' });
+    await req<ReplyResult>(alice.client, { type: 'reply', messageId: first.messageId, body: 'to bob' });
+    const ask = await req<SendResult>(alice.client, { type: 'send', threadId: first.threadId, to: ['bob'], body: 'alice asks' });
+    const pending = req<WaitResult>(alice.client, { type: 'wait', threadId: ask.threadId, until: 'any_replied', timeoutMs: 20000 });
+    await yieldTurn();
+    await yieldTurn();
+    const answer = await req<ReplyResult>(bob.client, { type: 'reply', messageId: ask.messageId, body: 'to alice' });
+    const result = await pending;
+    expect(result.replies.map((r) => r.id)).toEqual([answer.messageId]);
+    expect(stack.store.getDeliveries(first.messageId).map((d) => d.state)).not.toContain('delivered');
+  });
+
+  it('returns a held reply when the wait times out', async () => {
+    const stack = await buildStack();
+    const alice = await connectAdapter(stack, 'alice', 5091);
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    await connectPeer(stack, { handle: 'carol' });
+    const ask = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob', 'carol'], body: 'both' });
+    const pending = req<WaitResult>(alice.client, { type: 'wait', threadId: ask.threadId, until: 'all_replied', timeoutMs: 150 });
+    await yieldTurn();
+    await yieldTurn();
+    const first = await req<ReplyResult>(bob.client, { type: 'reply', messageId: ask.messageId, body: 'only me' });
+    const result = await pending;
+    expect(result).toMatchObject({ conditionMet: false, timedOut: true });
+    expect(result.replies.map((r) => [r.id, r.sender, r.body])).toEqual([[first.messageId, 'bob', 'only me']]);
+    expect(pushesOf(alice).filter((p) => p.payload.message.isReply)).toHaveLength(0);
+    expect(stack.store.getDeliveries(first.messageId).map((d) => d.state)).toEqual(['delivered']);
+  });
+
+  it('pushes a reply that arrives after the wait resolved', async () => {
+    const stack = await buildStack();
+    const alice = await connectAdapter(stack, 'alice', 5092);
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    const carol = await connectPeer(stack, { handle: 'carol' });
+    const ask = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob', 'carol'], body: 'both' });
+    const pending = req<WaitResult>(alice.client, { type: 'wait', threadId: ask.threadId, until: 'any_replied', timeoutMs: 20000 });
+    await yieldTurn();
+    await yieldTurn();
+    await req<ReplyResult>(bob.client, { type: 'reply', messageId: ask.messageId, body: 'first' });
+    expect((await pending).replies).toHaveLength(1);
+    const late = await req<ReplyResult>(carol.client, { type: 'reply', messageId: ask.messageId, body: 'late' });
+    expect(pushesOf(alice).some((p) => p.payload.message.id === late.messageId)).toBe(true);
+    expect(stack.store.getDeliveries(late.messageId).map((d) => d.state)).toEqual(['sent']);
+  });
+
+  it('keeps a held reply out of the queued push when its recipient reconnects mid-wait', async () => {
+    const stack = await buildStack();
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    await connectPeer(stack, { handle: 'carol' });
+    const ask = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob', 'carol'], body: 'q' });
+    const pending = req<WaitResult>(alice.client, { type: 'wait', threadId: ask.threadId, until: 'all_replied', timeoutMs: 400 });
+    await yieldTurn();
+    await yieldTurn();
+    const first = await req<ReplyResult>(bob.client, { type: 'reply', messageId: ask.messageId, body: 'held' });
+    const again = await connectAdapter(stack, 'alice', 5094);
+    expect(pushesOf(again).filter((p) => p.payload.message.isReply)).toHaveLength(0);
+    expect((await pending).replies.map((r) => r.id)).toEqual([first.messageId]);
+  });
+
+  it('pushes a reply to an older ask during a wait instead of holding it', async () => {
+    const stack = await buildStack();
+    const alice = await connectAdapter(stack, 'alice', 5095);
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    await connectPeer(stack, { handle: 'carol' });
+    const m1 = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob', 'carol'], body: 'q1' });
+    await req<SendResult>(alice.client, { type: 'send', threadId: m1.threadId, to: ['carol'], body: 'q2' });
+    const pending = req<WaitResult>(alice.client, { type: 'wait', threadId: m1.threadId, until: 'all_replied', timeoutMs: 150 });
+    await yieldTurn();
+    await yieldTurn();
+    const late = await req<ReplyResult>(bob.client, { type: 'reply', messageId: m1.messageId, body: 'late' });
+    expect((await pending).replies).toEqual([]);
+    expect(pushesOf(alice).some((p) => p.payload.message.id === late.messageId)).toBe(true);
+    expect(stack.store.getDeliveries(late.messageId).map((d) => d.state)).toEqual(['sent']);
+  });
+
+  it('pushes a reply to a reply during a wait instead of holding it', async () => {
+    const stack = await buildStack();
+    const alice = await connectAdapter(stack, 'alice', 5096);
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    await connectPeer(stack, { handle: 'carol' });
+    const ask = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob', 'carol'], body: 'q' });
+    const first = await req<ReplyResult>(bob.client, { type: 'reply', messageId: ask.messageId, body: 'a' });
+    const pending = req<WaitResult>(alice.client, { type: 'wait', threadId: ask.threadId, until: 'all_replied', timeoutMs: 150 });
+    await yieldTurn();
+    await yieldTurn();
+    const nested = await req<ReplyResult>(bob.client, { type: 'reply', messageId: first.messageId, body: 'b' });
+    await pending;
+    expect(pushesOf(alice).some((p) => p.payload.message.id === nested.messageId)).toBe(true);
+    expect(stack.store.getDeliveries(nested.messageId).map((d) => d.state)).toEqual(['sent']);
+  });
+
+  it('pushes a held reply when its waiting connection closes before the wait resolves', async () => {
+    const stack = await buildStack();
+    const waiter = await connectPeer(stack, { handle: 'alice' });
+    const adapter = await connectAdapter(stack, 'alice', 5097);
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    await connectPeer(stack, { handle: 'carol' });
+    const ask = await req<SendResult>(waiter.client, { type: 'send', threadId: null, to: ['bob', 'carol'], body: 'q' });
+    void req<WaitResult>(waiter.client, { type: 'wait', threadId: ask.threadId, until: 'all_replied', timeoutMs: 20000 }).catch(() => {});
+    await yieldTurn();
+    await yieldTurn();
+    const held = await req<ReplyResult>(bob.client, { type: 'reply', messageId: ask.messageId, body: 'held' });
+    expect(pushesOf(adapter).some((p) => p.payload.message.id === held.messageId)).toBe(false);
+    waiter.client.close();
+    await settle(() => pushesOf(adapter).some((p) => p.payload.message.id === held.messageId), 'held reply push');
   });
 
   it('times out all_replied when nobody replied', async () => {
@@ -1239,10 +1381,10 @@ describe('notifications', () => {
     expect(inbox.unreadTotal).toBe(1);
   });
 
-  it('notifies other thread recipients when a reply arrives', async () => {
+  it('notifies the asker when a reply arrives, and no other thread recipient', async () => {
     fakeWaitWindow();
     const stack = await buildStack();
-    const alice = await connectPeer(stack, { handle: 'alice' });
+    const alice = await connectAdapter(stack, 'alice', 4002);
     const bob = await connectPeer(stack, { handle: 'bob' });
     const carol = await connectAdapter(stack, 'carol', 4003);
     const ask = await req<SendResult>(alice.client, {
@@ -1253,14 +1395,14 @@ describe('notifications', () => {
       mode: 'notify',
     });
     await req<ReplyResult>(bob.client, { type: 'reply', messageId: ask.messageId, body: 'me', verdict: 'agree' });
-    await advanceUntil(() => notificationsOf(carol).length > 0, 'reply_arrived for carol');
-    const payloads: NotificationPayload[] = notificationsOf(carol).flatMap((ev) => ev.payload);
-    // One notice for the notify-mode ask, one for bob's reply; no push event.
-    expect(payloads.map((p) => p.detail)).toEqual([
+    await advanceUntil(() => notificationsOf(alice).length > 0, 'reply_arrived for alice');
+    const payloads: NotificationPayload[] = notificationsOf(alice).flatMap((ev) => ev.payload);
+    expect(payloads.map((p) => p.detail)).toEqual(['reply from bob in thread ' + String(ask.threadId)]);
+    expect(payloads[0]).toMatchObject({ kind: 'reply_arrived', threadId: ask.threadId, fromHandle: 'bob' });
+    // carol got the notify-mode ask note only, not a note for a reply that is not for her.
+    expect(notificationsOf(carol).flatMap((ev) => ev.payload).map((p) => p.detail)).toEqual([
       'new message from alice in thread ' + String(ask.threadId),
-      'reply from bob in thread ' + String(ask.threadId),
     ]);
-    expect(payloads[1]).toMatchObject({ kind: 'reply_arrived', threadId: ask.threadId, fromHandle: 'bob' });
     expect(pushesOf(carol)).toHaveLength(0);
     // bob, as the replier, gets nothing for his own reply.
     expect(notificationsOf(bob)).toHaveLength(0);
@@ -2582,7 +2724,7 @@ describe('push routing', () => {
     expect(stack.store.getDeliveries(sent.messageId)[0]?.state).toBe('delivered');
   });
 
-  it('pushes replies to the other participants as events', async () => {
+  it('pushes a reply only to the asker as an event', async () => {
     const stack = await buildStack();
     const alice = await connectAdapter(stack, 'alice', 5080);
     const bob = await connectAdapter(stack, 'bob', 5081);
@@ -2598,13 +2740,13 @@ describe('push routing', () => {
     const carolReply = pushesOf(carol).find((p) => p.payload.message.id === reply.messageId);
     const aliceReply = pushesOf(alice).find((p) => p.payload.message.id === reply.messageId);
     const recipients = stack.store.getDeliveries(reply.messageId).map((d) => d.recipient);
-    expect(recipients.sort()).toEqual(['alice', 'carol']);
-    expect(carolReply?.payload.text).toMatch(new RegExp(' re m' + String(ask.messageId) + ' AGREE to (alice, carol|carol, alice)\\]'));
-    expect(carolReply?.payload.text).toContain('refs: spec.md');
-    expect(aliceReply).toBeDefined();
+    expect(recipients).toEqual(['alice']);
+    expect(carolReply).toBeUndefined();
+    expect(aliceReply?.payload.text).toMatch(new RegExp(' re m' + String(ask.messageId) + ' AGREE to alice\\]'));
+    expect(aliceReply?.payload.text).toContain('refs: spec.md');
     expect(pushesOf(bob).some((p) => p.payload.message.id === reply.messageId)).toBe(false);
     const rows = stack.store.getDeliveries(reply.messageId);
-    expect(rows.map((d) => [d.recipient, d.state]).sort()).toEqual([['alice', 'sent'], ['carol', 'sent']]);
+    expect(rows.map((d) => [d.recipient, d.state])).toEqual([['alice', 'sent']]);
   });
 
   it('notify-mode replies leave a note, not a push', async () => {
@@ -2647,7 +2789,7 @@ describe('fetch-push texts', () => {
     expect(text.startsWith(deliveryTag(sent.messageId) + 't' + String(sent.threadId) + ' s0 from alice to bob, carol]\n')).toBe(true);
     expect(text).toContain('[truncated: full body stored, read it with murmur_thread full: true]');
     expect(text).toContain('\nrefs: x, y\n');
-    expect(text.endsWith('murmur_thread ' + String(sent.threadId) + ')')).toBe(true);
+    expect(text.endsWith('murmur_thread ' + String(sent.threadId) + ' messageId ' + String(sent.messageId) + ')')).toBe(true);
   });
 
   it('tolerates a delivery that vanishes between listing and snapshot', async () => {

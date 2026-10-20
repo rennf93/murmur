@@ -63,7 +63,8 @@ export async function rig(name) {
     },
     tmux(session, cwd, command, extraEnv = {}) {
       panes.push(session);
-      const vars = { MURMUR_HOME: home, PATH: env.PATH, ...extraEnv };
+      // MURMUR_AUTOSTART=0: a SessionEnd hook that outlives cleanup must not respawn the broker.
+      const vars = { MURMUR_HOME: home, PATH: env.PATH, MURMUR_AUTOSTART: '0', ...extraEnv };
       const flags = Object.entries(vars).flatMap(([k, v]) => ['-e', k + '=' + v]);
       sh('tmux', ['new-session', '-d', '-s', session, '-x', '200', '-y', '50', '-c', cwd, ...flags, command]);
     },
@@ -93,6 +94,7 @@ export async function rig(name) {
       }
       broker.kill('SIGTERM');
       db.close();
+      rmSync(root, { recursive: true, force: true });
       log('cleaned up ' + root);
     },
   };

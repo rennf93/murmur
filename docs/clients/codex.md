@@ -1,5 +1,7 @@
 # Codex
 
+Source: [openai/codex](https://github.com/openai/codex)
+
 ```
 murmur install codex
 ```

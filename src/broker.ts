@@ -49,6 +49,7 @@ import type {
   StatusResult,
   ThreadResult,
   Verdict,
+  WaitReply,
   WaitUntil,
 } from './protocol.js';
 
@@ -397,12 +398,17 @@ export class Broker {
 
   private onSocketClose(conn: ConnState): void {
     this.conns.delete(conn);
+    const unresolved = conn.waiters.size > 0;
     for (const waiter of [...conn.waiters]) {
       clearTimeout(waiter.timer);
       this.removeWaiter(waiter);
     }
     if (conn.handle !== null && this.presence.get(conn.handle) === conn) {
       this.presence.delete(conn.handle);
+    }
+    // Replies held for the closed wait have no result to ride on: push them now.
+    if (unresolved && conn.handle !== null && !this.stopped) {
+      void this.pushQueued(conn.handle).catch(() => {});
     }
     // Stamp nothing on close; only register refreshes last_seen_at. Only a
     // long-lived connection going away means the peer went away.
@@ -805,7 +811,8 @@ export class Broker {
   private handleThread(rec: Record<string, unknown>): ThreadResult {
     const threadId = reqNumber(rec, 'threadId');
     const sinceSeq = reqNumberOrNull(rec, 'sinceSeq');
-    return this.core.threadView(threadId, sinceSeq, reqBool(rec, 'full'));
+    const messageId = rec.messageId === undefined ? undefined : reqNumber(rec, 'messageId');
+    return this.core.threadView(threadId, sinceSeq, reqBool(rec, 'full'), messageId);
   }
 
   private handleCollect(rec: Record<string, unknown>): CollectResult {
@@ -876,7 +883,7 @@ export class Broker {
       if (this.stopped) {
         return;
       }
-      if (target.kind === 'queued') {
+      if (target.kind === 'queued' || this.heldForWait(target.message, target.recipient)) {
         continue;
       }
       await this.pushOne(target.message.id, target.message.threadId, target.recipient, target.text, {
@@ -886,6 +893,16 @@ export class Broker {
         text: target.text,
       });
     }
+  }
+
+  // A reply answering the thread's latest ask, whose recipient has a
+  // murmur_wait open on that thread, stays queued; the wait result carries it
+  // (takeReplies applies the same rule). Any other reply is pushed as normal.
+  private heldForWait(message: { isReply: boolean; threadId: number; inReplyTo: number | null }, recipient: string): boolean {
+    if (!message.isReply || message.inReplyTo === null || this.store.latestAsk(message.threadId)?.id !== message.inReplyTo) {
+      return false;
+    }
+    return [...(this.waiters.get(message.threadId) ?? [])].some((w) => w.conn.handle === recipient);
   }
 
   private async pushOne(
@@ -930,6 +947,9 @@ export class Broker {
   private async pushQueued(handle: string): Promise<void> {
     const waiting = this.store.pendingPushFor(handle, 50).reverse();
     for (const { message } of waiting) {
+      if (this.heldForWait(message, handle)) {
+        continue;
+      }
       const recipients = this.store.getDeliveries(message.id).map((d) => d.recipient);
       const full = fullOf(message);
       const text = renderDelivery(full, message.deliveredBody, recipients);
@@ -1072,6 +1092,7 @@ export class Broker {
         conditionMet: true,
         timedOut: false,
         matrix: this.matrixFor(threadId),
+        replies: this.takeReplies(threadId, conn.handle),
       });
       return;
     }
@@ -1107,6 +1128,21 @@ export class Broker {
       return deliveries.some((d) => d.state === 'replied');
     }
     return deliveries.every((d) => d.state === 'replied');
+  }
+
+  // The replies still queued for this handle in the thread, handed over in the
+  // wait result and marked delivered (the wait result is the receiving-side proof).
+  private takeReplies(threadId: number, handle: string | null): WaitReply[] {
+    const replies: WaitReply[] = [];
+    const ask = this.store.latestAsk(threadId);
+    for (const row of this.store.threadMessages(threadId, null)) {
+      const delivery = this.store.getDeliveries(row.id).find((d) => d.recipient === handle);
+      if (ask !== null && row.inReplyTo === ask.id && delivery?.state === 'queued') {
+        this.markDeliveredHop(row.id, delivery.recipient);
+        replies.push({ id: row.id, seq: row.seq, sender: row.sender, verdict: row.verdict as Verdict | null, body: row.deliveredBody });
+      }
+    }
+    return replies;
   }
 
   // The collect matrix for a WaitResult. A thread without messages or without
@@ -1145,6 +1181,7 @@ export class Broker {
         conditionMet: true,
         timedOut: false,
         matrix: this.matrixFor(threadId),
+        replies: this.takeReplies(threadId, waiter.conn.handle),
       });
     }
   }
@@ -1160,6 +1197,7 @@ export class Broker {
         conditionMet: false,
         timedOut: true,
         matrix: this.matrixFor(waiter.threadId),
+        replies: this.takeReplies(waiter.threadId, waiter.conn.handle),
       });
     } catch {
       // Never let a timer callback crash the process.

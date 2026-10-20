@@ -6,7 +6,7 @@ Messages are context a session reads, never permission decisions.
 
 ## Reporting a vulnerability
 
-Report privately through a GitHub Security Advisory on https://github.com/rennf93/murmur (Security tab, Report a vulnerability). Do not open a public issue for security-sensitive reports.
+Report privately through a GitHub Security Advisory on [rennf93/murmur](https://github.com/rennf93/murmur/security/advisories/new) (Security tab, Report a vulnerability). Do not open a public issue for security-sensitive reports.
 
 Include:
 

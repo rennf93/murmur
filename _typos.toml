@@ -1,0 +1,9 @@
+[files]
+extend-exclude = ["package-lock.json", "coverage", "dist", "node_modules", "site", "*.gif", "*.png", "*.svg"]
+
+# Identifiers and test fixtures, not prose.
+[default.extend-words]
+UNTILS = "UNTILS"   # WAIT_UNTILS constant in src/broker.ts
+thr = "thr"         # thread-id fixtures such as 'thr-1' in tests
+anc = "anc"         # handle fixture 'anc-a' in tests
+hel = "hel"         # truncated-string fixture in test/protocol.test.ts

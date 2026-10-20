@@ -250,7 +250,7 @@ export class MurmurCore {
       const stripped = stripGroupPrefix(entry);
       const group = this.store.listGroups().find((g) => g.name === stripped);
       if (!entry.startsWith('@') && (group === undefined || this.store.getPeer(entry) !== null)) {
-        add(entry);
+        add(this.store.getPeer(entry) === null ? this.handleForName(entry) : entry);
         continue;
       }
       if (group === undefined) {
@@ -264,6 +264,22 @@ export class MurmurCore {
       throw new MurmurError('bad_request', 'no recipients resolved');
     }
     return out;
+  }
+
+  // A bare name that is no handle: a session's display name (case-insensitive)
+  // or a name whose slug is a handle. Several matches are ambiguous. No match
+  // keeps the plain unknown handle error.
+  private handleForName(name: string): string {
+    const lower = name.toLowerCase();
+    const slug = slugify(name);
+    const found = this.store
+      .listPeers()
+      .filter((p) => p.handle === slug || p.display?.toLowerCase() === lower)
+      .map((p) => p.handle);
+    if (found.length > 1) {
+      throw new MurmurError('bad_request', 'ambiguous name ' + name + ', use one of: ' + found.join(', '));
+    }
+    return found[0] ?? name;
   }
 
   // Rate, duplicate and cap checks for one intended send. A send that passes
@@ -376,9 +392,9 @@ export class MurmurCore {
     return this.store.getNativeTransport(recipient) !== null ? 'native' : 'connection';
   }
 
-  // A reply reaches everyone in the thread (every sender, every recipient and
-  // every session an owner message was typed in, minus the replier) in the parent's delivery mode, so peers see
-  // each other's answers without anyone relaying them.
+  // A reply is stored once in the thread; only the ones waiting for it are
+  // delivered it (in the parent's delivery mode). Everyone else in the thread
+  // reads it with the thread view.
   reply(
     sender: string,
     arg: { messageId: number; body: string; verdict?: Verdict; references?: string[]; via?: string | null },
@@ -390,15 +406,16 @@ export class MurmurCore {
     if (parent === null) {
       throw new MurmurError('unknown_message', 'unknown message: ' + String(arg.messageId));
     }
-    const participants = new Set<string>(this.store.threadRecipientHandles(parent.threadId));
-    for (const row of this.store.threadMessages(parent.threadId, null)) {
-      participants.add(row.sender);
-      if (row.via !== null) {
-        participants.add(row.via);
-      }
-    }
-    participants.delete(sender);
-    const recipients = [...participants].filter((handle) => this.store.getPeer(handle) !== null);
+    // Only the ones waiting for this reply get a row: the author of the message
+    // it answers plus the session that message was typed in. A reply inside
+    // its own thread (the replier wrote the parent) goes to the parent's recipients.
+    const waiting = new Set<string>(
+      parent.sender === sender
+        ? this.store.getDeliveries(parent.id).map((d) => d.recipient)
+        : [parent.sender, ...(parent.via === null ? [] : [parent.via])],
+    );
+    waiting.delete(sender);
+    const recipients = [...waiting].filter((handle) => this.store.getPeer(handle) !== null);
     this.checkLimits(sender, arg.body, recipients, parent.threadId);
     const mode = parent.mode as DeliveryMode;
     const ts = this.nowMs();
@@ -523,13 +540,20 @@ export class MurmurCore {
     return { handle, unreadTotal, threads };
   }
 
-  threadView(threadId: number, sinceSeq: number | null, full = true): ThreadResult {
+  threadView(threadId: number, sinceSeq: number | null, full = true, messageId?: number): ThreadResult {
     const all = this.store.threadMessages(threadId, null);
     if (all.length === 0) {
       throw new MurmurError('unknown_thread', 'unknown thread: ' + String(threadId));
     }
     const last = all[all.length - 1];
     const latestSeq = last === undefined ? 0 : last.seq;
+    if (messageId !== undefined) {
+      if (!all.some((row) => row.id === messageId)) {
+        throw new MurmurError('bad_request', 'message ' + String(messageId) + ' is not in thread ' + String(threadId));
+      }
+      const asked = all.filter((row) => row.id === messageId || row.inReplyTo === messageId);
+      return { threadId, latestSeq, messages: asked.map((row) => ({ ...summaryOf(row), body: row.deliveredBody })) };
+    }
     const rows = sinceSeq === null ? all : this.store.threadMessages(threadId, sinceSeq);
     return { threadId, latestSeq, messages: rows.map(full ? fullOf : summaryOf) };
   }

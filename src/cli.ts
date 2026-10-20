@@ -45,7 +45,7 @@ const SEND_USAGE =
   'usage: murmur send <targets> <body...> [--as <handle>] [--mode <mode>] [--refs <a,b>] [--thread <id>]';
 const REPLY_USAGE = 'usage: murmur reply <message id> <body...> [--as <handle>] [--verdict agree|disagree|info] [--refs <a,b>]';
 const NAME_USAGE = 'usage: murmur name <handle>   (renames the agent session this runs in)';
-const THREAD_USAGE = 'usage: murmur thread <id> [--since <n>] [--full]';
+const THREAD_USAGE = 'usage: murmur thread <id> [--since <n>] [--full] [--message <id>]';
 const GROUPS_USAGE =
   'usage: murmur groups [list] | groups create <name> | groups add <name> <members...> | groups remove <name> <members...> | groups delete <name>';
 const SLASH_USAGE =
@@ -133,7 +133,7 @@ function printUsage(err: Sink): void {
     '  slash [args...]          the /murmur backing, sent as the owner via your session; bare prints peers and groups',
     '  prune                    remove peers with no session, message, group or connection',
     '  status                   list peers with presence and unread counts',
-    '  thread <id> [--since <n>] [--full]',
+    '  thread <id> [--since <n>] [--full] [--message <id>]',
     '  groups [list] | groups create <name> | groups add <name> <members...>',
     '         | groups remove <name> <members...> | groups delete <name>',
     '  install <' + INSTALL_CLIENTS.join('|') + '>',
@@ -502,6 +502,7 @@ async function cmdPrune(out: Sink): Promise<number> {
 async function cmdThread(args: string[], out: Sink, err: Sink): Promise<number> {
   let full = false;
   let sinceSeq: number | null = null;
+  let messageId: number | undefined;
   const positionals: string[] = [];
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
@@ -510,6 +511,16 @@ async function cmdThread(args: string[], out: Sink, err: Sink): Promise<number> 
     }
     if (arg === '--full') {
       full = true;
+      continue;
+    }
+    if (arg === '--message') {
+      const parsed = Number(args[i + 1]);
+      if (args[i + 1] === undefined || !Number.isInteger(parsed) || parsed < 0) {
+        err('murmur thread: --message needs a non-negative integer\n' + THREAD_USAGE + '\n');
+        return 1;
+      }
+      i += 1;
+      messageId = parsed;
       continue;
     }
     if (arg === '--since') {
@@ -541,10 +552,10 @@ async function cmdThread(args: string[], out: Sink, err: Sink): Promise<number> 
   }
   const client = await connectCli();
   try {
-    const msg: Omit<ThreadMessage, 'v' | 'id'> = { type: 'thread', threadId, sinceSeq, full };
+    const msg: Omit<ThreadMessage, 'v' | 'id'> = { type: 'thread', threadId, sinceSeq, full, ...(messageId !== undefined ? { messageId } : {}) };
     const result = await client.request<ThreadResult>(msg);
     for (const message of result.messages) {
-      const text = full ? (message.body as string) : message.firstLine;
+      const text = full || messageId !== undefined ? (message.body as string) : message.firstLine;
       out(String(message.seq) + ' ' + message.sender + ' ' + text + '\n');
     }
     return 0;

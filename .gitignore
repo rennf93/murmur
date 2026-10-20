@@ -7,3 +7,4 @@ coverage/
 .env
 serve.log
 site/
+.DS_Store

@@ -921,30 +921,48 @@ describe('resolveRecipients bare names and groups', () => {
   });
 });
 
-describe('reply fan-out', () => {
-  it('reaches every other participant with a rendered text and links the parent', () => {
+describe('resolveRecipients display names', () => {
+  it('resolves a display name or a slug, keeps handles first, and rejects ambiguity', () => {
+    register('peer-a', 'other');
+    core.register({ handle: 'zed', display: 'Live Peer' });
+    core.register({ handle: 'zed2', display: 'live peer' });
+    expect(core.resolveRecipients(['Peer A'])).toEqual(['peer-a']);
+    expect(core.resolveRecipients(['other', 'Peer A'])).toEqual(['other', 'peer-a']);
+    expectCoreError(() => core.resolveRecipients(['LIVE PEER']), 'bad_request', 'ambiguous name LIVE PEER, use one of: zed, zed2');
+    core.register({ handle: 'solo', display: 'Only One' });
+    expect(core.resolveRecipients(['only one'])).toEqual(['solo']);
+    expectCoreError(() => core.resolveRecipients(['Nobody']), 'unknown_handle', 'Nobody');
+  });
+});
+
+describe('reply routing', () => {
+  it('reaches only the asker with a rendered text and links the parent', () => {
     register('alpha', 'beta', 'gamma');
     const ask = core.send('alpha', { threadId: null, to: ['beta', 'gamma'], body: 'decide' });
     const { result, pushes } = core.reply('beta', { messageId: ask.result.messageId, body: 'yes', verdict: 'agree', references: ['r1'] });
-    expect(pushes.map((p) => [p.recipient, p.kind]).sort()).toEqual([
-      ['alpha', 'connection'],
-      ['gamma', 'connection'],
-    ]);
+    expect(pushes.map((p) => [p.recipient, p.kind])).toEqual([['alpha', 'connection']]);
     expect(pushes[0]?.text).toContain(
-      'm' + String(result.messageId) + ' t' + String(result.threadId) + ' s1 from beta re m' + String(ask.result.messageId) + ' AGREE to gamma, alpha]',
+      'm' + String(result.messageId) + ' t' + String(result.threadId) + ' s1 from beta re m' + String(ask.result.messageId) + ' AGREE to alpha]',
     );
     expect(pushes[0]?.text).toContain('refs: r1');
     expect(core.deliveriesOf(result.messageId).map((d) => [d.recipient, d.state])).toEqual([
       ['alpha', 'queued'],
-      ['gamma', 'queued'],
     ]);
     expect(core.deliveriesOf(ask.result.messageId).find((d) => d.recipient === 'beta')?.state).toBe('replied');
   });
 
-  it('includes later participants and drops handles that are no longer peers', () => {
+  it('gives non-waiting participants no row and no push, and the thread still shows the reply', () => {
     register('alpha', 'beta', 'gamma');
     const ask = core.send('alpha', { threadId: null, to: ['beta', 'gamma'], body: 'q' });
-    core.reply('gamma', { messageId: ask.result.messageId, body: 'one' });
+    const { result, pushes } = core.reply('beta', { messageId: ask.result.messageId, body: 'mine' });
+    expect(pushes.map((p) => p.recipient)).toEqual(['alpha']);
+    expect(core.deliveriesOf(result.messageId).map((d) => d.recipient)).toEqual(['alpha']);
+    expect(core.threadView(result.threadId, null).messages.map((m) => m.sender)).toEqual(['alpha', 'beta']);
+  });
+
+  it('sends a reply in its own thread to the parent recipients and drops handles that are no longer peers', () => {
+    register('alpha', 'beta', 'gamma');
+    const ask = core.send('alpha', { threadId: null, to: ['beta', 'gamma'], body: 'q' });
     store.deletePeer('beta');
     const { pushes } = core.reply('alpha', { messageId: ask.result.messageId, body: 'two' });
     expect(pushes.map((p) => p.recipient)).toEqual(['gamma']);
@@ -971,6 +989,21 @@ describe('reply fan-out', () => {
     expectCoreError(() => core.reply('beta', { messageId: ask.result.messageId, body: 'same' }), 'duplicate');
     unreadDeliveries('alpha', UNREAD_CAP);
     expectCoreError(() => core.reply('beta', { messageId: ask.result.messageId, body: 'other' }), 'cap_inbox', 'alpha');
+  });
+});
+
+describe('threadView with a messageId', () => {
+  it('returns only that message and the replies to it, and rejects a message outside the thread', () => {
+    register('alpha', 'beta');
+    const one = core.send('alpha', { threadId: null, to: ['beta'], body: 'one' });
+    const two = core.send('alpha', { threadId: one.result.threadId, to: ['beta'], body: 'two' });
+    core.reply('beta', { messageId: one.result.messageId, body: 'y'.repeat(MAX_BODY_CHARS + 5) });
+    core.reply('beta', { messageId: two.result.messageId, body: 'about two' });
+    const view = core.threadView(one.result.threadId, null, false, one.result.messageId);
+    expect(view.messages.map((m) => m.seq)).toEqual([0, 2]);
+    expect(view.messages[1]?.body).toContain('[truncated');
+    const other = core.send('alpha', { threadId: null, to: ['beta'], body: 'elsewhere' });
+    expectCoreError(() => core.threadView(one.result.threadId, null, true, other.result.messageId), 'bad_request');
   });
 });
 
@@ -1229,7 +1262,7 @@ describe('status from sessions', () => {
 });
 
 describe('via', () => {
-  it('stores via on a send and a reply, and reply fan-out reaches the via session', () => {
+  it('stores via on a send and a reply, and a reply reaches the via session', () => {
     register('boss', 'alpha', 'beta');
     store.upsertPeer('boss', null, null, true, 1);
     const ask = core.send('boss', { threadId: null, to: ['beta'], body: 'q', via: 'alpha' });
@@ -1241,7 +1274,7 @@ describe('via', () => {
     expect(store.messageById(result.messageId)?.via).toBeNull();
     // The replier is never a recipient of its own reply, even as the via.
     const own = core.reply('alpha', { messageId: ask.result.messageId, body: 'mine', via: 'alpha' });
-    expect(own.pushes.map((p) => p.recipient).sort()).toEqual(['beta', 'boss']);
+    expect(own.pushes.map((p) => p.recipient)).toEqual(['boss']);
     expect(store.messageById(own.result.messageId)?.via).toBe('alpha');
   });
 });

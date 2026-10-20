@@ -488,6 +488,26 @@ describe('thread', () => {
     ]);
   });
 
+  it('reads one question and its replies with --message', async () => {
+    const cap = capture();
+    expect(await runCli(['send', 'alice', 'q-one', 'body'], cap.io)).toBe(0);
+    const [, messageId, threadId] = /message (\d+) thread (\d+) seq/.exec(cap.out.join('')) ?? [];
+    const other = capture();
+    expect(await runCli(['send', '--thread', String(threadId), 'alice', 'q-two', 'body'], other.io)).toBe(0);
+    const one = capture();
+    expect(await runCli(['thread', String(threadId), '--message', String(messageId)], one.io)).toBe(0);
+    expect(one.out.join('')).toBe('0 renn q-one body\n');
+    const foreign = capture();
+    expect(await runCli(['thread', String(threadId), '--message', '987654'], foreign.io)).toBe(1);
+    expect(foreign.err.join('')).toBe('message 987654 is not in thread ' + String(threadId) + '\n');
+    const noValue = capture();
+    expect(await runCli(['thread', String(threadId), '--message'], noValue.io)).toBe(1);
+    expect(noValue.err.join('')).toContain('--message needs a non-negative integer');
+    const bad = capture();
+    expect(await runCli(['thread', String(threadId), '--message', 'z'], bad.io)).toBe(1);
+    expect(bad.err.join('')).toContain('--message needs a non-negative integer');
+  });
+
   it('validates its arguments', async () => {
     const missing = capture();
     expect(await runCli(['thread'], missing.io)).toBe(1);
@@ -876,7 +896,7 @@ describe('install', () => {
     const claudeJson = JSON.parse(readFileSync(join(osState.home, '.claude.json'), 'utf8')) as {
       mcpServers: Record<string, unknown>;
     };
-    expect(claudeJson.mcpServers.murmur).toEqual({ command: 'murmur', args: ['mcp'] });
+    expect(claudeJson.mcpServers.murmur).toEqual({ command: 'murmur', args: ['mcp'], alwaysLoad: true });
   });
 
   it.each([...INSTALL_CLIENTS])('accepts %s and prints what it wrote', async (client) => {

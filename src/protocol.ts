@@ -180,11 +180,22 @@ export interface DeliveredResult {
   delivered: number[];
 }
 
+// A reply held back from push while its recipient waited, handed over in the
+// wait result instead. body is the delivered body (with the truncation pointer).
+export interface WaitReply {
+  id: number;
+  seq: number;
+  sender: string;
+  verdict: Verdict | null;
+  body: string;
+}
+
 export interface WaitResult {
   threadId: number;
   conditionMet: boolean;
   timedOut: boolean;
   matrix: RecipientMatrix[];
+  replies: WaitReply[];
 }
 
 export interface PushPayload {
@@ -319,6 +330,8 @@ export interface ThreadMessage {
   threadId: number;
   sinceSeq: number | null;
   full: boolean;
+  // Only this message and the replies to it, full delivered bodies.
+  messageId?: number;
 }
 
 export interface CollectMessage {
@@ -506,8 +519,8 @@ export function deliveryTag(messageId: number): string {
 
 export function replyFooter(m: { id: number; threadId: number }): string {
   return (
-    '(reply: murmur_reply messageId ' + String(m.id) + ', or from a shell: murmur reply ' + String(m.id) +
-    ' <text>; whole thread: murmur_thread ' + String(m.threadId) + ')'
+    '(answer with murmur_reply messageId ' + String(m.id) + ', plain text never reaches the sender; from a shell: murmur reply ' +
+    String(m.id) + ' <text>; its replies: murmur_thread ' + String(m.threadId) + ' messageId ' + String(m.id) + ')'
   );
 }
 

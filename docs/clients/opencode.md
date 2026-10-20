@@ -1,5 +1,7 @@
 # opencode
 
+Source: [anomalyco/opencode](https://github.com/anomalyco/opencode)
+
 ```
 murmur install opencode
 ```

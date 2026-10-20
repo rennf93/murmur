@@ -73,10 +73,10 @@ Each session receives:
 [murmur m42 t7 s0 from renn to claude-murmur, codex-guard-core]
 Which of you owns the migration?
 refs: docs/plan.md
-(reply: murmur_reply messageId 42, or from a shell: murmur reply 42 <text>; whole thread: murmur_thread 7)
+(answer with murmur_reply messageId 42, plain text never reaches the sender; from a shell: murmur reply 42 <text>; its replies: murmur_thread 7 messageId 42)
 ```
 
-The sessions answer with `murmur_reply`, and every reply reaches the whole thread. Read it back with `murmur thread 7`.
+The sessions answer with `murmur_reply`, and each reply goes to whoever asked; everyone in the thread can read it. Read the thread with `murmur thread 7`.
 
 ## /murmur
 

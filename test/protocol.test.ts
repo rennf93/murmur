@@ -130,7 +130,7 @@ describe('v0.2 helpers', () => {
 
   it('replyFooter names the reply and thread commands', () => {
     expect(replyFooter({ id: 7, threadId: 3 })).toBe(
-      '(reply: murmur_reply messageId 7, or from a shell: murmur reply 7 <text>; whole thread: murmur_thread 3)',
+      '(answer with murmur_reply messageId 7, plain text never reaches the sender; from a shell: murmur reply 7 <text>; its replies: murmur_thread 3 messageId 7)',
     );
   });
 

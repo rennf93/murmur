@@ -233,6 +233,7 @@ describe('SDK conformance over InMemoryTransport', () => {
     expect(instructions).toContain('murmur_reply');
     expect(instructions).toContain('ONE murmur_send');
     expect(instructions).toContain('SendMessage');
+    expect(instructions).toContain('plain text never reaches the sender');
     expect(instructions.length).toBeLessThan(450);
     const listed = await sdk.listTools();
     expect(listed.tools.map((t) => t.name).sort()).toEqual([...TOOL_NAMES].sort());
@@ -240,6 +241,7 @@ describe('SDK conformance over InMemoryTransport', () => {
     for (const tool of listed.tools) {
       expect(tool.description?.length ?? 0).toBeGreaterThan(0);
       expect(tool.inputSchema.type).toBe('object');
+      expect(tool._meta).toEqual({ 'anthropic/alwaysLoad': true });
     }
     const send = listed.tools.find((t) => t.name === 'murmur_send');
     expect(send?.inputSchema.required).toEqual(expect.arrayContaining(['to', 'body']));
@@ -293,6 +295,23 @@ describe('SDK conformance over InMemoryTransport', () => {
     expect(waited).toMatchObject({ conditionMet: false, timedOut: true });
   });
 
+  it('murmur_send with wait sends and returns the wait result in one call, resolving a display name', async () => {
+    const stack = await buildStack();
+    const { sdk } = await pair(stack);
+    const peer = await connectRaw(stack, 'peerone');
+    await call<RegisterResult>(sdk, 'murmur_name', { handle: 'mcpagent' });
+    stack.store.upsertPeer('peerone', 'Peer One', null, false, Date.now());
+    const both = await call<{ sent: SendResult; wait: WaitResult }>(sdk, 'murmur_send', {
+      to: ['peer one'], body: 'quick?', wait: 'any_replied', timeoutMs: 0,
+    });
+    expect(both.sent.deliveries.map((d) => d.recipient)).toEqual(['peerone']);
+    expect(both.wait).toMatchObject({ threadId: both.sent.threadId, conditionMet: false, timedOut: true });
+    const dflt = call<{ sent: SendResult; wait: WaitResult }>(sdk, 'murmur_send', { to: ['peerone'], body: 'again?', wait: 'all_replied' });
+    await vi.waitFor(() => expect(stack.store.messageById(both.sent.messageId + 1)).not.toBeNull());
+    await req(peer.client, { type: 'reply', messageId: both.sent.messageId + 1, body: 'AGREE ok', verdict: 'agree' });
+    expect((await dflt).wait).toMatchObject({ conditionMet: true, timedOut: false });
+  });
+
   it('exercises reply, ack, thread digest vs full, groups, status and a default-timeout wait', async () => {
     const stack = await buildStack();
     const { sdk, murmur } = await pair(stack);
@@ -330,6 +349,12 @@ describe('SDK conformance over InMemoryTransport', () => {
     const since = await call<ThreadResult>(sdk, 'murmur_thread', { threadId: incoming.threadId, sinceSeq: 1, full: true });
     expect(since.messages.map((m) => m.seq)).toEqual([2]);
     expect(since.messages[0]?.body).toBe('AGREE: looks right');
+    const question = await call<ThreadResult>(sdk, 'murmur_thread', { threadId: incoming.threadId, messageId: incoming.messageId });
+    expect(question.messages.map((m) => [m.seq, m.body])).toEqual([
+      [0, 'question for the agent\nwith a second line'],
+      [1, 'INFO: and more'],
+      [2, 'AGREE: looks right'],
+    ]);
     // The ask is answered, so a wait without timeoutMs (and one past the cap)
     // returns at once with the latest verdict.
     for (const extra of [{}, { timeoutMs: 99999999 }]) {

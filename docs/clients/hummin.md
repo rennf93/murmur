@@ -1,5 +1,7 @@
 # Hummin
 
+Source: [rennf93/hummin](https://github.com/rennf93/hummin)
+
 ```
 murmur install hummin
 ```
