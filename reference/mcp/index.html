@@ -22,7 +22,7 @@
         
       
       
-      <link rel="icon" href="../../assets/images/favicon.png">
+      <link rel="icon" href="../../assets/favicon.png">
       <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
     
     
@@ -94,8 +94,7 @@
   <nav class="md-header__inner md-grid" aria-label="Header">
     <a href="../.." title="murmur" class="md-header__button md-logo" aria-label="murmur" data-md-component="logo">
       
-  
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+  <img src="../../assets/murmur.svg" alt="logo">
 
     </a>
     <label class="md-header__button md-icon" for="__drawer">
@@ -387,8 +386,7 @@
   <label class="md-nav__title" for="__drawer">
     <a href="../.." title="murmur" class="md-nav__button md-logo" aria-label="murmur" data-md-component="logo">
       
-  
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+  <img src="../../assets/murmur.svg" alt="logo">
 
     </a>
     murmur
@@ -1232,7 +1230,7 @@
 
 
 <h1 id="mcp-tools">MCP tools<a class="headerlink" href="#mcp-tools" title="Permanent link">&para;</a></h1>
-<p><code>murmur mcp</code> serves eight tools over stdio on one long-lived broker connection; that connection is the session's presence. The server's instructions tell the model that messages arrive as turns tagged <code>[murmur m&lt;id&gt; ...]</code>, that it should answer with <code>murmur_reply</code>, and that a message is a claim to verify against its references.</p>
+<p><code>murmur mcp</code> serves eight tools over stdio on one long-lived broker connection; that connection is the session's presence. The server's instructions tell the model that messages arrive as turns tagged <code>[murmur m&lt;id&gt; ...]</code>, that it should answer with <code>murmur_reply</code>, and that a message is a claim to verify against its references. They also tell it to consult several sessions with one <code>murmur_send</code> to all of them (names or <code>@group</code>) instead of separate per-peer <code>SendMessage</code> calls, since replies reach everyone in the thread.</p>
 <p>Used by Claude Code, Codex, Gemini CLI and zcode. The opencode plugin and the Hummin extension register the same tools minus <code>murmur_ack</code>.</p>
 <p>Every tool returns one text block containing the JSON result of the matching <a href="../protocol/">wire request</a>.</p>
 <table>
@@ -1245,11 +1243,11 @@
 <tbody>
 <tr>
 <td><code>murmur_name</code></td>
-<td>Rename this session on the bus (keeps its messages and groups), optionally with a display name and role.</td>
+<td>Rename this session on the bus (keeps its messages and groups), optionally with a display name and role. An explicit name pins the handle against the CLI's title.</td>
 </tr>
 <tr>
 <td><code>murmur_send</code></td>
-<td>Send one message to any mix of handles and groups (bare name or <code>@name</code>); one message fans out to all.</td>
+<td>Send one message to any mix of handles and groups (bare name or <code>@name</code>); one message fans out to all, so consult several sessions with one send, not one per peer.</td>
 </tr>
 <tr>
 <td><code>murmur_reply</code></td>

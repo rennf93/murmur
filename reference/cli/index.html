@@ -22,7 +22,7 @@
         
       
       
-      <link rel="icon" href="../../assets/images/favicon.png">
+      <link rel="icon" href="../../assets/favicon.png">
       <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
     
     
@@ -94,8 +94,7 @@
   <nav class="md-header__inner md-grid" aria-label="Header">
     <a href="../.." title="murmur" class="md-header__button md-logo" aria-label="murmur" data-md-component="logo">
       
-  
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+  <img src="../../assets/murmur.svg" alt="logo">
 
     </a>
     <label class="md-header__button md-icon" for="__drawer">
@@ -387,8 +386,7 @@
   <label class="md-nav__title" for="__drawer">
     <a href="../.." title="murmur" class="md-nav__button md-logo" aria-label="murmur" data-md-component="logo">
       
-  
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+  <img src="../../assets/murmur.svg" alt="logo">
 
     </a>
     murmur
@@ -895,6 +893,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#prune" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        prune
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#thread" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1278,6 +1287,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#prune" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        prune
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#thread" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1387,6 +1407,10 @@
 <td>The <code>/murmur</code> backing (args or stdin); bare prints usage, peers and groups.</td>
 </tr>
 <tr>
+<td><code>prune</code></td>
+<td>Remove peers nothing refers to; prints the removed handles, or <code>nothing to prune</code>.</td>
+</tr>
+<tr>
 <td><code>status</code></td>
 <td>List peers with presence and unread counts.</td>
 </tr>
@@ -1417,7 +1441,7 @@
 <tbody>
 <tr>
 <td><code>--as &lt;handle&gt;</code></td>
-<td>Speak as this handle (scripted agents). Must match <code>^[a-z0-9][a-z0-9-]{1,31}$</code>.</td>
+<td>Speak as this handle (scripted agents). Must match <code>^[a-z0-9][a-z0-9-]{1,47}$</code> (up to 48 characters).</td>
 </tr>
 <tr>
 <td><code>--mode push\|notify\|silent</code></td>
@@ -1440,20 +1464,24 @@
 <h2 id="name">name<a class="headerlink" href="#name" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>murmur name &lt;handle&gt;
 </code></pre></div>
-<p>Renames the agent session the command runs in; messages, deliveries and groups are kept.</p>
+<p>Renames the agent session the command runs in; messages, deliveries and groups are kept, and the session's live connections follow. An explicit name pins the handle, so a Claude session's title no longer renames it.</p>
+<h2 id="prune">prune<a class="headerlink" href="#prune" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>murmur prune
+</code></pre></div>
+<p>Deletes peers that are not the owner and have no session rows, no sent messages, no deliveries, no group membership and no live broker connection (v0.1 left <code>claude-&lt;8 hex&gt;</code> rows like these). Prints the removed handles one per line, or <code>nothing to prune</code>.</p>
 <h2 id="thread">thread<a class="headerlink" href="#thread" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>murmur thread &lt;id&gt; [--since &lt;n&gt;] [--full]
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>murmur thread &lt;id&gt; [--since &lt;n&gt;] [--full]
 </code></pre></div>
 <p><code>--since &lt;n&gt;</code> returns only messages with <code>seq</code> newer than n; <code>--full</code> includes bodies.</p>
 <h2 id="groups">groups<a class="headerlink" href="#groups" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>murmur groups [list]
-<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>murmur groups create &lt;name&gt;
-<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>murmur groups add &lt;name&gt; &lt;members...&gt;
-<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>murmur groups remove &lt;name&gt; &lt;members...&gt;
-<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>murmur groups delete &lt;name&gt;
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>murmur groups [list]
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>murmur groups create &lt;name&gt;
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>murmur groups add &lt;name&gt; &lt;members...&gt;
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>murmur groups remove &lt;name&gt; &lt;members...&gt;
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>murmur groups delete &lt;name&gt;
 </code></pre></div>
 <h2 id="slash">slash<a class="headerlink" href="#slash" title="Permanent link">&para;</a></h2>
-<p><code>murmur slash [args...]</code> takes the message as arguments, or on stdin with <code>--stdin</code> (the installed command files use a quoted heredoc). <code>--claude-escaped</code> turns Claude Code's <code>\!</code> back into <code>!</code>. Always speaks as the owner. Usage line: <code>/murmur &lt;group | handle[,more]&gt; &lt;message&gt;</code>.</p>
+<p><code>murmur slash [args...]</code> takes the message as arguments, or on stdin with <code>--stdin</code> (the installed command files use a quoted heredoc). <code>--claude-escaped</code> turns Claude Code's <code>\!</code> back into <code>!</code>. Always speaks as the owner, and records the agent session it was typed in (the nearest live session among the command's ancestors) as <code>via</code>; from a plain terminal <code>via</code> is empty. Usage line: <code>/murmur &lt;group | handle[,more]&gt; &lt;message&gt;   (sent as renn, via the session you type it in; run bare like this for peers and groups)</code>.</p>
 <h2 id="install">install<a class="headerlink" href="#install" title="Permanent link">&para;</a></h2>
 <p><code>murmur install &lt;claude|codex|gemini|zcode|opencode|hummin&gt;</code>. See <a href="../../getting-started/#install-into-a-cli">Getting started</a> for exactly what each writes.</p>
 

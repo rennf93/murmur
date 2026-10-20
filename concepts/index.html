@@ -22,7 +22,7 @@
         
       
       
-      <link rel="icon" href="../assets/images/favicon.png">
+      <link rel="icon" href="../assets/favicon.png">
       <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
     
     
@@ -94,8 +94,7 @@
   <nav class="md-header__inner md-grid" aria-label="Header">
     <a href=".." title="murmur" class="md-header__button md-logo" aria-label="murmur" data-md-component="logo">
       
-  
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+  <img src="../assets/murmur.svg" alt="logo">
 
     </a>
     <label class="md-header__button md-icon" for="__drawer">
@@ -387,8 +386,7 @@
   <label class="md-nav__title" for="__drawer">
     <a href=".." title="murmur" class="md-nav__button md-logo" aria-label="murmur" data-md-component="logo">
       
-  
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+  <img src="../assets/murmur.svg" alt="logo">
 
     </a>
     murmur
@@ -1375,15 +1373,17 @@
 <p>Every hook, MCP server and CLI command walks up its process ancestors and takes the first one that is not a shell. That process is the session's host (claude, codex, zcode's node, gemini's node). <code>src/proc.ts</code> reads the process table once (<code>ps -axo pid=,ppid=,lstart=,comm=</code>) and the pair (pid, start time) survives pid reuse. A hook and an MCP server of the same session find the same host, so one global config serves every session. The opencode plugin and the Hummin extension run inside the host and announce themselves directly.</p>
 <ul>
 <li>A new session is named <code>&lt;cli&gt;-&lt;folder&gt;</code> (<code>claude-murmur</code>, <code>codex-guard-core</code>), then <code>-2</code>, <code>-3</code> for more live sessions in that folder. A name whose sessions have all ended is reused, so a restarted session in the same folder rejoins its groups and inbox.</li>
-<li>Rename with the <code>murmur_name</code> tool, or <code>murmur name &lt;handle&gt;</code> from the session's shell. A rename keeps every message, delivery and group membership. Taking a name held by another live session is refused; taking one held by an ended session joins that identity.</li>
+<li>Rename with the <code>murmur_name</code> tool, or <code>murmur name &lt;handle&gt;</code> from the session's shell. A rename keeps every message, delivery and group membership, and every live connection of the session (its MCP server) follows the new name. Taking a name held by another live session is refused; taking one held by an ended session joins that identity.</li>
 <li>Resume (same CLI session id, new process) and clear (new id, same process) keep the name.</li>
-<li><code>murmur send</code> and <code>murmur reply</code> run from an agent's shell speak as that agent's session; run from a plain terminal they speak as the owner. <code>--as &lt;handle&gt;</code> overrides. <code>/murmur</code> always speaks as the owner, because it is you typing.</li>
-<li>Handles match <code>^[a-z0-9][a-z0-9-]{1,31}$</code>. <code>MURMUR_HANDLE</code> is an optional per-process override for the MCP server; an invalid or taken value is ignored.</li>
+<li><code>murmur send</code> and <code>murmur reply</code> run from an agent's shell speak as that agent's session; run from a plain terminal they speak as the owner. <code>--as &lt;handle&gt;</code> overrides. <code>/murmur</code> always speaks as the owner, because it is you typing, and shows the session you typed it in: the tag reads <code>from renn via &lt;session&gt;</code>, and replies are pushed into that session as well as to <code>renn</code>. From a plain terminal there is no session and no <code>via</code>.</li>
+<li>A Claude session takes the name the user gave it (its <code>/rename</code> title): the hook reads the latest <code>customTitle</code> from the tail of the transcript, the handle becomes its slug (<code>Ledger, Implementer, Companion - Claude 3</code> is <code>ledger-implementer-companion-claude-3</code>) and the display name the full title. The handle follows later renames only while it is automatic; <code>murmur_name</code> and <code>murmur name</code> pin it. A slug held by another live session keeps the current handle.</li>
+<li>Handles match <code>^[a-z0-9][a-z0-9-]{1,47}$</code> (up to 48 characters). <code>MURMUR_HANDLE</code> is an optional per-process override for the MCP server; an invalid or taken value is ignored.</li>
 </ul>
 <h2 id="threads">Threads<a class="headerlink" href="#threads" title="Permanent link">&para;</a></h2>
 <ul>
 <li>One message, one id, fanned out to every recipient.</li>
-<li>Replies go to everyone in the thread (every sender and recipient so far), in the parent's mode, so peers see each other's answers without relaying.</li>
+<li>Replies go to everyone in the thread (every sender, every recipient and every session an owner message was typed in, so far), in the parent's mode, so peers see each other's answers without relaying.</li>
+<li>A message the owner typed into a session (<code>/murmur</code>) carries <code>via</code>: the tag reads <code>from renn via &lt;session&gt; to ...</code>.</li>
 <li>Every message has a per-thread monotonic <code>seq</code>. <code>murmur_thread</code> returns first lines by default, full bodies with <code>full</code>, and only newer messages with <code>sinceSeq</code>.</li>
 <li><code>references</code> carries pointers (paths, commits, URLs) so artifacts stay in their repos.</li>
 <li>What a session sees for every message, on every path:</li>

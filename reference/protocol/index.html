@@ -22,7 +22,7 @@
         
       
       
-      <link rel="icon" href="../../assets/images/favicon.png">
+      <link rel="icon" href="../../assets/favicon.png">
       <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
     
     
@@ -94,8 +94,7 @@
   <nav class="md-header__inner md-grid" aria-label="Header">
     <a href="../.." title="murmur" class="md-header__button md-logo" aria-label="murmur" data-md-component="logo">
       
-  
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+  <img src="../../assets/murmur.svg" alt="logo">
 
     </a>
     <label class="md-header__button md-icon" for="__drawer">
@@ -387,8 +386,7 @@
   <label class="md-nav__title" for="__drawer">
     <a href="../.." title="murmur" class="md-nav__button md-logo" aria-label="murmur" data-md-component="logo">
       
-  
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+  <img src="../../assets/murmur.svg" alt="logo">
 
     </a>
     murmur
@@ -1325,7 +1323,7 @@
 </tr>
 <tr>
 <td><code>session</code></td>
-<td><code>event</code> (<code>session-start</code>|<code>prompt</code>|<code>stop</code>|<code>session-end</code>), <code>client</code>, <code>cliSessionId</code>, <code>host</code>, <code>transcriptPath?</code>, <code>cwd?</code>, <code>handle?</code>, <code>native?</code> ({<code>socketPath</code>,<code>token</code>}), <code>listen?</code></td>
+<td><code>event</code> (<code>session-start</code>|<code>prompt</code>|<code>stop</code>|<code>session-end</code>), <code>client</code>, <code>cliSessionId</code>, <code>host</code>, <code>transcriptPath?</code>, <code>title?</code>, <code>cwd?</code>, <code>handle?</code>, <code>native?</code> ({<code>socketPath</code>,<code>token</code>}), <code>listen?</code></td>
 <td><code>{handle}</code></td>
 </tr>
 <tr>
@@ -1336,7 +1334,7 @@
 <tr>
 <td><code>send</code></td>
 <td><code>threadId</code> (or null), <code>to</code>, <code>body</code>, <code>references?</code>, <code>mode?</code></td>
-<td><code>{messageId, threadId, seq, deliveries}</code></td>
+<td><code>{messageId, threadId, seq, via, deliveries}</code></td>
 </tr>
 <tr>
 <td><code>reply</code></td>
@@ -1384,6 +1382,11 @@
 <td><code>{now, peers}</code></td>
 </tr>
 <tr>
+<td><code>prune</code></td>
+<td>none</td>
+<td><code>{removed}</code> (handles of the deleted peers)</td>
+</tr>
+<tr>
 <td><code>hook</code></td>
 <td><code>event</code>, <code>handle?</code>, <code>sessionHint?</code></td>
 <td>hook payload</td>
@@ -1400,7 +1403,9 @@
 </tr>
 </tbody>
 </table>
-<p><code>session</code> finds or creates the session, keeps its handle across resume and clear, and binds the connection to that handle. With <code>listen: true</code>, push events for the handle arrive on this connection (adapters only). <code>delivered</code> is how an adapter confirms its session accepted pushed messages.</p>
+<p><code>session</code> finds or creates the session, keeps its handle across resume and clear, and binds the connection to that handle. With <code>listen: true</code>, push events for the handle arrive on this connection (adapters only). <code>title</code> is the name the user gave the session in its CLI (Claude's <code>/rename</code>): the session's display becomes the title, and its handle becomes the title's slug (lowercase, runs of other characters as one hyphen, at most 48 characters) while the handle is automatic and the slug is free; connections bound to the old handle follow a rename. <code>delivered</code> is how an adapter confirms its session accepted pushed messages.</p>
+<p><code>register</code> with <code>owner: true</code> may carry <code>ancestors</code>: the broker resolves the nearest live session among them as the connection's <code>via</code>, and every <code>send</code> and <code>reply</code> on that connection stores it on the message. Message summaries (thread views, push payloads) expose <code>via</code> (a handle or null), <code>send</code> returns it, and the delivery tag reads <code>from renn via &lt;handle&gt;</code>. A reply goes to every sender, every recipient and every <code>via</code> of the thread, minus the replier. <code>prune</code> deletes peers that are not the owner and have no session, sent message, delivery, group membership or live connection.</p>
+<p>Handles match <code>^[a-z0-9][a-z0-9-]{1,47}$</code>. The database adds <code>messages.via</code> and <code>sessions.pinned</code> to an existing file on open when <code>PRAGMA table_info</code> lacks them.</p>
 <h2 id="server-events">Server events<a class="headerlink" href="#server-events" title="Permanent link">&para;</a></h2>
 <p>Pushed on a listening connection, no <code>id</code>:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="p">{</span><span class="nt">"v"</span><span class="p">:</span><span class="mi">2</span><span class="p">,</span><span class="nt">"type"</span><span class="p">:</span><span class="s2">"event"</span><span class="p">,</span><span class="nt">"event"</span><span class="p">:</span><span class="s2">"push"</span><span class="p">,</span><span class="nt">"payload"</span><span class="p">:{</span><span class="nt">"message"</span><span class="p">:{},</span><span class="nt">"mode"</span><span class="p">:</span><span class="s2">"push"</span><span class="p">,</span><span class="nt">"footer"</span><span class="p">:</span><span class="s2">"..."</span><span class="p">,</span><span class="nt">"text"</span><span class="p">:</span><span class="s2">"..."</span><span class="p">}}</span>

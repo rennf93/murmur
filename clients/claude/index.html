@@ -22,7 +22,7 @@
         
       
       
-      <link rel="icon" href="../../assets/images/favicon.png">
+      <link rel="icon" href="../../assets/favicon.png">
       <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
     
     
@@ -94,8 +94,7 @@
   <nav class="md-header__inner md-grid" aria-label="Header">
     <a href="../.." title="murmur" class="md-header__button md-logo" aria-label="murmur" data-md-component="logo">
       
-  
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+  <img src="../../assets/murmur.svg" alt="logo">
 
     </a>
     <label class="md-header__button md-icon" for="__drawer">
@@ -387,8 +386,7 @@
   <label class="md-nav__title" for="__drawer">
     <a href="../.." title="murmur" class="md-nav__button md-logo" aria-label="murmur" data-md-component="logo">
       
-  
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+  <img src="../../assets/murmur.svg" alt="logo">
 
     </a>
     murmur
@@ -604,6 +602,17 @@
     <span class="md-ellipsis">
       
         How it connects
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#session-names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Session names
       
     </span>
   </a>
@@ -1223,6 +1232,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#session-names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Session names
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#delivery-path" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1281,6 +1301,8 @@
 <p>Writes hooks (SessionStart, UserPromptSubmit, Stop, SessionEnd) in <code>~/.claude/settings.json</code>, <code>mcpServers.murmur</code> in <code>~/.claude.json</code>, and <code>~/.claude/commands/murmur.md</code>. It also removes the old <code>CHANGE-ME-per-session</code> handle placeholder.</p>
 <h2 id="how-it-connects">How it connects<a class="headerlink" href="#how-it-connects" title="Permanent link">&para;</a></h2>
 <p>Hooks run <code>murmur hook &lt;event&gt; --client claude</code>; each event announces the session (CLI session id, host process, transcript path, native socket) and pulls queued messages. The MCP server (<code>murmur mcp</code>) holds one long-lived broker connection and gives the model the eight <a href="../../reference/mcp/">tools</a>.</p>
+<h2 id="session-names">Session names<a class="headerlink" href="#session-names" title="Permanent link">&para;</a></h2>
+<p>Claude stores the name you give a session (<code>/rename</code>) in its transcript as repeated <code>custom-title</code> entries. Each hook reads the last 256 KB of <code>transcript_path</code>, takes the latest <code>customTitle</code> and sends it as <code>title</code>. The session's handle becomes its slug (<code>Ledger, Implementer, Companion - Claude 3</code> is <code>ledger-implementer-companion-claude-3</code>) and its display the full title; a later <code>/rename</code> follows at the session's next hook, until <code>murmur_name</code> or <code>murmur name</code> pins the handle. If another live session holds the slug the handle stays. A missing transcript or entry means no title.</p>
 <h2 id="delivery-path">Delivery path<a class="headerlink" href="#delivery-path" title="Permanent link">&para;</a></h2>
 <ul>
 <li><strong>Live push:</strong> the native messaging socket (<code>CLAUDE_CODE_MESSAGING_SOCKET</code>). The session gets the message as a peer turn, and an idle session starts working on it. Claude Code labels the message as coming from another session, not from the user.</li>
@@ -1290,6 +1312,7 @@
 <p>The frame is the one Claude Code 2.1.304 logs for itself at startup: <code>{"type":"auth","token":...}</code> then <code>{"type":"user","message":{"role":"user","content":"..."}}</code>, newline-delimited. The session never writes back to an injector. See the evidence in the repository's <code>DESIGN.md</code>.</p>
 <h2 id="murmur">/murmur<a class="headerlink" href="#murmur" title="Permanent link">&para;</a></h2>
 <p>The command file runs <code>murmur slash --stdin --claude-escaped</code> with the message in a quoted heredoc, so quotes, <code>$(...)</code>, backticks and <code>;</code> arrive verbatim. Claude Code turns a word-initial <code>!</code> into <code>\!</code> before the shell sees it; <code>--claude-escaped</code> turns it back. The model only shows the output.</p>
+<p>The message is sent as <code>renn</code> through the session you typed it in: the tag reads <code>from renn via &lt;session&gt;</code>, and replies are pushed into that session as well as to <code>renn</code>.</p>
 <h2 id="known-limits">Known limits<a class="headerlink" href="#known-limits" title="Permanent link">&para;</a></h2>
 <ul>
 <li>Natively pushed messages are context, not user instructions.</li>
