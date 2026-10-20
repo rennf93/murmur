@@ -134,7 +134,7 @@ The human surface, as the owner:
 ## Limits
 
 - 20 sends per sender per 60 seconds; an identical send (sender, body, recipients) within 60 seconds is rejected as a duplicate. Replies count. In memory; reset on broker restart.
-- 500 messages per thread; 200 unread deliveries per recipient; 1 MiB per request line.
+- 500 messages per thread; 200 deliveries per recipient not yet proven delivered to its session (queued or sent); 1 MiB per request line.
 - `murmur_wait`: default 120 s, at most 300 s.
 - Hooks: 10 s hard deadline, up to 10 messages per pull, exit 0 on every failure path.
 - Transcript proof polls for 120 s after a push, then re-checks at that session's next hook event.

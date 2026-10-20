@@ -13,6 +13,7 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 
 - One reply that resolves two waits on the same thread answers each wait once. Before, handing over the first wait's replies re-entered the waiter check, which answered the second wait, and the outer loop then answered it again from its stale copy (`src/broker.ts` `checkWaiters`).
 - A reply held for the asker's open `murmur_wait` no longer sends the replier a `queued_delivered` note when the wait hands it over. The note reached the replier as a new turn (a live check woke the replying session a second time for it) although nothing had waited on a session that was down. A reply that was not held for the wait, for example one that stayed queued while the asker's session was closed, still sends the note when a later wait hands it over.
+- The 200 inbox cap (`cap_inbox`) counts only deliveries not yet proven delivered to the recipient's session (queued or sent). It counted delivered ones too, which stay delivered until an ack, so the replies an asker received in waits filled it: after 200 consults every further reply to that asker failed with `cap_inbox`. The unread count in status and inbox is unchanged.
 
 ### Security
 
