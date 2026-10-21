@@ -1614,7 +1614,7 @@
 <tr>
 <td><code>wait</code></td>
 <td><code>threadId</code>, <code>until</code> (<code>all_replied</code>|<code>any_replied</code>), <code>timeoutMs</code></td>
-<td><code>{threadId, conditionMet, timedOut, matrix}</code></td>
+<td><code>{threadId, conditionMet, timedOut, matrix, replies, note?}</code> (<code>note</code> is set only on a timeout with a recipient still unreplied, never for <code>timeoutMs</code> 0: who has the message but is silent, whose receipt is unproven, and an instruction not to start overlapping work but to ask the user or wait again)</td>
 </tr>
 <tr>
 <td><code>groups</code></td>

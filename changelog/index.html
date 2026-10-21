@@ -1378,6 +1378,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Unreleased">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -1393,7 +1410,7 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#added" class="md-nav__link">
+  <a href="#added_1" class="md-nav__link">
     <span class="md-ellipsis">
       
         Added
@@ -1515,7 +1532,7 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#added_1" class="md-nav__link">
+  <a href="#added_2" class="md-nav__link">
     <span class="md-ellipsis">
       
         Added
@@ -1554,7 +1571,7 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#added_2" class="md-nav__link">
+  <a href="#added_3" class="md-nav__link">
     <span class="md-ellipsis">
       
         Added
@@ -1660,7 +1677,7 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#added_3" class="md-nav__link">
+  <a href="#added_4" class="md-nav__link">
     <span class="md-ellipsis">
       
         Added
@@ -1710,7 +1727,7 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#added_4" class="md-nav__link">
+  <a href="#added_5" class="md-nav__link">
     <span class="md-ellipsis">
       
         Added
@@ -1768,6 +1785,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Unreleased">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#added" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Added
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -1783,7 +1817,7 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#added" class="md-nav__link">
+  <a href="#added_1" class="md-nav__link">
     <span class="md-ellipsis">
       
         Added
@@ -1905,7 +1939,7 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#added_1" class="md-nav__link">
+  <a href="#added_2" class="md-nav__link">
     <span class="md-ellipsis">
       
         Added
@@ -1944,7 +1978,7 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#added_2" class="md-nav__link">
+  <a href="#added_3" class="md-nav__link">
     <span class="md-ellipsis">
       
         Added
@@ -2050,7 +2084,7 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#added_3" class="md-nav__link">
+  <a href="#added_4" class="md-nav__link">
     <span class="md-ellipsis">
       
         Added
@@ -2100,7 +2134,7 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#added_4" class="md-nav__link">
+  <a href="#added_5" class="md-nav__link">
     <span class="md-ellipsis">
       
         Added
@@ -2138,8 +2172,12 @@
 <h1 id="changelog">Changelog<a class="headerlink" href="#changelog" title="Permanent link">&para;</a></h1>
 <p>All notable changes to murmur are documented here. The format follows <a href="https://keepachangelog.com/en/1.1.0/">Keep a Changelog</a> and the project uses <a href="https://semver.org/">Semantic Versioning</a>.</p>
 <h2 id="unreleased"><a href="https://github.com/rennf93/murmur/compare/v0.2.5...HEAD">Unreleased</a><a class="headerlink" href="#unreleased" title="Permanent link">&para;</a></h2>
-<h2 id="025-2026-10-21"><a href="https://github.com/rennf93/murmur/releases/tag/v0.2.5">0.2.5</a> - 2026-10-21<a class="headerlink" href="#025-2026-10-21" title="Permanent link">&para;</a></h2>
 <h3 id="added">Added<a class="headerlink" href="#added" title="Permanent link">&para;</a></h3>
+<ul>
+<li>A timed-out <code>murmur_wait</code> (or <code>murmur_send</code> with <code>wait</code>) now carries a <code>note</code> when a recipient of the latest ask has not replied. It names who has the message but has not answered and who has not confirmed receipt (queued or sent), and tells the asker not to start work that could overlap theirs: ask the user, or wait again. It is absent when the wait condition was met and on a <code>timeoutMs: 0</code> check, which did not wait.</li>
+</ul>
+<h2 id="025-2026-10-21"><a href="https://github.com/rennf93/murmur/releases/tag/v0.2.5">0.2.5</a> - 2026-10-21<a class="headerlink" href="#025-2026-10-21" title="Permanent link">&para;</a></h2>
+<h3 id="added_1">Added<a class="headerlink" href="#added_1" title="Permanent link">&para;</a></h3>
 <ul>
 <li>A <code>choice</code> verdict for picking one of the options a question offers, with the body starting <code>CHOICE &lt;option&gt;</code>. Before, a plain pick had to go out as <code>AGREE</code> or <code>DISAGREE</code>, and a <code>DISAGREE</code> read as a conflict when there was none. <code>murmur_wait</code> and <code>collect</code> report it like the other verdicts, and <code>verdictTally</code> has a <code>choice</code> count. The MCP instructions tell askers to ask for a <code>CHOICE</code> reply when they offer options, and the reply tools (MCP, CLI, the slash command and the hummin and opencode adapters) describe and accept it.</li>
 </ul>
@@ -2186,7 +2224,7 @@
 <li>A reply held back for an open <code>murmur_wait</code> is now only one the wait hands over (a reply to the thread's latest ask); a reply to an older ask, or to a reply, is pushed as usual instead of staying queued with no path to its recipient. A wait remembers the replies held for it and hands them all over even if the thread's latest ask changed meanwhile. Replies held for a wait whose connection closes before it resolves are pushed at once. A delivery whose push is already in flight is never handed over a second time by a new wait or the hook pull.</li>
 <li>The live rig (<code>scripts/live/lib.mjs</code>) sets <code>MURMUR_AUTOSTART=0</code>, so a hook that outlives cleanup cannot respawn a broker and none survives a live run.</li>
 </ul>
-<h3 id="added_1">Added<a class="headerlink" href="#added_1" title="Permanent link">&para;</a></h3>
+<h3 id="added_2">Added<a class="headerlink" href="#added_2" title="Permanent link">&para;</a></h3>
 <ul>
 <li><code>make bench-consult</code> (<code>scripts/live/bench-consult.mjs</code>): three real Claude sessions per run, plain native <code>SendMessage</code>, native with the peers told to reply with <code>SendMessage</code>, and murmur, with tokens, API calls, copies received and wall time from the sessions' own transcripts; results in <code>docs/bench/consult.md</code> and <code>consult.json</code>.</li>
 <li>Docs and repository files: README hero, demo and linked CLIs; a Diataxis docs navigation (getting started, using murmur, consult, design, concepts, reference); <code>CODE_OF_CONDUCT.md</code>, <code>SUPPORT.md</code>, <code>MAINTAINERS.md</code>, <code>CODEOWNERS</code>, issue forms, a pull request template, Dependabot, an OpenSSF Scorecard workflow, a docs CI workflow (markdownlint, typos, lychee) and SHA-pinned GitHub Actions.</li>
@@ -2197,7 +2235,7 @@
 <li><code>/murmur</code> now reads as coming from the owner through the session it was typed in: the message tag is <code>from renn via &lt;session&gt;</code>, and replies are pushed into that session as well as to <code>renn</code>. Before, replies to an owner message went only to <code>renn</code>, which has no session, so the session the human typed in never saw them. From a plain terminal (no session among the ancestors) nothing changes.</li>
 <li>A rename now carries the whole session: every live broker connection bound to the old handle (the session's MCP server, an adapter) follows to the new one, so its presence and later sends use the new name. Pending delivery proof and batched notifications follow the rename too.</li>
 </ul>
-<h3 id="added_2">Added<a class="headerlink" href="#added_2" title="Permanent link">&para;</a></h3>
+<h3 id="added_3">Added<a class="headerlink" href="#added_3" title="Permanent link">&para;</a></h3>
 <ul>
 <li>Claude sessions take the name the user gave them. The hook reads the last 256 KB of the transcript, takes the latest <code>customTitle</code> and sends it as <code>title</code>; the session's handle becomes its slug (<code>Ledger, Implementer, Companion - Claude 3</code> becomes <code>ledger-implementer-companion-claude-3</code>) and its display the full title. It follows a later <code>/rename</code> only while the handle is automatic: <code>murmur_name</code> and <code>murmur name</code> pin it. A slug held by another live session keeps the current handle.</li>
 <li><code>via</code> on messages, thread views, <code>MessageSummary</code> and <code>SendResult</code>, backed by a nullable <code>messages.via</code> column.</li>
@@ -2226,7 +2264,7 @@
 <li>Release pipeline check: the first version published to npm by CI through trusted publishing, as a prerelease on the <code>next</code> dist-tag. No code changes.</li>
 </ul>
 <h2 id="020-2026-10-20"><a href="https://github.com/rennf93/murmur/releases/tag/v0.2.0">0.2.0</a> - 2026-10-20<a class="headerlink" href="#020-2026-10-20" title="Permanent link">&para;</a></h2>
-<h3 id="added_3">Added<a class="headerlink" href="#added_3" title="Permanent link">&para;</a></h3>
+<h3 id="added_4">Added<a class="headerlink" href="#added_4" title="Permanent link">&para;</a></h3>
 <ul>
 <li>CLI-agnostic hooks: one hook entry (<code>murmur hook &lt;event&gt; --client &lt;cli&gt;</code>) for Claude Code, Codex, Gemini CLI and zcode, each speaking that CLI's hook dialect.</li>
 <li><code>murmur install &lt;claude|codex|gemini|zcode|opencode|hummin&gt;</code>: idempotent merges into each CLI's own config, with a one-time <code>.bak-murmur</code> backup of every touched file.</li>
@@ -2253,7 +2291,7 @@
 <li><code>scripts/e2e.mjs</code>, replaced by the live checks in <code>scripts/live/</code>.</li>
 </ul>
 <h2 id="010-2026-10-20"><a href="https://github.com/rennf93/murmur/commit/294fe18">0.1.0</a> - 2026-10-20<a class="headerlink" href="#010-2026-10-20" title="Permanent link">&para;</a></h2>
-<h3 id="added_4">Added<a class="headerlink" href="#added_4" title="Permanent link">&para;</a></h3>
+<h3 id="added_5">Added<a class="headerlink" href="#added_5" title="Permanent link">&para;</a></h3>
 <ul>
 <li>Local session message bus: one broker process owning a SQLite store and one Unix domain socket, with token authentication.</li>
 <li>Group threads: one message fans out to any mix of handles and groups; replies reach the whole thread; per-thread monotonic <code>seq</code>.</li>
