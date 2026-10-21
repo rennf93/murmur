@@ -127,9 +127,11 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 - Limits: send rate, duplicate window, thread and inbox caps.
 - 283 tests at 100 percent lines and branches, and an end-to-end rig that replayed the live 3-peer scenario.
 
+[Unreleased]: https://github.com/rennf93/murmur/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/rennf93/murmur/releases/tag/v0.2.4
 [0.2.3]: https://github.com/rennf93/murmur/releases/tag/v0.2.3
 [0.2.2]: https://github.com/rennf93/murmur/releases/tag/v0.2.2
 [0.2.1]: https://github.com/rennf93/murmur/releases/tag/v0.2.1
 [0.2.1-rc.1]: https://github.com/rennf93/murmur/releases/tag/v0.2.1-rc.1
 [0.2.0]: https://github.com/rennf93/murmur/releases/tag/v0.2.0
-[0.1.0]: https://github.com/rennf93/murmur/releases/tag/v0.1.0
+[0.1.0]: https://github.com/rennf93/murmur/commit/294fe18
