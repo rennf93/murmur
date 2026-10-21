@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Broker } from '../src/broker.js';
 import { MurmurClient } from '../src/client.js';
 import { MurmurError } from '../src/protocol.js';
+import type { StatusResult } from '../src/protocol.js';
 import { ensureHome, getPaths, readToken } from '../src/config.js';
 import type { MurmurPaths } from '../src/config.js';
 import { MurmurCore } from '../src/core.js';
@@ -20,7 +21,12 @@ import { Store } from '../src/store.js';
 
 // StdioServerTransport must not bind the real process streams; the fake
 // keeps the same start/send/close surface the SDK assigns.
-const fakeStdio = vi.hoisted(() => ({ constructed: 0, started: 0 }));
+const fakeStdio = vi.hoisted(() => ({
+  constructed: 0,
+  started: 0,
+  transport: null as null | { onmessage: ((message: unknown) => void) | undefined },
+  sent: [] as Array<{ id?: number; result?: { content?: Array<{ text: string }>; isError?: boolean } }>,
+}));
 
 vi.mock('@modelcontextprotocol/sdk/server/stdio.js', () => ({
   StdioServerTransport: class FakeStdioServerTransport {
@@ -29,11 +35,14 @@ vi.mock('@modelcontextprotocol/sdk/server/stdio.js', () => ({
     onmessage: ((message: unknown) => void) | undefined;
     constructor() {
       fakeStdio.constructed += 1;
+      fakeStdio.transport = this;
     }
     async start(): Promise<void> {
       fakeStdio.started += 1;
     }
-    async send(): Promise<void> {}
+    async send(message: (typeof fakeStdio.sent)[number]): Promise<void> {
+      fakeStdio.sent.push(message);
+    }
     async close(): Promise<void> {}
   },
 }));
@@ -219,7 +228,8 @@ describe('runMcpServer fault tolerance', () => {
         setTimeout(resolve, 300);
       })]);
       expect(outcome).toBe('pending');
-      // Dropping the broker connection must end the wait.
+      // With no broker to reconnect to (autostart is off here), dropping the
+      // connection ends the wait after the reconnect attempts.
       await stack.broker.stop();
       await up;
       expect(exitSpy).not.toHaveBeenCalled();
@@ -231,4 +241,83 @@ describe('runMcpServer fault tolerance', () => {
       delete process.env.MURMUR_HANDLE;
     }
   });
+
+  it('stops reconnecting as soon as its stdin closes', async () => {
+    const stack = await buildStack();
+    process.env.MURMUR_HOME = stack.home;
+    process.env.MURMUR_HANDLE = 'mcp-gone';
+    const exitSpy = vi.spyOn(process, 'exit');
+    const stdin = new PassThrough();
+    const before = fakeStdio.started;
+    try {
+      const up = runMcpServer(stdin);
+      await until(() => fakeStdio.started > before, 'server started');
+      // No broker comes back, so the server is in its reconnect attempts.
+      await stack.broker.stop();
+      await new Promise((resolve) => {
+        setTimeout(resolve, 600);
+      });
+      const closedAt = Date.now();
+      stdin.destroy();
+      await up;
+      // All 20 attempts would take about 5 s; it ends at the next one instead.
+      expect(Date.now() - closedAt).toBeLessThan(2000);
+      expect(exitSpy).not.toHaveBeenCalled();
+    } finally {
+      exitSpy.mockRestore();
+      delete process.env.MURMUR_HOME;
+      delete process.env.MURMUR_HANDLE;
+    }
+  });
+
+  it('reconnects and registers again when the broker restarts, and its tools use the new connection', async () => {
+    const stack = await buildStack();
+    process.env.MURMUR_HOME = stack.home;
+    process.env.MURMUR_HANDLE = 'mcp-reconnects';
+    const exitSpy = vi.spyOn(process, 'exit');
+    const stdin = new PassThrough();
+    const before = fakeStdio.started;
+    try {
+      const up = runMcpServer(stdin);
+      await until(() => fakeStdio.started > before, 'server started');
+      await stack.broker.stop();
+      stack.broker = await Broker.start({
+        paths: stack.paths,
+        store: stack.store,
+        core: new MurmurCore(stack.store, { onAppend: () => {}, onStateChange: () => {} }),
+      });
+      const viewer = await MurmurClient.connect({ socketPath: stack.paths.socketPath, token: readToken(stack.paths) });
+      await viewer.request({ type: 'register', handle: 'viewer', clientKind: 'mcp' });
+      await until(async () => {
+        const status = await viewer.request<StatusResult>({ type: 'status' });
+        return status.peers.find((p) => p.handle === 'mcp-reconnects')?.presence === 'online';
+      }, 'mcp-reconnects online on the new broker');
+      viewer.close();
+      fakeStdio.transport?.onmessage?.({ jsonrpc: '2.0', id: 77, method: 'tools/call', params: { name: 'murmur_status', arguments: {} } });
+      await until(() => fakeStdio.sent.some((m) => m.id === 77), 'murmur_status answered');
+      const answer = fakeStdio.sent.find((m) => m.id === 77);
+      expect(answer?.result?.isError).toBeUndefined();
+      expect(answer?.result?.content?.[0]?.text).toContain('"handle":"mcp-reconnects"');
+      // The CLI closing stdin ends the server.
+      stdin.destroy();
+      await up;
+      expect(exitSpy).not.toHaveBeenCalled();
+    } finally {
+      exitSpy.mockRestore();
+      delete process.env.MURMUR_HOME;
+      delete process.env.MURMUR_HANDLE;
+    }
+  });
 });
+
+async function until(pred: () => boolean | Promise<boolean>, label: string): Promise<void> {
+  const deadline = Date.now() + 10000;
+  while (!(await pred())) {
+    if (Date.now() > deadline) {
+      throw new Error('timed out waiting for ' + label);
+    }
+    await new Promise((resolve) => {
+      setTimeout(resolve, 20);
+    });
+  }
+}
