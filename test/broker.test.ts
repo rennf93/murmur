@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import type { Server, Socket } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -747,7 +747,7 @@ describe('reply, ack, read and inbox', () => {
     });
     await expect(req(alice.client, { type: 'reply', messageId: ask.messageId, body: 'x', verdict: 'maybe' })).rejects.toMatchObject({
       code: 'bad_request',
-      message: 'verdict must be one of: agree, disagree, info',
+      message: 'verdict must be one of: agree, disagree, info, choice',
     });
     await expect(req(alice.client, { type: 'reply', messageId: ask.messageId, body: 'x', references: 'y' })).rejects.toMatchObject({
       code: 'bad_request',
@@ -912,7 +912,7 @@ describe('thread and collect over the wire', () => {
     expect(collect.recipients).toHaveLength(1);
     expect(collect.recipients[0]).toMatchObject({ recipient: 'bob', state: 'replied', verdict: 'agree' });
     expect(collect.recipients[0]?.repliedLatencyMs).not.toBeNull();
-    expect(collect.verdictTally).toEqual({ agree: 1, disagree: 0, info: 0 });
+    expect(collect.verdictTally).toEqual({ agree: 1, disagree: 0, info: 0, choice: 0 });
     await expect(req(alice.client, { type: 'collect', threadId: 555 })).rejects.toMatchObject({
       code: 'unknown_thread',
     });
@@ -991,6 +991,19 @@ describe('wait', () => {
     const result = await pending;
     expect(result).toMatchObject({ threadId: ask.threadId, conditionMet: true, timedOut: false });
     expect(result.matrix.map((r) => r.recipient).sort()).toEqual(['bob', 'carol']);
+  });
+
+  it('accepts a choice verdict over the wire and hands it to the waiting asker', async () => {
+    const stack = await buildStack();
+    const alice = await connectAdapter(stack, 'alice', 5089);
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    const ask = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'Reply CHOICE ci or CHOICE now' });
+    const pending = req<WaitResult>(alice.client, { type: 'wait', threadId: ask.threadId, until: 'all_replied', timeoutMs: 20000 });
+    await yieldTurn();
+    await yieldTurn();
+    const reply = await req<ReplyResult>(bob.client, { type: 'reply', messageId: ask.messageId, body: 'CHOICE ci', verdict: 'choice' });
+    const result = await pending;
+    expect(result.replies.map((r) => [r.id, r.verdict, r.body])).toEqual([[reply.messageId, 'choice', 'CHOICE ci']]);
   });
 
   it('holds replies for an active wait, returns them in the result and marks them delivered (all_replied)', async () => {
@@ -2918,6 +2931,21 @@ describe('socket startup', () => {
     await expect(Broker.start({ paths: stack.paths, store: stack.store, core: stack.core })).rejects.toThrow(
       'murmur: a broker is already listening on ' + stack.paths.socketPath,
     );
+    const peer = await connectPeer(stack, { handle: 'alice' });
+    await expect(statusOf(peer.client)).resolves.toBeDefined();
+  });
+
+  it('refuses to start and keeps the socket when the probe is denied, not refused (a CLI sandbox)', async () => {
+    const stack = await buildStack();
+    chmodSync(stack.paths.socketPath, 0);
+    try {
+      await expect(Broker.start({ paths: stack.paths, store: stack.store, core: stack.core })).rejects.toThrow(
+        'murmur: cannot probe ' + stack.paths.socketPath + ' (EACCES); not removing it',
+      );
+      expect(existsSync(stack.paths.socketPath)).toBe(true);
+    } finally {
+      chmodSync(stack.paths.socketPath, 0o600);
+    }
     const peer = await connectPeer(stack, { handle: 'alice' });
     await expect(statusOf(peer.client)).resolves.toBeDefined();
   });

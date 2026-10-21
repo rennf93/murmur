@@ -61,6 +61,14 @@ try {
   const replies = r.db.prepare('SELECT id, sender FROM messages WHERE thread_id = ? AND id != ?').all(threadId, messageId);
   const fanout = replies.map((m) => ({ from: m.sender, to: r.db.prepare('SELECT recipient FROM deliveries WHERE message_id = ?').all(m.id).map((d) => d.recipient).sort() }));
   log('reply routing', JSON.stringify(fanout));
+  await r.restartBroker();
+  const second = r.send(handles.join(','), ASK + ' (after a broker restart)');
+  const final2 = await until('both replied after restart', () => {
+    const rows = r.deliveries(second.messageId);
+    return rows.every((d) => d.state === 'replied') ? rows : null;
+  }, 120000).catch(() => r.deliveries(second.messageId));
+  const senders2 = r.db.prepare('SELECT sender FROM messages WHERE thread_id = ? AND id != ?').all(second.threadId, second.messageId).map((m) => m.sender).sort();
+  log('ask deliveries after restart', JSON.stringify(final2), JSON.stringify(senders2));
   await r.type('mlA', '/murmur-live live-peer-b ' + SLASH_TEXT);
   const slash = await until('slash message', () => r.db.prepare('SELECT id, sender, via, body FROM messages WHERE body LIKE ? ').get('slash check:%'), 40000).catch(() => null);
   log('slash row', JSON.stringify(slash));
@@ -75,6 +83,7 @@ try {
     ['/murmur stored the text verbatim as the owner', slash?.body === SLASH_TEXT && slash?.sender === 'renn', JSON.stringify(slash)],
     ['/murmur message has via = mlA handle (live-peer-a)', slash?.via === 'live-peer-a', JSON.stringify(slash?.via)],
     ['B replied and the reply was delivered to mlA as well as the owner', slashReply?.sender === 'live-peer-b' && slashTo.join(',') === 'live-peer-a,renn', JSON.stringify(slashTo)],
+    ['a second ask after a broker restart reached replied from both same session handles, no CLI restart', final2.length === 2 && final2.every((d) => d.state === 'replied') && senders2.join(',') === handles.join(','), JSON.stringify([final2, senders2])],
   ]);
 } finally {
   r.cleanup();

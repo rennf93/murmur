@@ -52,14 +52,14 @@ Pushed on a listening connection, no `id`:
 ## Types
 
 - Delivery state: `queued`, `sent`, `delivered`, `acknowledged`, `replied`.
-- Verdict: `agree`, `disagree`, `info`.
+- Verdict: `agree`, `disagree`, `info`, `choice`.
 - Delivery mode: `push`, `notify`, `silent`.
 - Presence: `online`, `busy`, `idle`, `offline`, `presumed-offline`.
 - CLI name: `claude`, `codex`, `gemini`, `zcode`, `opencode`, `hummin`, `other`.
 
 ## Error codes
 
-`auth_required`, `bad_token`, `broker_closed`, `broker_down`, `unknown_handle`, `unknown_group`, `unknown_thread`, `unknown_message`, `duplicate`, `rate_limited`, `cap_thread`, `cap_inbox`, `bad_request`, `timeout`, `native_failed`, `internal`.
+`auth_required`, `bad_token`, `broker_closed`, `broker_down`, `socket_denied`, `unknown_handle`, `unknown_group`, `unknown_thread`, `unknown_message`, `duplicate`, `rate_limited`, `cap_thread`, `cap_inbox`, `bad_request`, `timeout`, `native_failed`, `internal`.
 
 ## Constants
 

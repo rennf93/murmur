@@ -32,7 +32,7 @@ Targets are handles and groups. `@name` is always a group; a bare name is a hand
 
 ## Verdicts
 
-Verdicts are `agree`, `disagree` and `info`, with the body starting `AGREE`, `DISAGREE` or `INFO`. `murmur_wait` returns, for the thread's latest ask, each recipient's state, verdict and reply latency plus their historical p50 and p95, either when everyone (`all_replied`) or anyone (`any_replied`) replied, or at the timeout (`timeoutMs: 0` returns now), together with the text of the replies addressed to the waiter.
+Verdicts are `agree`, `disagree`, `info` and `choice`, with the body starting `AGREE`, `DISAGREE`, `INFO` or `CHOICE <option>`. `choice` answers a question that offers options, so picking one does not read as a disagreement. `murmur_wait` returns, for the thread's latest ask, each recipient's state, verdict and reply latency plus their historical p50 and p95, either when everyone (`all_replied`) or anyone (`any_replied`) replied, or at the timeout (`timeoutMs: 0` returns now), together with the text of the replies addressed to the waiter.
 
 ## Delivery states
 

@@ -75,7 +75,7 @@ export interface SessionEventArg {
 
 export { HANDLE_RE };
 const GROUP_NAME_RE = /^@?[a-z0-9][a-z0-9-]{1,31}$/;
-const VERDICTS: readonly string[] = ['agree', 'disagree', 'info'];
+const VERDICTS: readonly string[] = ['agree', 'disagree', 'info', 'choice'];
 const UNREAD_STATES: string[] = ['queued', 'sent', 'delivered'];
 // The inbox cap guards the backlog not yet proven in the session: a
 // delivered message is in the session, and counting it would let replies that
@@ -127,10 +127,7 @@ function parseRefs(json: string): string[] {
 }
 
 function parseVerdict(value: string | null): Verdict | null {
-  if (value === 'agree' || value === 'disagree' || value === 'info') {
-    return value;
-  }
-  return null;
+  return value !== null && VERDICTS.includes(value) ? (value as Verdict) : null;
 }
 
 function normalizeHookState(value: string | null): 'busy' | 'idle' | null {
@@ -598,7 +595,7 @@ export class MurmurCore {
         p95ReplyMs: percentile(latencies, 0.95),
       });
     }
-    const verdictTally: Record<Verdict, number> = { agree: 0, disagree: 0, info: 0 };
+    const verdictTally: Record<Verdict, number> = { agree: 0, disagree: 0, info: 0, choice: 0 };
     for (const row of all) {
       if (!row.isReply) {
         continue;

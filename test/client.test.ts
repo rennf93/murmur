@@ -1,5 +1,5 @@
 import * as net from 'node:net';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -228,6 +228,22 @@ describe('MurmurClient', () => {
     expect(isBrokerDown(new MurmurError('bad_token', 'x'))).toBe(false);
   });
 
+  it('reports socket_denied, not broker_down, when the socket refuses this process (a CLI sandbox)', async () => {
+    const broker = await startBroker();
+    chmodSync(broker.socketPath, 0);
+    let caught: unknown;
+    try {
+      await MurmurClient.connect({ socketPath: broker.socketPath, token: 't', connectTimeoutMs: 2000 });
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as MurmurError).code).toBe('socket_denied');
+    expect((caught as MurmurError).message).toBe(
+      'connect to ' + broker.socketPath + ' denied (EACCES): a sandbox may block this process from the murmur socket; use the murmur tools (murmur_reply, murmur_send) instead',
+    );
+    expect(isBrokerDown(caught)).toBe(false);
+  });
+
   it('times out when the broker never answers auth', async () => {
     const broker = await startBroker();
     broker.setHandler(() => undefined);
@@ -440,6 +456,14 @@ describe('connectBroker', () => {
       conn.write(encodeLine({ v: 2, id: msg.id, ok: false, error: { code: 'unauthorized', message: 'bad token' } }));
     });
     await expect(connectBroker({ socketPath: broker.socketPath, token: 'nope' })).rejects.toMatchObject({ code: 'unauthorized' });
+    expect(spawnState.calls).toEqual([]);
+  });
+
+  it('starts no broker when the socket refuses this process, even with autostart on', async () => {
+    process.env.MURMUR_AUTOSTART = '1';
+    const broker = await startBroker();
+    chmodSync(broker.socketPath, 0);
+    await expect(connectBroker({ socketPath: broker.socketPath, token: 'tok' })).rejects.toMatchObject({ code: 'socket_denied' });
     expect(spawnState.calls).toEqual([]);
   });
 

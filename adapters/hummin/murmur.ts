@@ -363,12 +363,12 @@ export default function murmur(pi: ExtensionAPI): void {
 		name: "murmur_reply",
 		label: "Murmur Reply",
 		description:
-			"Reply to a murmur message; it goes to whoever is waiting for it and anyone in the thread can read it, so start the body with AGREE, DISAGREE or INFO.",
+			"Reply to a murmur message; it goes to whoever is waiting for it and anyone in the thread can read it, so start the body with AGREE, DISAGREE, CHOICE <option> (picking one of the options offered) or INFO.",
 		promptSnippet: "murmur_reply: answer a [murmur m<id>] message",
 		parameters: Type.Object({
 			messageId: Type.Number({ description: "Id from the [murmur m<id>] tag" }),
 			body: Type.String({ minLength: 1 }),
-			verdict: Type.Optional(Type.Union([Type.Literal("agree"), Type.Literal("disagree"), Type.Literal("info")])),
+			verdict: Type.Optional(Type.Union([Type.Literal("agree"), Type.Literal("disagree"), Type.Literal("info"), Type.Literal("choice")])),
 			references: Type.Optional(Type.Array(Type.String())),
 		}),
 		async execute(_id, p) {

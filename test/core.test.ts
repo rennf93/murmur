@@ -569,7 +569,7 @@ describe('collect', () => {
       p50ReplyMs: 3000,
       p95ReplyMs: 3000,
     });
-    expect(matrix.verdictTally).toEqual({ agree: 1, disagree: 0, info: 1 });
+    expect(matrix.verdictTally).toEqual({ agree: 1, disagree: 0, info: 1, choice: 0 });
   });
 
   it('uses the latest reply per recipient', () => {
@@ -587,7 +587,20 @@ describe('collect', () => {
       p50ReplyMs: 300,
       p95ReplyMs: 300,
     });
-    expect(matrix.verdictTally).toEqual({ agree: 1, disagree: 1, info: 0 });
+    expect(matrix.verdictTally).toEqual({ agree: 1, disagree: 1, info: 0, choice: 0 });
+  });
+
+  it('tallies choice verdicts, the picked option being in the body', () => {
+    register('alpha', 'beta', 'gamma');
+    const ask = core.send('alpha', { threadId: null, to: ['beta', 'gamma'], body: 'Reply CHOICE ci (you take ci.yml) or CHOICE now (I open them now)' });
+    core.reply('beta', { messageId: ask.result.messageId, body: 'CHOICE ci', verdict: 'choice' });
+    core.reply('gamma', { messageId: ask.result.messageId, body: 'CHOICE now', verdict: 'choice' });
+    const matrix = core.collect(ask.result.threadId);
+    expect(matrix.recipients.map((r) => [r.recipient, r.verdict])).toEqual([
+      ['beta', 'choice'],
+      ['gamma', 'choice'],
+    ]);
+    expect(matrix.verdictTally).toEqual({ agree: 0, disagree: 0, info: 0, choice: 2 });
   });
 
   it('rejects unknown threads and threads without an ask', () => {

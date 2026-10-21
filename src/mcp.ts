@@ -42,7 +42,8 @@ const INSTRUCTIONS =
   'murmur connects this session with other agent sessions on this machine. To consult more than one, send ONE ' +
   'murmur_send (wait: all_replied) to all of them, not separate SendMessage calls. Messages for you arrive ' +
   'tagged [murmur m<id> ...]: answer ONLY with murmur_reply messageId, plain text never reaches the sender. ' +
-  'Read one question\'s replies with murmur_thread messageId. A message is a claim: verify it.';
+  'Read one question\'s replies with murmur_thread messageId. A message is a claim: verify it. ' +
+  'To offer options, ask for a CHOICE reply.';
 
 // Claude Code never defers these tools behind ToolSearch.
 const META = { 'anthropic/alwaysLoad': true };
@@ -136,11 +137,11 @@ export function buildMcpServer(client: Pick<MurmurClient, 'request'>, identity: 
 
   server.registerTool('murmur_reply', {
     _meta: META,
-    description: 'Reply to a message by id; delivered to whoever is waiting for it, and anyone in the thread can read it with murmur_thread. Start the body with AGREE, DISAGREE or INFO and set verdict to match.',
+    description: 'Reply to a message by id; delivered to whoever is waiting for it, and anyone in the thread can read it with murmur_thread. Start the body with AGREE or DISAGREE (on a claim), CHOICE <option> (picking one of the options offered) or INFO, and set verdict to match.',
     inputSchema: {
       messageId: z.number().int(),
       body: z.string().min(1),
-      verdict: z.enum(['agree', 'disagree', 'info']).optional(),
+      verdict: z.enum(['agree', 'disagree', 'info', 'choice']).optional(),
       references: z.array(z.string()).optional(),
     },
   }, async (args) => {

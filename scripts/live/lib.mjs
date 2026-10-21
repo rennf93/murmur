@@ -42,8 +42,12 @@ export async function rig(name) {
   const sh = (cmd, args) => execFileSync(cmd, args, { encoding: 'utf8', env }).trim();
   const murmur = (...args) => sh('node', [BIN, ...args]);
   murmur('init');
-  const broker = spawn('node', [BIN, 'serve'], { env, stdio: 'ignore' });
-  await until('broker socket', () => existsSync(join(home, 'bus.sock')), 10000);
+  const startBroker = async () => {
+    const child = spawn('node', [BIN, 'serve'], { env, stdio: 'ignore' });
+    await until('broker socket', () => existsSync(join(home, 'bus.sock')), 10000);
+    return child;
+  };
+  let broker = await startBroker();
   const db = new Database(join(home, 'murmur.db'), { readonly: true });
   const { installClient } = await import(pathToFileURL(join(REPO, 'dist', 'install.js')).href);
   const panes = [];
@@ -82,6 +86,16 @@ export async function rig(name) {
     session: (client) => db.prepare('SELECT handle, client, cli_session_id, state, transcript_path FROM sessions WHERE client = ? ORDER BY id').all(client),
     deliveries: (messageId) =>
       db.prepare('SELECT recipient, state, sent_at IS NOT NULL AS sent, delivered_at IS NOT NULL AS delivered, latency_ms FROM deliveries WHERE message_id = ? ORDER BY recipient').all(messageId),
+    // Stops the rig's own broker by its handle and starts a new one on the same home. The CLIs'
+    // MCP servers have ~5 s to reconnect (MURMUR_AUTOSTART=0 keeps them from starting one).
+    async restartBroker() {
+      const exited = new Promise((resolve) => broker.once('exit', resolve));
+      broker.kill('SIGTERM');
+      await exited;
+      rmSync(join(home, 'bus.sock'), { force: true });
+      broker = await startBroker();
+      log('broker restarted');
+    },
     // Owner send; returns the ids the CLI prints.
     send(to, body) {
       const out = murmur('send', to, body);

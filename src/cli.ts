@@ -43,7 +43,7 @@ const OWNER_DISPLAY = 'renn (owner)';
 
 const SEND_USAGE =
   'usage: murmur send <targets> <body...> [--as <handle>] [--mode <mode>] [--refs <a,b>] [--thread <id>]';
-const REPLY_USAGE = 'usage: murmur reply <message id> <body...> [--as <handle>] [--verdict agree|disagree|info] [--refs <a,b>]';
+const REPLY_USAGE = 'usage: murmur reply <message id> <body...> [--as <handle>] [--verdict agree|disagree|info|choice] [--refs <a,b>]';
 const NAME_USAGE = 'usage: murmur name <handle>   (renames the agent session this runs in)';
 const THREAD_USAGE = 'usage: murmur thread <id> [--since <n>] [--full] [--message <id>]';
 const GROUPS_USAGE =

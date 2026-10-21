@@ -234,10 +234,14 @@ describe('SDK conformance over InMemoryTransport', () => {
     expect(instructions).toContain('ONE murmur_send');
     expect(instructions).toContain('SendMessage');
     expect(instructions).toContain('plain text never reaches the sender');
+    expect(instructions).toContain('To offer options, ask for a CHOICE reply.');
     expect(instructions.length).toBeLessThan(450);
     const listed = await sdk.listTools();
     expect(listed.tools.map((t) => t.name).sort()).toEqual([...TOOL_NAMES].sort());
     expect(listed.tools).toHaveLength(8);
+    const replyTool = listed.tools.find((t) => t.name === 'murmur_reply');
+    expect(replyTool?.description).toContain('CHOICE <option>');
+    expect((replyTool?.inputSchema.properties?.verdict as { enum?: string[] } | undefined)?.enum).toEqual(['agree', 'disagree', 'info', 'choice']);
     for (const tool of listed.tools) {
       expect(tool.description?.length ?? 0).toBeGreaterThan(0);
       expect(tool.inputSchema.type).toBe('object');
@@ -355,12 +359,15 @@ describe('SDK conformance over InMemoryTransport', () => {
       [1, 'INFO: and more'],
       [2, 'AGREE: looks right'],
     ]);
+    const picked = await call<ReplyResult>(sdk, 'murmur_reply', { messageId: incoming.messageId, body: 'CHOICE ci', verdict: 'choice' });
+    const pickedRow = await call<ThreadResult>(sdk, 'murmur_thread', { threadId: incoming.threadId, sinceSeq: 2 });
+    expect(pickedRow.messages.map((m) => [m.seq, m.verdict])).toEqual([[picked.seq, 'choice']]);
     // The ask is answered, so a wait without timeoutMs (and one past the cap)
     // returns at once with the latest verdict.
     for (const extra of [{}, { timeoutMs: 99999999 }]) {
       const waited = await call<WaitResult>(sdk, 'murmur_wait', { threadId: incoming.threadId, until: 'any_replied', ...extra });
       expect(waited).toMatchObject({ conditionMet: true, timedOut: false });
-      expect(waited.matrix[0]).toMatchObject({ recipient: 'mcpagent', state: 'replied', verdict: 'agree' });
+      expect(waited.matrix[0]).toMatchObject({ recipient: 'mcpagent', state: 'replied', verdict: 'choice' });
     }
     const created = await call<GroupsResult[]>(sdk, 'murmur_groups', { action: 'create', name: 'mcpgroup' });
     expect(created.map((g) => g.name)).toEqual(['mcpgroup']);

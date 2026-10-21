@@ -114,7 +114,7 @@ const CLIENT_KINDS: readonly ClientKind[] = ['mcp', 'cli', 'hook', 'adapter'];
 const HOOK_EVENTS: readonly HookEvent[] = ['session-start', 'prompt', 'stop', 'session-end'];
 const CLI_NAMES: readonly CliName[] = ['claude', 'codex', 'gemini', 'zcode', 'opencode', 'hummin', 'other'];
 const DELIVERY_MODES: readonly DeliveryMode[] = ['push', 'notify', 'silent'];
-const VERDICTS: readonly Verdict[] = ['agree', 'disagree', 'info'];
+const VERDICTS: readonly Verdict[] = ['agree', 'disagree', 'info', 'choice'];
 const GROUP_ACTIONS: readonly GroupAction[] = ['create', 'list', 'add', 'remove', 'delete'];
 const WAIT_UNTILS: readonly WaitUntil[] = ['all_replied', 'any_replied'];
 
@@ -1317,22 +1317,30 @@ export class Broker {
 }
 
 // A socket file left by a broker that died without cleanup blocks listen
-// with EADDRINUSE. Remove it when nothing answers on it; refuse when a live
-// broker does.
+// with EADDRINUSE. Remove it only when the probe proves nothing listens there
+// (refused, or not a socket at all: ENOTSOCK on macOS, ECONNREFUSED on Linux).
+// Refuse when a live broker answers or when the probe says nothing, such as a
+// CLI sandbox denying Unix sockets: removing the file would cut a live broker
+// off from every new client.
+const STALE_PROBE_CODES = new Set(['ECONNREFUSED', 'ENOTSOCK']);
+
 async function clearStaleSocket(socketPath: string): Promise<void> {
   if (!existsSync(socketPath)) {
     return;
   }
-  const answered = await new Promise<boolean>((resolve) => {
+  const probeError = await new Promise<NodeJS.ErrnoException | null>((resolve) => {
     const probe = createConnection(socketPath);
     probe.once('connect', () => {
       probe.destroy();
-      resolve(true);
+      resolve(null);
     });
-    probe.once('error', () => resolve(false));
+    probe.once('error', (err: NodeJS.ErrnoException) => resolve(err));
   });
-  if (answered) {
+  if (probeError === null) {
     throw new Error('murmur: a broker is already listening on ' + socketPath);
+  }
+  if (!STALE_PROBE_CODES.has(String(probeError.code))) {
+    throw new Error('murmur: cannot probe ' + socketPath + ' (' + String(probeError.code) + '); not removing it');
   }
   unlinkSync(socketPath);
 }
