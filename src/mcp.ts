@@ -267,8 +267,11 @@ async function register(client: MurmurClient, identity: Identity): Promise<void>
 // answered within the attempts or the server is going away meanwhile (a try
 // may start a broker, which a session that is gone must not do).
 async function reconnect(paths: MurmurPaths, identity: Identity, stopping: () => boolean): Promise<MurmurClient | null> {
-  for (let attempt = 0; attempt < RECONNECT_ATTEMPTS && !stopping(); attempt += 1) {
+  for (let attempt = 0; attempt < RECONNECT_ATTEMPTS; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, RECONNECT_DELAY_MS));
+    if (stopping()) {
+      return null;
+    }
     let client: MurmurClient | undefined;
     try {
       client = await connect(paths);

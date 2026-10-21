@@ -247,6 +247,7 @@ describe('runMcpServer fault tolerance', () => {
     process.env.MURMUR_HOME = stack.home;
     process.env.MURMUR_HANDLE = 'mcp-gone';
     const exitSpy = vi.spyOn(process, 'exit');
+    const connectSpy = vi.spyOn(MurmurClient, 'connect');
     const stdin = new PassThrough();
     const before = fakeStdio.started;
     try {
@@ -257,13 +258,15 @@ describe('runMcpServer fault tolerance', () => {
       await new Promise((resolve) => {
         setTimeout(resolve, 600);
       });
-      const closedAt = Date.now();
+      const attemptsAtClose = connectSpy.mock.calls.length;
+      expect(attemptsAtClose).toBeGreaterThan(0);
       stdin.destroy();
       await up;
-      // All 20 attempts would take about 5 s; it ends at the next one instead.
-      expect(Date.now() - closedAt).toBeLessThan(2000);
+      // No connect attempt (which could start a broker) begins after the close.
+      expect(connectSpy.mock.calls.length).toBe(attemptsAtClose);
       expect(exitSpy).not.toHaveBeenCalled();
     } finally {
+      connectSpy.mockRestore();
       exitSpy.mockRestore();
       delete process.env.MURMUR_HOME;
       delete process.env.MURMUR_HANDLE;
