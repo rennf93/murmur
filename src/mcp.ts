@@ -6,6 +6,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { MurmurClient, connectBroker } from './client.js';
 import { getPaths, readToken } from './config.js';
+import type { MurmurPaths } from './config.js';
 import { currentHost } from './proc.js';
 import type { HostInfo } from './proc.js';
 import { HANDLE_RE, MurmurError, WAIT_DEFAULT_MS, WAIT_MAX_MS } from './protocol.js';
@@ -73,7 +74,7 @@ export function identityFor(host: HostInfo | null, env: NodeJS.ProcessEnv, cwd: 
   return { host: { hostPid: host.hostPid, hostStart: host.hostStart }, client: clientFromEnv(env), cwd };
 }
 
-export function buildMcpServer(client: MurmurClient, identity: Identity = {}): McpServer {
+export function buildMcpServer(client: Pick<MurmurClient, 'request'>, identity: Identity = {}): McpServer {
   const server = new McpServer({ name: 'murmur', version: VERSION }, { instructions: INSTRUCTIONS });
 
   server.registerTool('murmur_name', {
@@ -233,23 +234,19 @@ export function buildMcpServer(client: MurmurClient, identity: Identity = {}): M
   return server;
 }
 
-export async function runMcpServer(stdin: Readable = process.stdin): Promise<void> {
-  const paths = getPaths();
-  const identity = identityFor(currentHost(undefined, false), process.env, process.cwd());
-  let client: MurmurClient;
-  try {
-    const token = readToken(paths);
-    client = await connectBroker({ socketPath: paths.socketPath, token });
-  } catch (err) {
-    const code = err instanceof MurmurError ? err.code : 'internal';
-    process.stderr.write(
-      'murmur mcp: cannot connect to broker at ' + paths.socketPath + ' (' + code + '): ' + (err as Error).message + '\n',
-    );
-    process.exit(1);
-  }
-  // MURMUR_HANDLE is an optional per-process override; anything invalid
-  // (like an old CHANGE-ME placeholder) or already taken is ignored so the
-  // server still starts under its session's own handle.
+// Retries after the broker connection drops: a restart or an upgrade takes a
+// moment, and the murmur bin starts a broker itself when none answers.
+const RECONNECT_ATTEMPTS = 20;
+const RECONNECT_DELAY_MS = 250;
+
+async function connect(paths: MurmurPaths): Promise<MurmurClient> {
+  return connectBroker({ socketPath: paths.socketPath, token: readToken(paths) });
+}
+
+// MURMUR_HANDLE is an optional per-process override; anything invalid
+// (like an old CHANGE-ME placeholder) or already taken is ignored so the
+// server still registers under its session's own handle.
+async function register(client: MurmurClient, identity: Identity): Promise<void> {
   const explicit = process.env.MURMUR_HANDLE;
   const wanted = explicit !== undefined && HANDLE_RE.test(explicit) ? explicit : undefined;
   const base: Omit<RegisterMessage, 'v' | 'id'> =
@@ -257,35 +254,88 @@ export async function runMcpServer(stdin: Readable = process.stdin): Promise<voi
       ? { type: 'register', handle: wanted ?? 'anon-' + String(process.pid), clientKind: 'mcp' }
       : { ...identity, type: 'register', clientKind: 'mcp' };
   try {
-    try {
-      await client.request<RegisterResult>(wanted !== undefined && identity.host !== undefined ? { ...base, handle: wanted } : base);
-    } catch (err) {
-      if (wanted === undefined || identity.host === undefined) {
-        throw err;
-      }
-      await client.request<RegisterResult>(base);
+    await client.request<RegisterResult>(wanted !== undefined && identity.host !== undefined ? { ...base, handle: wanted } : base);
+  } catch (err) {
+    if (wanted === undefined || identity.host === undefined) {
+      throw err;
     }
+    await client.request<RegisterResult>(base);
+  }
+}
+
+// A new registered connection for the same session, or null when no broker
+// answered within the attempts or the server is going away meanwhile (a try
+// may start a broker, which a session that is gone must not do).
+async function reconnect(paths: MurmurPaths, identity: Identity, stopping: () => boolean): Promise<MurmurClient | null> {
+  for (let attempt = 0; attempt < RECONNECT_ATTEMPTS; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, RECONNECT_DELAY_MS));
+    if (stopping()) {
+      return null;
+    }
+    let client: MurmurClient | undefined;
+    try {
+      client = await connect(paths);
+      await register(client, identity);
+      return client;
+    } catch {
+      client?.close();
+    }
+  }
+  return null;
+}
+
+export async function runMcpServer(stdin: Readable = process.stdin): Promise<void> {
+  const paths = getPaths();
+  const identity = identityFor(currentHost(undefined, false), process.env, process.cwd());
+  let client: MurmurClient;
+  try {
+    client = await connect(paths);
+  } catch (err) {
+    const code = err instanceof MurmurError ? err.code : 'internal';
+    process.stderr.write(
+      'murmur mcp: cannot connect to broker at ' + paths.socketPath + ' (' + code + '): ' + (err as Error).message + '\n',
+    );
+    process.exit(1);
+  }
+  try {
+    await register(client, identity);
   } catch (err) {
     const code = err instanceof MurmurError ? err.code : 'internal';
     process.stderr.write('murmur mcp: broker rejected registration (' + code + '): ' + (err as Error).message + '\n');
     process.exit(1);
   }
+  // Set when the server is going away on purpose: no reconnect then.
+  let stopping = false;
   // Tear the broker connection down when the process exits so the broker
   // marks this session offline promptly.
   process.on('exit', () => {
+    stopping = true;
     client.close();
   });
-  const server = buildMcpServer(client, identity);
+  // The tools go through whichever connection is current, so a reconnect
+  // keeps them working without the CLI restarting this server.
+  const server = buildMcpServer({ request: <T>(msg: Parameters<MurmurClient['request']>[0]) => client.request<T>(msg) }, identity);
   await server.connect(new StdioServerTransport(stdin));
-  // This long-lived broker connection is the session's presence, so the
-  // server lives exactly as long as its client: it ends when stdin closes
-  // (the CLI exited or was killed; the SDK transport does not watch for
-  // that) or when the broker connection drops, instead of lingering with a
-  // dead session.
-  await new Promise<void>((resolve) => {
-    client.onClosed = resolve;
+  // This long-lived broker connection is the session's presence. The server
+  // ends when stdin closes (the CLI exited or was killed; the SDK transport
+  // does not watch for that). When the broker connection drops it connects
+  // and registers again, and ends only if no broker answers.
+  const ended = new Promise<void>((resolve) => {
     stdin.once('end', resolve);
     stdin.once('close', resolve);
+  }).then(() => {
+    stopping = true;
   });
+  let next: MurmurClient | null = client;
+  while (next !== null) {
+    client = next;
+    await Promise.race([
+      ended,
+      new Promise<void>((resolve) => {
+        client.onClosed = resolve;
+      }),
+    ]);
+    next = stopping ? null : await reconnect(paths, identity, () => stopping);
+  }
   client.close();
 }

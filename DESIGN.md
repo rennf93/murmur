@@ -23,7 +23,7 @@ One broker process owns all state. Everything else is a thin client over one new
 - **Store, `src/store.ts`.** SQLite via better-sqlite3, WAL, synchronous. Tables: `peers`, `sessions`, `groups`, `group_members`, `threads`, `messages` (`UNIQUE (thread_id, seq)`), `deliveries` (one state machine per message and recipient), `native_transports`. Files are 0600.
 - **Hooks, `src/hooks.ts`.** One entry for Claude, Codex, Gemini and zcode. Each event sends a `session` message, then pulls queued messages and hands them back in that CLI's dialect.
 - **Adapters, `adapters/`.** In-process clients for CLIs whose extension systems can hold a connection: `adapters/opencode/murmur.ts` (plugin), `adapters/hummin/murmur.ts` (extension).
-- **MCP server, `src/mcp.ts`.** Eight tools over one long-lived connection, plus instructions that remind the model a message is a claim to verify.
+- **MCP server, `src/mcp.ts`.** Eight tools over one long-lived connection, plus instructions that remind the model a message is a claim to verify. When the broker connection drops (a restart or an upgrade) it connects and registers again as the same session, so the CLI keeps its tools; it ends when its stdin closes or no broker answers.
 - **CLI, `src/cli.ts`.** `init`, `serve`, `mcp`, `hook`, `send`, `reply`, `name`, `slash`, `prune`, `status`, `thread`, `groups`, `install`.
 
 ## Identity
