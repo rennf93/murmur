@@ -5,4 +5,8 @@ accept = ["200..=299", "429"]
 exclude = [
   # npmjs.com answers 403 to non-browser clients (bot protection); the package is checked with `npm view murmur-it` instead.
   '^https://www\.npmjs\.com/',
+  # The CHANGELOG footer's [Unreleased] compare link and the new version's tag link 404 in the release PR,
+  # because the tag is pushed after that PR merges.
+  '^https://github\.com/rennf93/murmur/compare/',
+  '^https://github\.com/rennf93/murmur/releases/tag/',
 ]
