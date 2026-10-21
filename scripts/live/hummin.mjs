@@ -30,6 +30,12 @@ try {
     .catch(() => r.deliveries(messageId));
   log('ask delivery', JSON.stringify(final));
   const reply = r.db.prepare('SELECT sender, body FROM messages WHERE in_reply_to = ?').get(messageId);
+  await r.restartBroker();
+  const second = r.send(session.handle, ASK + ' (after a broker restart)');
+  const final2 = await until('replied after restart', () => (r.deliveries(second.messageId)[0].state === 'replied' ? r.deliveries(second.messageId) : null), 120000)
+    .catch(() => r.deliveries(second.messageId));
+  log('ask delivery after restart', JSON.stringify(final2));
+  const reply2 = r.db.prepare('SELECT sender, body FROM messages WHERE in_reply_to = ?').get(second.messageId);
   await r.type('mlH', '/murmur ' + session.handle + ' ' + SLASH_TEXT);
   const slash = await until('slash message', () => r.db.prepare('SELECT sender, body FROM messages WHERE body LIKE ?').get('owner check:%'), 20000).catch(() => null);
   await wait(1000);
@@ -39,6 +45,7 @@ try {
     ['delivery went sent, delivered (extension ack), replied', final[0].state === 'replied' && final[0].sent && final[0].delivered, JSON.stringify(final)],
     ['the reply came from the session through murmur_reply', reply?.sender === session.handle, JSON.stringify(reply)],
     ['/murmur stored the text verbatim as the owner', slash?.body === SLASH_TEXT && slash?.sender === 'renn', JSON.stringify(slash)],
+    ['a second ask after a broker restart reached replied from the same session handle, no CLI restart', final2[0].state === 'replied' && reply2?.sender === session.handle, JSON.stringify([final2, reply2])],
   ]);
 } finally {
   r.cleanup();
