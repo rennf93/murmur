@@ -103,6 +103,8 @@ interface Waiter {
   timer: NodeJS.Timeout;
   // Ids of replies held back for this wait; the handover returns them even if the latest ask moved on.
   held: Set<number>;
+  // timeoutMs 0 asks for the state now; it never waited, so its result carries no timeout note.
+  snapshot: boolean;
 }
 
 interface NotifyEntry {
@@ -1123,6 +1125,7 @@ export class Broker {
       threadId,
       until,
       held: new Set<number>(),
+      snapshot: timeoutMs === 0,
       timer: setTimeout(() => this.resolveTimedOut(waiter), timeoutMs),
     };
     conn.waiters.add(waiter);
@@ -1217,11 +1220,14 @@ export class Broker {
       return;
     }
     try {
+      const matrix = this.matrixFor(waiter.threadId);
+      const note = waiter.snapshot ? null : timeoutNote(matrix);
       this.replyOk(waiter.conn.socket, waiter.id, {
         threadId: waiter.threadId,
         conditionMet: false,
         timedOut: true,
-        matrix: this.matrixFor(waiter.threadId),
+        matrix,
+        ...(note === null ? {} : { note }),
         replies: this.takeReplies(waiter.threadId, waiter.conn.handle, waiter.held),
       });
     } catch {
@@ -1343,4 +1349,25 @@ async function clearStaleSocket(socketPath: string): Promise<void> {
     throw new Error('murmur: cannot probe ' + socketPath + ' (' + String(probeError.code) + '); not removing it');
   }
   unlinkSync(socketPath);
+}
+
+// What a timed-out asker is told: who has the message but is silent, whose receipt
+// is unproven (queued or sent), and not to start work that could overlap theirs.
+// Null when everyone replied.
+function timeoutNote(matrix: RecipientMatrix[]): string | null {
+  const names = (states: string[]): string[] => matrix.filter((m) => states.includes(m.state)).map((m) => m.recipient);
+  const silent = names(['delivered', 'acknowledged']);
+  const unreached = names(['queued', 'sent']);
+  const clauses: string[] = [];
+  if (silent.length > 0) {
+    const v = silent.length > 1 ? 'have' : 'has';
+    clauses.push(`${silent.join(', ')} ${v} the message but ${v} not replied`);
+  }
+  if (unreached.length > 0) {
+    clauses.push(`${unreached.join(', ')} ${unreached.length > 1 ? 'have' : 'has'} not confirmed receipt`);
+  }
+  if (clauses.length === 0) {
+    return null;
+  }
+  return `timed out: ${clauses.join('; ')}. Do not start work that could overlap theirs: ask the user, or murmur_wait again.`;
 }

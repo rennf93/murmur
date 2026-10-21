@@ -1226,6 +1226,56 @@ describe('wait', () => {
     expect(result.matrix[0]).toMatchObject({ recipient: 'bob', state: 'queued' });
   });
 
+  it('tells a timed-out asker who has the message but is silent and whose receipt is unproven', async () => {
+    const stack = await buildStack();
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    const carol = await connectPeer(stack, { handle: 'carol' });
+    await connectPeer(stack, { handle: 'dave' });
+    const ask = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob', 'carol', 'dave'], body: 'slow' });
+    for (const peer of [bob, carol]) {
+      await req<ReadResult>(peer.client, { type: 'read', ids: [ask.messageId] });
+      await req<AckResult>(peer.client, { type: 'ack', ids: [ask.messageId] });
+    }
+    const result = await req<WaitResult>(alice.client, { type: 'wait', threadId: ask.threadId, until: 'all_replied', timeoutMs: 100 });
+    expect(result.note).toBe(
+      'timed out: bob, carol have the message but have not replied; dave has not confirmed receipt. Do not start work that could overlap theirs: ask the user, or murmur_wait again.',
+    );
+  });
+
+  it('words the note for a single silent recipient', async () => {
+    const stack = await buildStack();
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    const ask = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'slow' });
+    await req<ReadResult>(bob.client, { type: 'read', ids: [ask.messageId] });
+    const result = await req<WaitResult>(alice.client, { type: 'wait', threadId: ask.threadId, until: 'all_replied', timeoutMs: 100 });
+    expect(result.note).toMatch(/^timed out: bob has the message but has not replied\. Do not start/);
+  });
+
+  it('omits the have-the-message clause when every silent recipient is still queued', async () => {
+    const stack = await buildStack();
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    await connectPeer(stack, { handle: 'bob' });
+    await connectPeer(stack, { handle: 'carol' });
+    const ask = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob', 'carol'], body: 'slow' });
+    const result = await req<WaitResult>(alice.client, { type: 'wait', threadId: ask.threadId, until: 'all_replied', timeoutMs: 100 });
+    expect(result.note).toBe(
+      'timed out: bob, carol have not confirmed receipt. Do not start work that could overlap theirs: ask the user, or murmur_wait again.',
+    );
+  });
+
+  it('sets no note when the wait condition is met', async () => {
+    const stack = await buildStack();
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    const bob = await connectPeer(stack, { handle: 'bob' });
+    const ask = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'quick' });
+    await req<ReplyResult>(bob.client, { type: 'reply', messageId: ask.messageId, body: 'ok' });
+    const result = await req<WaitResult>(alice.client, { type: 'wait', threadId: ask.threadId, until: 'all_replied', timeoutMs: 100 });
+    expect(result.conditionMet).toBe(true);
+    expect('note' in result).toBe(false);
+  });
+
   it('times out on a thread without an ask and returns an empty matrix', async () => {
     const stack = await buildStack();
     const alice = await connectPeer(stack, { handle: 'alice' });
