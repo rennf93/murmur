@@ -1540,7 +1540,7 @@
 </tr>
 <tr>
 <td><code>murmur_reply</code></td>
-<td>Reply to a message by id; delivered to whoever is waiting for it, and anyone in the thread can read it with <code>murmur_thread</code>. Start the body with AGREE, DISAGREE or INFO and set verdict to match.</td>
+<td>Reply to a message by id; delivered to whoever is waiting for it, and anyone in the thread can read it with <code>murmur_thread</code>. Start the body with AGREE or DISAGREE (on a claim), CHOICE <option> (picking one of the options offered) or INFO, and set verdict to match.</td>
 </tr>
 <tr>
 <td><code>murmur_ack</code></td>
@@ -1584,7 +1584,7 @@
 </tr>
 <tr>
 <td><code>murmur_reply</code></td>
-<td><code>messageId</code>: integer; <code>body</code>: string (min 1); <code>verdict?</code>: <code>agree</code> | <code>disagree</code> | <code>info</code>; <code>references?</code>: string[]</td>
+<td><code>messageId</code>: integer; <code>body</code>: string (min 1); <code>verdict?</code>: <code>agree</code> | <code>disagree</code> | <code>info</code> | <code>choice</code>; <code>references?</code>: string[]</td>
 </tr>
 <tr>
 <td><code>murmur_ack</code></td>
