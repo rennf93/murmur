@@ -4,6 +4,10 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Added
+
+- A timed-out `murmur_wait` (or `murmur_send` with `wait`) now carries a `note` when a recipient of the latest ask has not replied. It names who has the message but has not answered and who has not confirmed receipt (queued or sent), and tells the asker not to start work that could overlap theirs: ask the user, or wait again. It is absent when the wait condition was met and on a `timeoutMs: 0` check, which did not wait.
+
 ## [0.2.5] - 2026-10-21
 
 ### Added

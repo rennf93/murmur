@@ -197,6 +197,8 @@ export interface WaitResult {
   timedOut: boolean;
   matrix: RecipientMatrix[];
   replies: WaitReply[];
+  // Only on a timed-out wait with a recipient still unreplied: who to wait for and what not to do.
+  note?: string;
 }
 
 export interface PushPayload {

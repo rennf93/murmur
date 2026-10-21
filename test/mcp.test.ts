@@ -292,11 +292,14 @@ describe('SDK conformance over InMemoryTransport', () => {
     const instant = await call<WaitResult>(sdk, 'murmur_wait', { threadId: sent.threadId, until: 'all_replied', timeoutMs: 0 });
     expect(Date.now() - now).toBeLessThan(500);
     expect(instant).toMatchObject({ threadId: sent.threadId, conditionMet: false, timedOut: true });
+    // A snapshot did not wait, so it carries no advice about waiting.
+    expect('note' in instant).toBe(false);
     expect(instant.matrix[0]).toMatchObject({ recipient: 'peerone', verdict: null });
     const started = Date.now();
     const waited = await call<WaitResult>(sdk, 'murmur_wait', { threadId: sent.threadId, until: 'all_replied', timeoutMs: 1000 });
     expect(Date.now() - started).toBeGreaterThanOrEqual(900);
     expect(waited).toMatchObject({ conditionMet: false, timedOut: true });
+    expect(waited.note).toContain('Do not start work that could overlap theirs: ask the user, or murmur_wait again.');
   });
 
   it('murmur_send with wait sends and returns the wait result in one call, resolving a display name', async () => {

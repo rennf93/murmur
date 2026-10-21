@@ -24,7 +24,7 @@ Every client message carries `v` (protocol version) and `id` (a per-connection m
 | `inbox` | `unreadOnly` | `{handle, unreadTotal, threads}` |
 | `thread` | `threadId`, `sinceSeq` (or null), `full`, `messageId?` (only that message and its replies, full bodies; `bad_request` if not in the thread) | `{threadId, latestSeq, messages}` |
 | `collect` | `threadId` | `{threadId, askMessageId, recipients, verdictTally}` |
-| `wait` | `threadId`, `until` (`all_replied`\|`any_replied`), `timeoutMs` | `{threadId, conditionMet, timedOut, matrix}` |
+| `wait` | `threadId`, `until` (`all_replied`\|`any_replied`), `timeoutMs` | `{threadId, conditionMet, timedOut, matrix, replies, note?}` (`note` is set only on a timeout with a recipient still unreplied, never for `timeoutMs` 0: who has the message but is silent, whose receipt is unproven, and an instruction not to start overlapping work but to ask the user or wait again) |
 | `groups` | `action` (`create`\|`list`\|`add`\|`remove`\|`delete`), `name?`, `members?` | group records |
 | `status` | none | `{now, peers}` |
 | `prune` | none | `{removed}` (handles of the deleted peers) |

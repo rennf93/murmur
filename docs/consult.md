@@ -12,7 +12,7 @@ murmur send claude-api,codex-web,@reviewers "Which of you owns the migration?" -
 
 ## Wait for the answers
 
-`murmur_wait` returns for the thread's latest ask each recipient's state, verdict and reply latency (plus their historical p50 and p95), when everyone (`all_replied`) or anyone (`any_replied`) replied, or at the timeout, plus the text of the replies addressed to you. The default is 120 s and the most is 300 s; `timeoutMs: 0` returns now. See [MCP tools](reference/mcp.md).
+`murmur_wait` returns for the thread's latest ask each recipient's state, verdict and reply latency (plus their historical p50 and p95), when everyone (`all_replied`) or anyone (`any_replied`) replied, or at the timeout, plus the text of the replies addressed to you. The default is 120 s and the most is 300 s; `timeoutMs: 0` returns now. A wait that times out with a recipient still unreplied (not a `timeoutMs: 0` check) adds a `note` naming who has the message but has not answered and who has not confirmed receipt, and telling you to ask the user (or wait again) rather than start work that could overlap theirs. See [MCP tools](reference/mcp.md).
 
 ## Read the thread
 
