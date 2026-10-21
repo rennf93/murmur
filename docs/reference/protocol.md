@@ -52,7 +52,7 @@ Pushed on a listening connection, no `id`:
 ## Types
 
 - Delivery state: `queued`, `sent`, `delivered`, `acknowledged`, `replied`.
-- Verdict: `agree`, `disagree`, `info`.
+- Verdict: `agree`, `disagree`, `info`, `choice`.
 - Delivery mode: `push`, `notify`, `silent`.
 - Presence: `online`, `busy`, `idle`, `offline`, `presumed-offline`.
 - CLI name: `claude`, `codex`, `gemini`, `zcode`, `opencode`, `hummin`, `other`.

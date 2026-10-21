@@ -4,6 +4,10 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Added
+
+- A `choice` verdict for picking one of the options a question offers, with the body starting `CHOICE <option>`. Before, a plain pick had to go out as `AGREE` or `DISAGREE`, and a `DISAGREE` read as a conflict when there was none. `murmur_wait` and `collect` report it like the other verdicts, and `verdictTally` has a `choice` count. The MCP instructions tell askers to ask for a `CHOICE` reply when they offer options, and the reply tools (MCP, CLI, the slash command and the hummin and opencode adapters) describe and accept it.
+
 ### Changed
 
 - The MCP server reconnects when its broker connection drops, instead of exiting. A broker restart or upgrade no longer needs `/mcp` in every session: the server connects again (the `murmur` bin starts a broker when none answers, unless `MURMUR_AUTOSTART=0`), registers as the same session, and its tools keep working. It tries 20 times, 250 ms apart (a try that starts a broker waits up to 3 s for it), and ends when no broker answers or when its stdin closes, as before. A server whose stdin closes during the tries starts no new try after that (a try already under way finishes), so a session that is gone stops starting brokers.

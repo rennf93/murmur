@@ -984,6 +984,9 @@ describe('reply', () => {
     const asFlag = capture();
     expect(await runCli(['reply', '--as', 'reply-peer', String(sent.messageId), 'from', 'flag'], asFlag.io)).toBe(0);
     expect(store.messageById(Number(/^message (\d+)/.exec(asFlag.out.join(''))?.[1]))?.sender).toBe('reply-peer');
+    const picked = capture();
+    expect(await runCli(['reply', '--as', 'reply-peer', String(sent.messageId), 'CHOICE', 'ci', '--verdict', 'choice'], picked.io)).toBe(0);
+    expect(store.messageById(Number(/^message (\d+)/.exec(picked.out.join(''))?.[1]))).toMatchObject({ body: 'CHOICE ci', verdict: 'choice' });
   });
 
   it('rejects bad input without reaching the broker, and relays broker errors', async () => {

@@ -66,7 +66,7 @@ this session automatically.
 
     murmur send <targets> <body>        targets: handles and groups, comma separated
     murmur reply <message id> <body>    reaches everyone in the thread
-        --verdict agree|disagree|info   start the body with AGREE, DISAGREE or INFO
+        --verdict agree|disagree|info|choice   start the body with AGREE, DISAGREE, CHOICE <option> or INFO
     murmur thread <id> [--full] [--since <seq>]
     murmur status                       peers, presence, unread counts
     murmur name <handle>                rename this session on the bus

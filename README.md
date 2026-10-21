@@ -116,7 +116,7 @@ What a session sees for every message, on every path:
 - One message, one id, fanned out. Targets are handles and groups: `@name` is always a group; a bare name is a handle, or the group of that name when no peer has that handle. Overlapping groups dedupe.
 - A reply is stored once in the thread and goes only to whoever is waiting for it (the author of the message it answers and the session an owner message was typed in), in the parent's mode; everyone in the thread can read it with `murmur_thread` / `murmur thread`, and `murmur_wait` returns the replies' text. `murmur_thread` with `messageId` (`murmur thread <id> --message <m>`) returns one question and its replies, not the whole thread. To consult several sessions, send once to all of them.
 - Every message has a per-thread monotonic `seq`. `murmur_thread` returns first lines by default, full bodies with `full`, and only newer messages with `sinceSeq`.
-- Verdicts: `agree`, `disagree`, `info`, with the body starting `AGREE`, `DISAGREE` or `INFO`. `murmur_wait` returns, for the thread's latest ask, each recipient's state, verdict and reply latency plus their historical p50 and p95, plus the text of the replies addressed to the waiter, either when everyone (or anyone) replied or at the timeout (`timeoutMs: 0` returns now).
+- Verdicts: `agree`, `disagree`, `info` and `choice`, with the body starting `AGREE`, `DISAGREE`, `INFO` or `CHOICE <option>`. `choice` answers a question that offers options, so picking one does not read as a disagreement. `murmur_wait` returns, for the thread's latest ask, each recipient's state, verdict and reply latency plus their historical p50 and p95, plus the text of the replies addressed to the waiter, either when everyone (or anyone) replied or at the timeout (`timeoutMs: 0` returns now).
 - `references` carries pointers (paths, commits, URLs) so artifacts stay in their repos.
 - Groups: create, list, add, remove, delete. Deleting a group never touches sessions, threads or history.
 
@@ -128,7 +128,7 @@ The human surface, as the owner:
 
 - `/murmur <group | @group | handle[,more]> <message>`; bare `/murmur` lists peers and groups. In Claude Code and zcode the command file runs `murmur slash --stdin` with the message in a quoted heredoc, so quotes, `$(...)`, backticks and `;` arrive verbatim (Claude Code turns a word-initial `!` into `\!` before the shell sees it; `--claude-escaped` turns it back); the model only shows the output. Hummin's `/murmur` runs with no model turn at all.
 - `murmur send <targets> <body...> [--mode push|notify|silent] [--refs a,b] [--thread <id>] [--as <handle>]`
-- `murmur reply <id> <body...> [--verdict agree|disagree|info] [--refs a,b] [--as <handle>]`
+- `murmur reply <id> <body...> [--verdict agree|disagree|info|choice] [--refs a,b] [--as <handle>]`
 - `murmur status`, `murmur thread <id> [--since <seq>] [--full] [--message <id>]`, `murmur groups [list|create|add|remove|delete] ...`, `murmur name <handle>`, `murmur prune` (removes peers with no session, message, delivery, group membership or live connection, such as v0.1 leftovers, and prints their handles)
 
 ## Limits

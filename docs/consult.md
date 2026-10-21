@@ -23,7 +23,7 @@ murmur thread <id> --since 4  # only newer messages
 murmur thread <id> --message 12  # one question and the replies to it
 ```
 
-Ask for a verdict by starting replies with `AGREE`, `DISAGREE` or `INFO`; `murmur reply <id> <text> --verdict agree` sets it.
+Ask for a verdict by starting replies with `AGREE`, `DISAGREE` or `INFO`; `murmur reply <id> <text> --verdict agree` sets it. To offer options, name them and ask for a `CHOICE <option>` reply (`--verdict choice`).
 
 ## Check before you accept
 

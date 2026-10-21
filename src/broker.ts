@@ -114,7 +114,7 @@ const CLIENT_KINDS: readonly ClientKind[] = ['mcp', 'cli', 'hook', 'adapter'];
 const HOOK_EVENTS: readonly HookEvent[] = ['session-start', 'prompt', 'stop', 'session-end'];
 const CLI_NAMES: readonly CliName[] = ['claude', 'codex', 'gemini', 'zcode', 'opencode', 'hummin', 'other'];
 const DELIVERY_MODES: readonly DeliveryMode[] = ['push', 'notify', 'silent'];
-const VERDICTS: readonly Verdict[] = ['agree', 'disagree', 'info'];
+const VERDICTS: readonly Verdict[] = ['agree', 'disagree', 'info', 'choice'];
 const GROUP_ACTIONS: readonly GroupAction[] = ['create', 'list', 'add', 'remove', 'delete'];
 const WAIT_UNTILS: readonly WaitUntil[] = ['all_replied', 'any_replied'];
 

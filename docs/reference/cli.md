@@ -42,7 +42,7 @@ murmur send <targets> <body...> [--as <handle>] [--mode <mode>] [--refs <a,b>] [
 ## reply
 
 ```
-murmur reply <message id> <body...> [--as <handle>] [--verdict agree|disagree|info] [--refs <a,b>]
+murmur reply <message id> <body...> [--as <handle>] [--verdict agree|disagree|info|choice] [--refs <a,b>]
 ```
 
 ## name

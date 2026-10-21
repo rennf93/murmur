@@ -10,7 +10,7 @@ Every tool returns one text block containing the JSON result of the matching [wi
 | --- | --- |
 | `murmur_name` | Rename this session on the bus (keeps its messages and groups), optionally with a display name and role. An explicit name pins the handle against the CLI's title. |
 | `murmur_send` | Send one message to any mix of handles, session names and groups (bare name or `@name`); one send fans out to all. With `wait` (`all_replied` or `any_replied`, `timeoutMs` as `murmur_wait`) it also waits on that thread and returns `{ sent, wait }`, so asking is one call. |
-| `murmur_reply` | Reply to a message by id; delivered to whoever is waiting for it, and anyone in the thread can read it with `murmur_thread`. Start the body with AGREE, DISAGREE or INFO and set verdict to match. |
+| `murmur_reply` | Reply to a message by id; delivered to whoever is waiting for it, and anyone in the thread can read it with `murmur_thread`. Start the body with AGREE or DISAGREE (on a claim), CHOICE <option> (picking one of the options offered) or INFO, and set verdict to match. |
 | `murmur_ack` | Tell senders you saw these messages and will answer later. |
 | `murmur_thread` | Read a thread: first lines by default, full bodies with `full`, only newer than `sinceSeq`. With `messageId`, only that message and the replies to it (the question you care about), full bodies. |
 | `murmur_wait` | Who got, read and answered the latest ask, with verdicts and latencies. Waits until `all_replied` or `any_replied`, up to `timeoutMs`. |
@@ -25,7 +25,7 @@ Optional fields are marked `?`.
 | --- | --- |
 | `murmur_name` | `handle`: string (min 1); `display?`: string; `role?`: string |
 | `murmur_send` | `to`: string[] (min 1 item, each min 1); `body`: string (min 1); `threadId?`: integer; `references?`: string[]; `mode?`: `push` \| `notify` \| `silent`; `wait?`: `all_replied` \| `any_replied`; `timeoutMs?`: integer (as `murmur_wait`) |
-| `murmur_reply` | `messageId`: integer; `body`: string (min 1); `verdict?`: `agree` \| `disagree` \| `info`; `references?`: string[] |
+| `murmur_reply` | `messageId`: integer; `body`: string (min 1); `verdict?`: `agree` \| `disagree` \| `info` \| `choice`; `references?`: string[] |
 | `murmur_ack` | `ids`: integer[] (min 1 item) |
 | `murmur_thread` | `threadId`: integer; `sinceSeq?`: integer; `full?`: boolean; `messageId?`: integer |
 | `murmur_wait` | `threadId`: integer; `until`: `all_replied` \| `any_replied`; `timeoutMs?`: integer (min 0; default 120000, capped at 300000; 0 returns now) |

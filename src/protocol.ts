@@ -18,7 +18,7 @@ export const HANDLE_RE = /^[a-z0-9][a-z0-9-]{1,47}$/;
 export const PROOF_POLL_MS = 120000;
 
 export type DeliveryState = 'queued' | 'sent' | 'delivered' | 'acknowledged' | 'replied';
-export type Verdict = 'agree' | 'disagree' | 'info';
+export type Verdict = 'agree' | 'disagree' | 'info' | 'choice';
 export type DeliveryMode = 'push' | 'notify' | 'silent';
 export type PresenceKind = 'online' | 'busy' | 'idle' | 'offline' | 'presumed-offline';
 export type ClientKind = 'mcp' | 'cli' | 'hook' | 'adapter';
