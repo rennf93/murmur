@@ -4,6 +4,8 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-10-21
+
 ### Added
 
 - A timed-out `murmur_wait` (or `murmur_send` with `wait`) now carries a `note` when a recipient of the latest ask has not replied. It names who has the message but has not answered and who has not confirmed receipt (queued or sent), and tells the asker not to start work that could overlap theirs: ask the user, or wait again. It is absent when the wait condition was met and on a `timeoutMs: 0` check, which did not wait.
@@ -141,7 +143,8 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 - Limits: send rate, duplicate window, thread and inbox caps.
 - 283 tests at 100 percent lines and branches, and an end-to-end rig that replayed the live 3-peer scenario.
 
-[Unreleased]: https://github.com/rennf93/murmur/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/rennf93/murmur/compare/v0.2.6...HEAD
+[0.2.6]: https://github.com/rennf93/murmur/releases/tag/v0.2.6
 [0.2.5]: https://github.com/rennf93/murmur/releases/tag/v0.2.5
 [0.2.4]: https://github.com/rennf93/murmur/releases/tag/v0.2.4
 [0.2.3]: https://github.com/rennf93/murmur/releases/tag/v0.2.3
