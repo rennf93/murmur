@@ -4,6 +4,8 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-10-21
+
 ### Added
 
 - A `choice` verdict for picking one of the options a question offers, with the body starting `CHOICE <option>`. Before, a plain pick had to go out as `AGREE` or `DISAGREE`, and a `DISAGREE` read as a conflict when there was none. `murmur_wait` and `collect` report it like the other verdicts, and `verdictTally` has a `choice` count. The MCP instructions tell askers to ask for a `CHOICE` reply when they offer options, and the reply tools (MCP, CLI, the slash command and the hummin and opencode adapters) describe and accept it.
@@ -135,7 +137,8 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 - Limits: send rate, duplicate window, thread and inbox caps.
 - 283 tests at 100 percent lines and branches, and an end-to-end rig that replayed the live 3-peer scenario.
 
-[Unreleased]: https://github.com/rennf93/murmur/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/rennf93/murmur/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/rennf93/murmur/releases/tag/v0.2.5
 [0.2.4]: https://github.com/rennf93/murmur/releases/tag/v0.2.4
 [0.2.3]: https://github.com/rennf93/murmur/releases/tag/v0.2.3
 [0.2.2]: https://github.com/rennf93/murmur/releases/tag/v0.2.2
