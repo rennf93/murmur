@@ -188,7 +188,7 @@ export function buildMcpServer(client: Pick<MurmurClient, 'request'>, identity: 
 
   server.registerTool('murmur_wait', {
     _meta: META,
-    description: 'Who got, read and answered the latest ask, with verdicts and latencies, plus the text of the replies addressed to you. Waits until all_replied or any_replied, up to timeoutMs (default 120000, max 300000; 0 returns now).',
+    description: 'Who got, read and answered the latest ask, with verdicts and latencies, plus the text of the replies addressed to you. Waits until all_replied or any_replied, up to timeoutMs (default 110000, max 300000; 0 returns now).',
     inputSchema: {
       threadId: z.number().int(),
       until: z.enum(['all_replied', 'any_replied']),

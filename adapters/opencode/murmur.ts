@@ -273,7 +273,7 @@ const plugin: Plugin = async ({ client, directory }) => {
           timeoutMs: s.number().optional(),
         },
         execute: (a, ctx) => {
-          const timeoutMs = Math.min(Math.max(a.timeoutMs ?? 120000, 0), 300000);
+          const timeoutMs = Math.min(Math.max(a.timeoutMs ?? 110000, 0), 300000);
           return ctxCall({ type: 'wait', threadId: a.threadId, until: a.until, timeoutMs }, ctx, timeoutMs + 10000);
         },
       }),

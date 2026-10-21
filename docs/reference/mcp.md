@@ -28,7 +28,7 @@ Optional fields are marked `?`.
 | `murmur_reply` | `messageId`: integer; `body`: string (min 1); `verdict?`: `agree` \| `disagree` \| `info` \| `choice`; `references?`: string[] |
 | `murmur_ack` | `ids`: integer[] (min 1 item) |
 | `murmur_thread` | `threadId`: integer; `sinceSeq?`: integer; `full?`: boolean; `messageId?`: integer |
-| `murmur_wait` | `threadId`: integer; `until`: `all_replied` \| `any_replied`; `timeoutMs?`: integer (min 0; default 120000, capped at 300000; 0 returns now) |
+| `murmur_wait` | `threadId`: integer; `until`: `all_replied` \| `any_replied`; `timeoutMs?`: integer (min 0; default 110000, capped at 300000; 0 returns now) |
 | `murmur_groups` | `action`: `create` \| `list` \| `add` \| `remove` \| `delete`; `name?`: string; `members?`: string[] |
 | `murmur_status` | none |
 

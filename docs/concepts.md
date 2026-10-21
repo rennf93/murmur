@@ -23,7 +23,7 @@ Every hook, MCP server and CLI command walks up its process ancestors and takes 
 ```
 [murmur m42 t7 s0 from ledger-3 to archify-2, prs-5]
 <body, cut at 4000 characters with a pointer to the full text>
-(answer with murmur_reply messageId 42, plain text never reaches the sender; from a shell: murmur reply 42 <text>; its replies: murmur_thread 7 messageId 42)
+(answer with murmur_reply messageId 42, plain text never reaches the sender; its replies: murmur_thread 7 messageId 42)
 ```
 
 ## Groups
@@ -78,7 +78,7 @@ A message for a session that is down stays `queued`; when that session comes bac
 - 20 sends per sender per 60 seconds; an identical send (sender, body, recipients) within 60 seconds is rejected as a duplicate. Replies count. In memory; reset on broker restart.
 - 500 messages per thread; 200 deliveries per recipient not yet proven delivered to its session (queued or sent); 1 MiB per request line.
 - Bodies are cut at 4000 characters for delivery; the full body is stored.
-- `murmur_wait`: default 120 s, at most 300 s.
+- `murmur_wait`: default 110 s, at most 300 s.
 - Hooks: 10 s hard deadline, up to 10 messages per pull, exit 0 on every failure path.
 - Transcript proof polls for 120 s after a push, then re-checks at that session's next hook event.
 - Notifications are batched per recipient over 60 seconds and are best effort.

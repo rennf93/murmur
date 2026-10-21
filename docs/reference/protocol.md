@@ -71,6 +71,6 @@ Pushed on a listening connection, no `id`:
 | Thread cap | 500 messages |
 | Unread cap | 200 per recipient |
 | Notification batch | 60000 ms |
-| Wait | default 120000 ms, max 300000 ms |
+| Wait | default 110000 ms, max 300000 ms |
 | First line length | 120 characters |
 | Proof poll | 120000 ms |

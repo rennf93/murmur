@@ -263,6 +263,7 @@ export class Broker {
     this.core = opts.core;
     this.nativeSendFn = opts.nativeSend ?? nativeSend;
     this.wakeFn = opts.wake ?? defaultWake;
+    this.core.hasTools = (handle) => this.presence.has(handle);
     this.proof = new ProofWatcher((messageId, recipient) => this.onProof(messageId, recipient), opts.proofPollMs);
   }
 
@@ -975,8 +976,9 @@ export class Broker {
       }
       const recipients = this.store.getDeliveries(message.id).map((d) => d.recipient);
       const full = fullOf(message);
-      const text = renderDelivery(full, message.deliveredBody, recipients);
-      await this.pushOne(message.id, message.threadId, handle, text, { message: full, mode: 'push', footer: replyFooter(full), text });
+      const shell = !this.presence.has(handle);
+      const text = renderDelivery(full, message.deliveredBody, recipients, shell);
+      await this.pushOne(message.id, message.threadId, handle, text, { message: full, mode: 'push', footer: replyFooter(full, shell), text });
     }
   }
 
@@ -1166,6 +1168,8 @@ export class Broker {
         // A reply held for this wait never waited on a session that was down:
         // no queued_delivered notice, which would wake the replier for nothing.
         this.markDeliveredHop(row.id, delivery.recipient, held?.has(row.id) !== true);
+        // The wait result is the asker's reading: seen, not unread.
+        this.store.markAcked(row.id, delivery.recipient, Date.now());
         replies.push({ id: row.id, seq: row.seq, sender: row.sender, verdict: row.verdict as Verdict | null, body: row.deliveredBody });
       }
     }

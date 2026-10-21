@@ -90,7 +90,7 @@ Every hook, MCP server and CLI command walks up its process ancestors and takes 
 
 ## Delivery truth table
 
-Delivery states, per recipient: `queued` (stored, nothing left the broker), `sent` (a transport accepted it), `delivered` (evidence from the receiving side), `acknowledged` (`murmur_ack`: seen, answer later), `replied`. `sent` is never reported as `delivered`.
+Delivery states, per recipient: `queued` (stored, nothing left the broker), `sent` (a transport accepted it), `delivered` (evidence from the receiving side), `acknowledged` (`murmur_ack`, or a reply handed over in a `murmur_wait` result: seen, answer later), `replied`. `sent` is never reported as `delivered`.
 
 | CLI | Live push into a running session | Waiting messages also arrive | Evidence for `delivered` |
 | --- | --- | --- | --- |
@@ -103,12 +103,12 @@ Delivery states, per recipient: `queued` (stored, nothing left the broker), `sen
 
 Delivery modes: `push` (default) uses every path above; `notify` stores the message and sends a small batched note; `silent` only stores. A message for a session that is down stays `queued`; when that session comes back its queued messages are pushed (or handed over at its next hook) and the sender gets a `queued_delivered` note (not for a reply held for the asker's open `murmur_wait`: the wait result is its delivery, and the replier is not woken for it). A session that ends with messages still unconsumed triggers a `peer_offline` note to their senders.
 
-What a session sees for every message, on every path:
+What a session sees for every message, on every path (a session without murmur tools, such as one reached only by hooks, also gets `from a shell: murmur reply 42 <text>; ` before `its replies`, since a shell is its only route):
 
 ```
 [murmur m42 t7 s0 from ledger-3 to archify-2, prs-5]
 <body, cut at 4000 characters with a pointer to the full text>
-(answer with murmur_reply messageId 42, plain text never reaches the sender; from a shell: murmur reply 42 <text>; its replies: murmur_thread 7 messageId 42)
+(answer with murmur_reply messageId 42, plain text never reaches the sender; its replies: murmur_thread 7 messageId 42)
 ```
 
 ## Threads, groups, verdicts
@@ -135,7 +135,7 @@ The human surface, as the owner:
 
 - 20 sends per sender per 60 seconds; an identical send (sender, body, recipients) within 60 seconds is rejected as a duplicate. Replies count. In memory; reset on broker restart.
 - 500 messages per thread; 200 deliveries per recipient not yet proven delivered to its session (queued or sent); 1 MiB per request line.
-- `murmur_wait`: default 120 s, at most 300 s.
+- `murmur_wait`: default 110 s, at most 300 s.
 - Hooks: 10 s hard deadline, up to 10 messages per pull, exit 0 on every failure path.
 - Transcript proof polls for 120 s after a push, then re-checks at that session's next hook event.
 - Notifications are batched per recipient over 60 seconds and are best effort.

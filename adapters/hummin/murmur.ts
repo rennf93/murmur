@@ -399,14 +399,14 @@ export default function murmur(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "murmur_wait",
 		label: "Murmur Wait",
-		description: "Wait until all or any recipients of a thread have replied (default 120000 ms, max 300000, 0 returns now).",
+		description: "Wait until all or any recipients of a thread have replied (default 110000 ms, max 300000, 0 returns now).",
 		parameters: Type.Object({
 			threadId: Type.Number(),
 			until: Type.Union([Type.Literal("all_replied"), Type.Literal("any_replied")]),
 			timeoutMs: Type.Optional(Type.Number({ minimum: 0, maximum: 300_000 })),
 		}),
 		async execute(_id, p) {
-			const timeoutMs = Math.min(p.timeoutMs ?? 120_000, 300_000);
+			const timeoutMs = Math.min(p.timeoutMs ?? 110_000, 300_000);
 			return call({ type: "wait", threadId: p.threadId, until: p.until, timeoutMs }, timeoutMs + 10_000);
 		},
 	});
