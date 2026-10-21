@@ -22,6 +22,7 @@ import type {
   SendResult,
   ServerEvent,
   StatusResult,
+  ThreadListEntry,
   ThreadResult,
   WaitResult,
 } from '../src/protocol.js';
@@ -372,6 +373,10 @@ describe('SDK conformance over InMemoryTransport', () => {
       expect(waited).toMatchObject({ conditionMet: true, timedOut: false });
       expect(waited.matrix[0]).toMatchObject({ recipient: 'mcpagent', state: 'replied', verdict: 'choice' });
     }
+    const listing = await call<ThreadListEntry[]>(sdk, 'murmur_thread', {});
+    expect(listing[0]).toMatchObject({ threadId: incoming.threadId, messages: 4, first: 'question for the agent' });
+    expect(listing[0]?.participants).toEqual(['mcpagent', 'peerone']);
+    expect(await call<ThreadListEntry[]>(sdk, 'murmur_thread', { limit: 1 })).toHaveLength(1);
     const created = await call<GroupsResult[]>(sdk, 'murmur_groups', { action: 'create', name: 'mcpgroup' });
     expect(created.map((g) => g.name)).toEqual(['mcpgroup']);
     const added = await call<GroupsResult[]>(sdk, 'murmur_groups', { action: 'add', name: 'mcpgroup', members: ['peerone', 'mcpagent'] });

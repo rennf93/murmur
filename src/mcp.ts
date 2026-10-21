@@ -23,7 +23,9 @@ import type {
   SendResult,
   StatusMessage,
   StatusResult,
+  ThreadListEntry,
   ThreadMessage,
+  ThreadsMessage,
   ThreadResult,
   WaitMessage,
   WaitResult,
@@ -168,14 +170,19 @@ export function buildMcpServer(client: Pick<MurmurClient, 'request'>, identity: 
 
   server.registerTool('murmur_thread', {
     _meta: META,
-    description: 'Read a thread: first lines by default, full bodies with full, only newer than sinceSeq. With messageId, only that message and the replies to it (the question you care about), full bodies.',
+    description: 'Without threadId, list the newest threads (limit, max 50). Else read a thread: first lines by default, full bodies with full, only newer than sinceSeq. With messageId, only that message and the replies to it (the question you care about), full bodies.',
     inputSchema: {
-      threadId: z.number().int(),
+      threadId: z.number().int().optional(),
+      limit: z.number().int().optional(),
       sinceSeq: z.number().int().optional(),
       full: z.boolean().optional(),
       messageId: z.number().int().optional(),
     },
   }, async (args) => {
+    if (args.threadId === undefined) {
+      const list: Omit<ThreadsMessage, 'v' | 'id'> = { type: 'threads', ...(args.limit !== undefined ? { limit: args.limit } : {}) };
+      return textResult(await client.request<ThreadListEntry[]>(list));
+    }
     const msg: Omit<ThreadMessage, 'v' | 'id'> = {
       type: 'thread',
       threadId: args.threadId,
@@ -188,7 +195,7 @@ export function buildMcpServer(client: Pick<MurmurClient, 'request'>, identity: 
 
   server.registerTool('murmur_wait', {
     _meta: META,
-    description: 'Who got, read and answered the latest ask, with verdicts and latencies, plus the text of the replies addressed to you. Waits until all_replied or any_replied, up to timeoutMs (default 120000, max 300000; 0 returns now).',
+    description: 'Who got, read and answered the latest ask, with verdicts and latencies, plus the text of the replies addressed to you. Waits until all_replied or any_replied, up to timeoutMs (default 110000, max 300000; 0 returns now).',
     inputSchema: {
       threadId: z.number().int(),
       until: z.enum(['all_replied', 'any_replied']),

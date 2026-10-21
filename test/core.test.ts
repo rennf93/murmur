@@ -1390,3 +1390,27 @@ describe('prune', () => {
     expect(core.prune(new Set())).toEqual([]);
   });
 });
+
+describe('threadList', () => {
+  it('lists threads newest activity first with participants, count and the opening first line', () => {
+    register('alpha', 'beta', 'gamma');
+    const t1 = core.send('alpha', { threadId: null, to: ['beta', 'gamma'], body: 'x'.repeat(150) + '\nsecond line' }).result.threadId;
+    advance(10);
+    const t2 = core.send('beta', { threadId: null, to: ['alpha'], body: 'other\nline two' }).result.threadId;
+    advance(10);
+    core.send('gamma', { threadId: t1, to: ['alpha'], body: 'late' });
+    const list = core.threadList(10);
+    expect(list.map((t) => t.threadId)).toEqual([t1, t2]);
+    expect(list[0]).toEqual({
+      threadId: t1,
+      latestSeq: 1,
+      lastAt: now,
+      participants: ['alpha', 'beta', 'gamma'],
+      messages: 2,
+      first: 'x'.repeat(100),
+    });
+    expect(list[1]).toMatchObject({ participants: ['alpha', 'beta'], messages: 1, first: 'other' });
+    expect(core.threadList(1).map((t) => t.threadId)).toEqual([t1]);
+    expect(core.threadList(0)).toEqual([]);
+  });
+});

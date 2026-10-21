@@ -41,6 +41,7 @@ import type {
   ServerEvent,
   SessionResult,
   StatusResult,
+  ThreadListEntry,
   ThreadResult,
   WaitResult,
 } from '../src/protocol.js';
@@ -510,9 +511,9 @@ describe('send and push', () => {
     expect(push.payload.message.id).toBe(result.messageId);
     expect(push.payload.message.body).toBe('first line\nsecond line');
     expect(push.payload.message.references).toEqual(['carol']);
-    expect(push.payload.footer).toBe(replyFooter({ id: result.messageId, threadId: result.threadId }));
+    expect(push.payload.footer).toBe(replyFooter({ id: result.messageId, threadId: result.threadId }, false));
     expect(push.payload.text).toBe(
-      renderDelivery(push.payload.message, 'first line\nsecond line', ['bob']),
+      renderDelivery(push.payload.message, 'first line\nsecond line', ['bob'], false),
     );
     expect(push.payload.text).toContain(deliveryTag(result.messageId) + 't' + String(result.threadId) + ' s0 from alice to bob]');
     const row = stack.store.getDeliveries(result.messageId).find((d) => d.recipient === 'bob');
@@ -1027,8 +1028,26 @@ describe('wait', () => {
     expect(result.replies[1]?.body).toContain('[truncated');
     expect(pushesOf(alice).filter((p) => p.payload.message.isReply)).toHaveLength(0);
     for (const id of [first.messageId, second.messageId]) {
-      expect(stack.store.getDeliveries(id).map((d) => [d.recipient, d.state])).toEqual([['alice', 'delivered']]);
+      expect(stack.store.getDeliveries(id).map((d) => [d.recipient, d.state])).toEqual([['alice', 'acknowledged']]);
     }
+    expect((await statusOf(alice.client)).peers.find((p) => p.handle === 'alice')?.unread).toBe(0);
+  });
+
+  it('renders the footer without the shell route for a recipient with tools, with it otherwise', async () => {
+    const stack = await buildStack();
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    const bob = await connectAdapter(stack, 'bob', 5095);
+    const ask = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'hi' });
+    await settle(() => pushesOf(bob).length > 0, 'push event');
+    const msg = pushesOf(bob)[0]!.payload;
+    expect(msg.footer).toBe(replyFooter({ id: ask.messageId, threadId: ask.threadId }, false));
+    expect(msg.text).not.toContain('from a shell');
+    // A session with no tools (no mcp or adapter connection) keeps the shell route.
+    stack.core.register({ handle: 'dave' });
+    const toDave = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['dave'], body: 'yo' });
+    const hook = await connectPeer(stack);
+    const fetched = await req<FetchPushResult>(hook.client, { type: 'fetch-push', handle: 'dave', limit: 5 });
+    expect(fetched.texts?.[0]).toContain('from a shell: murmur reply ' + String(toDave.messageId) + ' <text>');
   });
 
   it('sends the replier no queued_delivered notice for a reply handed over in the wait', async () => {
@@ -1094,7 +1113,7 @@ describe('wait', () => {
     expect(result).toMatchObject({ conditionMet: false, timedOut: true });
     expect(result.replies.map((r) => [r.id, r.sender, r.body])).toEqual([[first.messageId, 'bob', 'only me']]);
     expect(pushesOf(alice).filter((p) => p.payload.message.isReply)).toHaveLength(0);
-    expect(stack.store.getDeliveries(first.messageId).map((d) => d.state)).toEqual(['delivered']);
+    expect(stack.store.getDeliveries(first.messageId).map((d) => d.state)).toEqual(['acknowledged']);
   });
 
   it('pushes a reply that arrives after the wait resolved', async () => {
@@ -1158,7 +1177,7 @@ describe('wait', () => {
     const result = await pending;
     expect(result.timedOut).toBe(true);
     expect(result.replies.map((r) => r.id)).toEqual([held.messageId]);
-    expect(stack.store.getDeliveries(held.messageId).map((d) => d.state)).toEqual(['delivered']);
+    expect(stack.store.getDeliveries(held.messageId).map((d) => d.state)).toEqual(['acknowledged']);
   });
 
   it('hands over a held reply when the latest ask changes during the wait (condition met)', async () => {
@@ -1176,7 +1195,7 @@ describe('wait', () => {
     const result = await pending;
     expect(result.conditionMet).toBe(true);
     expect(result.replies.map((r) => r.id)).toEqual([held.messageId]);
-    expect(stack.store.getDeliveries(held.messageId).map((d) => d.state)).toEqual(['delivered']);
+    expect(stack.store.getDeliveries(held.messageId).map((d) => d.state)).toEqual(['acknowledged']);
   });
 
   it('pushes a reply to a reply during a wait instead of holding it', async () => {
@@ -2508,7 +2527,7 @@ describe('session handler', () => {
     expect(stack.store.getDeliveries(m1.messageId).find((d) => d.recipient === 'bob')?.state).toBe('queued');
     const bob = await connectAdapter(stack, 'bob', 5030);
     expect(pushesOf(bob).map((p) => p.payload.message.id)).toEqual([m1.messageId, m2.messageId]);
-    expect(pushesOf(bob)[0]?.payload.text).toBe(renderDelivery(pushesOf(bob)[0]!.payload.message, 'first', ['bob', 'carol']));
+    expect(pushesOf(bob)[0]?.payload.text).toBe(renderDelivery(pushesOf(bob)[0]!.payload.message, 'first', ['bob', 'carol'], false));
     const states = (id: number): string | undefined => stack.store.getDeliveries(id).find((d) => d.recipient === 'bob')?.state;
     expect(states(m1.messageId)).toBe('sent');
     expect(states(m2.messageId)).toBe('sent');
@@ -3282,6 +3301,24 @@ describe('one reply resolving two waits', () => {
       expect([...perSocket.values()]).toEqual([1, 1]);
     } finally {
       replyOk.mockRestore();
+    }
+  });
+});
+
+describe('threads over the wire', () => {
+  it('lists threads, defaults to ten, caps at fifty and validates limit', async () => {
+    const stack = await buildStack();
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    for (let i = 0; i < 12; i += 1) {
+      await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['alice'], body: 'm' + String(i) });
+    }
+    const defaults = await req<ThreadListEntry[]>(alice.client, { type: 'threads' });
+    expect(defaults).toHaveLength(10);
+    expect(defaults[0]).toMatchObject({ first: 'm11', messages: 1, participants: ['alice'] });
+    expect(await req<ThreadListEntry[]>(alice.client, { type: 'threads', limit: 2 })).toHaveLength(2);
+    expect(await req<ThreadListEntry[]>(alice.client, { type: 'threads', limit: 99 })).toHaveLength(12);
+    for (const limit of ['x', 0, 1.5, -1]) {
+      await expect(req(alice.client, { type: 'threads', limit })).rejects.toMatchObject({ code: 'bad_request' });
     }
   });
 });

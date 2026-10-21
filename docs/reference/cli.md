@@ -20,7 +20,7 @@ Exit codes: `0` success, `1` usage or request error, `2` broker down (`murmur br
 | `slash [args...]` | The `/murmur` backing (args or stdin); bare prints usage, peers and groups. |
 | `prune` | Remove peers nothing refers to; prints the removed handles, or `nothing to prune`. |
 | `status` | List peers with presence and unread counts. |
-| `thread <id>` | Read a thread. |
+| `thread [<id>]` | Read a thread; with no id, list the most recent threads. |
 | `groups` | Manage groups. |
 | `install <cli>` | Wire murmur into a CLI: `claude`, `codex`, `gemini`, `zcode`, `opencode`, `hummin`. |
 
@@ -64,8 +64,10 @@ Deletes peers that are not the owner and have no session rows, no sent messages,
 ## thread
 
 ```
-murmur thread <id> [--since <n>] [--full] [--message <id>]
+murmur thread [<id> [--since <n>] [--full] [--message <id>]]
 ```
+
+With no id (and no flags) it lists the 10 most recent threads, newest activity first, one per line: `t<id> s<latestSeq> <last activity ISO time> <participants> <message count> <opening first line>`.
 
 `--since <n>` returns only messages with `seq` newer than n; `--full` includes bodies; `--message <id>` returns only that message and the replies to it (full bodies), the per-question read. An id that is not in the thread is an error.
 

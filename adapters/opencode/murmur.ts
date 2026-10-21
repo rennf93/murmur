@@ -260,10 +260,12 @@ const plugin: Plugin = async ({ client, directory }) => {
           ctxCall({ type: 'reply', messageId: a.messageId, body: a.body, verdict: a.verdict, references: a.references }, ctx),
       }),
       murmur_thread: tool({
-        description: 'Read a murmur thread, optionally only messages after a sequence number.',
-        args: { threadId: s.number(), sinceSeq: s.number().optional(), full: s.boolean().optional() },
+        description: 'Without threadId, list the newest murmur threads (limit, max 50). Else read a thread, optionally only messages after a sequence number.',
+        args: { threadId: s.number().optional(), limit: s.number().optional(), sinceSeq: s.number().optional(), full: s.boolean().optional() },
         execute: (a, ctx) =>
-          ctxCall({ type: 'thread', threadId: a.threadId, sinceSeq: a.sinceSeq ?? null, full: a.full ?? false }, ctx),
+          a.threadId === undefined
+            ? ctxCall({ type: 'threads', ...(a.limit !== undefined ? { limit: a.limit } : {}) }, ctx)
+            : ctxCall({ type: 'thread', threadId: a.threadId, sinceSeq: a.sinceSeq ?? null, full: a.full ?? false }, ctx),
       }),
       murmur_wait: tool({
         description: 'Wait until all or any recipients of a murmur thread have replied.',
@@ -273,7 +275,7 @@ const plugin: Plugin = async ({ client, directory }) => {
           timeoutMs: s.number().optional(),
         },
         execute: (a, ctx) => {
-          const timeoutMs = Math.min(Math.max(a.timeoutMs ?? 120000, 0), 300000);
+          const timeoutMs = Math.min(Math.max(a.timeoutMs ?? 110000, 0), 300000);
           return ctxCall({ type: 'wait', threadId: a.threadId, until: a.until, timeoutMs }, ctx, timeoutMs + 10000);
         },
       }),

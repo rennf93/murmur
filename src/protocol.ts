@@ -10,7 +10,7 @@ export const THREAD_CAP = 500;
 export const UNREAD_CAP = 200;
 export const NOTIFY_BATCH_MS = 60000;
 export const WAIT_MAX_MS = 300000;
-export const WAIT_DEFAULT_MS = 120000;
+export const WAIT_DEFAULT_MS = 110000;
 export const FIRST_LINE_MAX = 120;
 export const HANDLE_RE = /^[a-z0-9][a-z0-9-]{1,47}$/;
 // How long the broker keeps polling a receiver's transcript for proof after
@@ -109,6 +109,19 @@ export interface ThreadResult {
   latestSeq: number;
   messages: Array<MessageSummary & { body?: string }>;
 }
+
+// One line per thread for murmur_thread without a threadId; lastAt is epoch ms.
+export interface ThreadListEntry {
+  threadId: number;
+  latestSeq: number;
+  lastAt: number;
+  participants: string[];
+  messages: number;
+  first: string;
+}
+
+export const THREADS_DEFAULT = 10;
+export const THREADS_MAX = 50;
 
 export interface RecipientMatrix {
   recipient: string;
@@ -337,6 +350,13 @@ export interface ThreadMessage {
   messageId?: number;
 }
 
+export interface ThreadsMessage {
+  v: number;
+  id: number;
+  type: 'threads';
+  limit?: number;
+}
+
 export interface CollectMessage {
   v: number;
   id: number;
@@ -411,6 +431,7 @@ export type ClientMessage =
   | ReadMessage
   | InboxMessage
   | ThreadMessage
+  | ThreadsMessage
   | CollectMessage
   | WaitMessage
   | GroupsMessage
@@ -520,17 +541,19 @@ export function deliveryTag(messageId: number): string {
   return '[murmur m' + String(messageId) + ' ';
 }
 
-export function replyFooter(m: { id: number; threadId: number }): string {
+// shell is false for a recipient with murmur tools: Codex's sandbox blocks the
+// socket the shell route needs, so it only offers the tools.
+export function replyFooter(m: { id: number; threadId: number }, shell = true): string {
   return (
-    '(answer with murmur_reply messageId ' + String(m.id) + ', plain text never reaches the sender; from a shell: murmur reply ' +
-    String(m.id) + ' <text>; its replies: murmur_thread ' + String(m.threadId) + ' messageId ' + String(m.id) + ')'
+    '(answer with murmur_reply messageId ' + String(m.id) + ', plain text never reaches the sender; ' +
+    (shell ? 'from a shell: murmur reply ' + String(m.id) + ' <text>; ' : '') + 'its replies: murmur_thread ' + String(m.threadId) + ' messageId ' + String(m.id) + ')'
   );
 }
 
 // What a session sees for one message, on every transport: a tag line with
 // ids, sender and recipients, the (possibly truncated) body, references, and
 // how to reply.
-export function renderDelivery(m: MessageSummary, deliveredBody: string, recipients: string[]): string {
+export function renderDelivery(m: MessageSummary, deliveredBody: string, recipients: string[], shell = true): string {
   let head = deliveryTag(m.id) + 't' + String(m.threadId) + ' s' + String(m.seq) + ' from ' + m.sender;
   if (m.via !== null) {
     head += ' via ' + m.via;
@@ -543,5 +566,5 @@ export function renderDelivery(m: MessageSummary, deliveredBody: string, recipie
   }
   head += ' to ' + recipients.join(', ') + ']';
   const refs = m.references.length > 0 ? '\nrefs: ' + m.references.join(', ') : '';
-  return head + '\n' + deliveredBody + refs + '\n' + replyFooter(m);
+  return head + '\n' + deliveredBody + refs + '\n' + replyFooter(m, shell);
 }

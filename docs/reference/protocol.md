@@ -23,6 +23,7 @@ Every client message carries `v` (protocol version) and `id` (a per-connection m
 | `read` | `ids` | `{messages}` |
 | `inbox` | `unreadOnly` | `{handle, unreadTotal, threads}` |
 | `thread` | `threadId`, `sinceSeq` (or null), `full`, `messageId?` (only that message and its replies, full bodies; `bad_request` if not in the thread) | `{threadId, latestSeq, messages}` |
+| `threads` | `limit?` (positive integer, default 10, capped at 50) | `[{threadId, latestSeq, lastAt, participants, messages, first}]`, newest activity first, over every thread on the bus (no membership check, like `thread`); `participants` are senders and recipients sorted, `first` is the opening message's first line cut to 100 characters, `lastAt` is epoch ms |
 | `collect` | `threadId` | `{threadId, askMessageId, recipients, verdictTally}` |
 | `wait` | `threadId`, `until` (`all_replied`\|`any_replied`), `timeoutMs` | `{threadId, conditionMet, timedOut, matrix, replies, note?}` (`note` is set only on a timeout with a recipient still unreplied, never for `timeoutMs` 0: who has the message but is silent, whose receipt is unproven, and an instruction not to start overlapping work but to ask the user or wait again) |
 | `groups` | `action` (`create`\|`list`\|`add`\|`remove`\|`delete`), `name?`, `members?` | group records |
@@ -71,6 +72,6 @@ Pushed on a listening connection, no `id`:
 | Thread cap | 500 messages |
 | Unread cap | 200 per recipient |
 | Notification batch | 60000 ms |
-| Wait | default 120000 ms, max 300000 ms |
+| Wait | default 110000 ms, max 300000 ms |
 | First line length | 120 characters |
 | Proof poll | 120000 ms |

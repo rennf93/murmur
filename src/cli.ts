@@ -23,7 +23,9 @@ import type {
   SendMessage,
   SendResult,
   StatusResult,
+  ThreadListEntry,
   ThreadMessage,
+  ThreadsMessage,
   ThreadResult,
 } from './protocol.js';
 
@@ -45,7 +47,7 @@ const SEND_USAGE =
   'usage: murmur send <targets> <body...> [--as <handle>] [--mode <mode>] [--refs <a,b>] [--thread <id>]';
 const REPLY_USAGE = 'usage: murmur reply <message id> <body...> [--as <handle>] [--verdict agree|disagree|info|choice] [--refs <a,b>]';
 const NAME_USAGE = 'usage: murmur name <handle>   (renames the agent session this runs in)';
-const THREAD_USAGE = 'usage: murmur thread <id> [--since <n>] [--full] [--message <id>]';
+const THREAD_USAGE = 'usage: murmur thread [<id> [--since <n>] [--full] [--message <id>]] (no id lists recent threads)';
 const GROUPS_USAGE =
   'usage: murmur groups [list] | groups create <name> | groups add <name> <members...> | groups remove <name> <members...> | groups delete <name>';
 const SLASH_USAGE =
@@ -133,7 +135,7 @@ function printUsage(err: Sink): void {
     '  slash [args...]          the /murmur backing, sent as the owner via your session; bare prints peers and groups',
     '  prune                    remove peers with no session, message, group or connection',
     '  status                   list peers with presence and unread counts',
-    '  thread <id> [--since <n>] [--full] [--message <id>]',
+    '  thread [<id> [--since <n>] [--full] [--message <id>]]  no id lists recent threads',
     '  groups [list] | groups create <name> | groups add <name> <members...>',
     '         | groups remove <name> <members...> | groups delete <name>',
     '  install <' + INSTALL_CLIENTS.join('|') + '>',
@@ -541,6 +543,19 @@ async function cmdThread(args: string[], out: Sink, err: Sink): Promise<number> 
     positionals.push(arg);
   }
   const idArg = positionals[0];
+  if (idArg === undefined && !full && sinceSeq === null && messageId === undefined) {
+    const client = await connectCli();
+    try {
+      const list: Omit<ThreadsMessage, 'v' | 'id'> = { type: 'threads' };
+      for (const t of await client.request<ThreadListEntry[]>(list)) {
+        out('t' + String(t.threadId) + ' s' + String(t.latestSeq) + ' ' + new Date(t.lastAt).toISOString() + ' ' +
+          t.participants.join(',') + ' ' + String(t.messages) + ' ' + t.first + '\n');
+      }
+      return 0;
+    } finally {
+      client.close();
+    }
+  }
   if (idArg === undefined) {
     err('murmur thread: missing thread id\n' + THREAD_USAGE + '\n');
     return 1;

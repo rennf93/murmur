@@ -38,6 +38,7 @@ import type {
   ReplyResult,
   SendResult,
   StatusResult,
+  ThreadListEntry,
   ThreadResult,
   Verdict,
 } from './protocol.js';
@@ -197,6 +198,8 @@ export class MurmurCore {
   // tracked here for the process lifetime and status() falls back to the
   // persisted row values when no override exists.
   private readonly hookOverrides = new Map<string, { state: 'busy' | 'idle'; at: number }>();
+  // Set by the broker: does the handle have a live mcp or adapter connection.
+  hasTools: (handle: string) => boolean = () => false;
   // Process table source for session liveness, asked only for the pids that
   // matter; injectable for tests.
   private readonly procTable: (pids: number[]) => ProcTable;
@@ -371,15 +374,16 @@ export class MurmurCore {
 
   private pushesFor(row: MessageRow, recipients: string[], mode: DeliveryMode): PushTarget[] {
     const message = fullOf(row);
-    const footer = replyFooter(message);
-    const text = renderDelivery(message, row.deliveredBody, recipients);
-    return recipients.map((recipient) => ({
-      recipient,
-      kind: this.pushKindFor(recipient, mode),
-      message,
-      footer,
-      text,
-    }));
+    return recipients.map((recipient) => {
+      const shell = !this.hasTools(recipient);
+      return {
+        recipient,
+        kind: this.pushKindFor(recipient, mode),
+        message,
+        footer: replyFooter(message, shell),
+        text: renderDelivery(message, row.deliveredBody, recipients, shell),
+      };
+    });
   }
 
   // Native transport row means the broker can hand the message to the
@@ -539,6 +543,10 @@ export class MurmurCore {
     }
     threads.sort((a, b) => b.latestSeq - a.latestSeq);
     return { handle, unreadTotal, threads };
+  }
+
+  threadList(limit: number): ThreadListEntry[] {
+    return this.store.threadList(limit).map(({ firstBody, ...t }) => ({ ...t, first: firstLine(firstBody).slice(0, 100) }));
   }
 
   threadView(threadId: number, sinceSeq: number | null, full = true, messageId?: number): ThreadResult {
@@ -963,7 +971,7 @@ export class MurmurCore {
       this.events.onStateChange({ threadId: row.threadId, recipient: handle, from: 'queued', to: 'delivered' });
       const message = fullOf(row);
       messages.push(message);
-      texts.push(renderDelivery(message, row.deliveredBody, this.store.getDeliveries(row.id).map((d) => d.recipient)));
+      texts.push(renderDelivery(message, row.deliveredBody, this.store.getDeliveries(row.id).map((d) => d.recipient), !this.hasTools(handle)));
     }
     return { messages, texts };
   }

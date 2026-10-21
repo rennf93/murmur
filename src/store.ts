@@ -588,6 +588,39 @@ export class Store {
     return rec === undefined ? null : toMessageRow(rec);
   }
 
+  // Most recently active threads first. Participants are every sender and
+  // every recipient; first is the body of the opening message.
+  threadList(limit: number): Array<{
+    threadId: number;
+    latestSeq: number;
+    lastAt: number;
+    messages: number;
+    participants: string[];
+    firstBody: string;
+  }> {
+    const recs = this.stmt(
+      'SELECT thread_id, MAX(seq) AS latest_seq, MAX(created_at) AS last_at, COUNT(*) AS n ' +
+      'FROM messages GROUP BY thread_id ORDER BY last_at DESC, thread_id DESC LIMIT ?',
+    ).all(limit) as Array<{ thread_id: number; latest_seq: number; last_at: number; n: number }>;
+    return recs.map((r) => {
+      const people = this.stmt(
+        'SELECT sender AS handle FROM messages WHERE thread_id = ? UNION ' +
+        'SELECT d.recipient FROM deliveries d JOIN messages m ON m.id = d.message_id WHERE m.thread_id = ? ORDER BY 1',
+      ).all(r.thread_id, r.thread_id) as Array<{ handle: string }>;
+      const opening = this.stmt('SELECT body FROM messages WHERE thread_id = ? AND seq = 0').get(r.thread_id) as {
+        body: string;
+      };
+      return {
+        threadId: r.thread_id,
+        latestSeq: r.latest_seq,
+        lastAt: r.last_at,
+        messages: r.n,
+        participants: people.map((p) => p.handle),
+        firstBody: opening.body,
+      };
+    });
+  }
+
   messageById(id: number): MessageRow | null {
     const rec = this.stmt('SELECT * FROM messages WHERE id = ?').get(id) as MessageRecord | undefined;
     return rec === undefined ? null : toMessageRow(rec);

@@ -10,6 +10,8 @@ import {
   newToken,
   HANDLE_RE,
   PROOF_POLL_MS,
+  WAIT_DEFAULT_MS,
+  WAIT_MAX_MS,
   deliveryTag,
   replyFooter,
   renderDelivery,
@@ -121,6 +123,17 @@ describe('v0.2 helpers', () => {
     expect(HANDLE_RE.test('claude-app')).toBe(true);
     expect(HANDLE_RE.test('A')).toBe(false);
     expect(HANDLE_RE.test('-ab')).toBe(false);
+  });
+
+  it('waits default to 110 s, under the 120 s MCP auto-background threshold', () => {
+    expect(WAIT_DEFAULT_MS).toBe(110000);
+    expect(WAIT_MAX_MS).toBe(300000);
+  });
+
+  it('replyFooter drops the shell route for a recipient with tools', () => {
+    expect(replyFooter({ id: 7, threadId: 3 }, false)).toBe(
+      '(answer with murmur_reply messageId 7, plain text never reaches the sender; its replies: murmur_thread 3 messageId 7)',
+    );
   });
 
   it('deliveryTag ends with a space so m42 never matches m420', () => {
