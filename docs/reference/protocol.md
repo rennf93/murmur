@@ -59,7 +59,7 @@ Pushed on a listening connection, no `id`:
 
 ## Error codes
 
-`auth_required`, `bad_token`, `broker_closed`, `broker_down`, `unknown_handle`, `unknown_group`, `unknown_thread`, `unknown_message`, `duplicate`, `rate_limited`, `cap_thread`, `cap_inbox`, `bad_request`, `timeout`, `native_failed`, `internal`.
+`auth_required`, `bad_token`, `broker_closed`, `broker_down`, `socket_denied`, `unknown_handle`, `unknown_group`, `unknown_thread`, `unknown_message`, `duplicate`, `rate_limited`, `cap_thread`, `cap_inbox`, `bad_request`, `timeout`, `native_failed`, `internal`.
 
 ## Constants
 

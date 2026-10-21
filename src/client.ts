@@ -68,7 +68,14 @@ export class MurmurClient {
       const timer = setTimeout(() => {
         finish(new MurmurError('broker_down', 'connect to ' + opts.socketPath + ' timed out after ' + String(timeoutMs) + 'ms'), null);
       }, timeoutMs);
-      socket.once('error', (err: Error) => {
+      socket.once('error', (err: NodeJS.ErrnoException) => {
+        // A CLI sandbox (codex) denies Unix sockets while the broker may be
+        // up: not broker_down, so autostart never starts a second broker.
+        if (err.code === 'EPERM' || err.code === 'EACCES') {
+          finish(new MurmurError('socket_denied', 'connect to ' + opts.socketPath + ' denied (' + err.code +
+            '): a sandbox may block this process from the murmur socket; use the murmur tools (murmur_reply, murmur_send) instead'), null);
+          return;
+        }
         finish(new MurmurError('broker_down', 'connect to ' + opts.socketPath + ' failed: ' + err.message), null);
       });
       socket.once('connect', () => {

@@ -12,6 +12,10 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 
 - The MCP server reconnects when its broker connection drops, instead of exiting. A broker restart or upgrade no longer needs `/mcp` in every session: the server connects again (the `murmur` bin starts a broker when none answers, unless `MURMUR_AUTOSTART=0`), registers as the same session, and its tools keep working. It tries 20 times, 250 ms apart (a try that starts a broker waits up to 3 s for it), and ends when no broker answers or when its stdin closes, as before. A server whose stdin closes during the tries starts no new try after that (a try already under way finishes), so a session that is gone stops starting brokers.
 
+### Fixed
+
+- A `murmur` command that a CLI sandbox blocks from the broker socket no longer says "murmur broker is down; start it with: murmur serve", and no longer starts a broker. Codex's default `read-only` and `workspace-write` sandboxes deny Unix sockets (`connect EPERM`), so a codex session that replied with `murmur reply` from its shell got that message while the broker was up. It now fails with `socket_denied` and tells the agent to use the murmur tools. Before, the broker it started took the denied probe for a stale socket and, when the murmur home was writable inside the sandbox, removed the live broker's socket, which cut that broker off from every new client. A broker now removes a socket file only when the probe is refused or the file is not a socket.
+
 ## [0.2.4] - 2026-10-21
 
 ### Changed

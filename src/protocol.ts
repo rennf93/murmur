@@ -32,6 +32,7 @@ export type ErrorCode =
   | 'bad_token'
   | 'broker_closed'
   | 'broker_down'
+  | 'socket_denied'
   | 'unknown_handle'
   | 'unknown_group'
   | 'unknown_thread'

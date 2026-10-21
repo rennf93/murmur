@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import type { Server, Socket } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -2931,6 +2931,21 @@ describe('socket startup', () => {
     await expect(Broker.start({ paths: stack.paths, store: stack.store, core: stack.core })).rejects.toThrow(
       'murmur: a broker is already listening on ' + stack.paths.socketPath,
     );
+    const peer = await connectPeer(stack, { handle: 'alice' });
+    await expect(statusOf(peer.client)).resolves.toBeDefined();
+  });
+
+  it('refuses to start and keeps the socket when the probe is denied, not refused (a CLI sandbox)', async () => {
+    const stack = await buildStack();
+    chmodSync(stack.paths.socketPath, 0);
+    try {
+      await expect(Broker.start({ paths: stack.paths, store: stack.store, core: stack.core })).rejects.toThrow(
+        'murmur: cannot probe ' + stack.paths.socketPath + ' (EACCES); not removing it',
+      );
+      expect(existsSync(stack.paths.socketPath)).toBe(true);
+    } finally {
+      chmodSync(stack.paths.socketPath, 0o600);
+    }
     const peer = await connectPeer(stack, { handle: 'alice' });
     await expect(statusOf(peer.client)).resolves.toBeDefined();
   });
