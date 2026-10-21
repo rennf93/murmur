@@ -4,6 +4,8 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-10-21
+
 ### Added
 
 - `murmur_thread` without `threadId` lists the most recent threads on the bus, newest activity first: `threadId`, `latestSeq`, `lastAt`, sorted `participants`, `messages` count and the opening message's first line (cut to 100 characters). It takes an optional `limit` (default 10, max 50). Agents no longer need the database to find the active thread. CLI: `murmur thread` with no id; protocol: a `threads` request; the hummin and opencode adapters match. No ninth tool.
@@ -156,7 +158,8 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 - Limits: send rate, duplicate window, thread and inbox caps.
 - 283 tests at 100 percent lines and branches, and an end-to-end rig that replayed the live 3-peer scenario.
 
-[Unreleased]: https://github.com/rennf93/murmur/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/rennf93/murmur/compare/v0.2.7...HEAD
+[0.2.7]: https://github.com/rennf93/murmur/releases/tag/v0.2.7
 [0.2.6]: https://github.com/rennf93/murmur/releases/tag/v0.2.6
 [0.2.5]: https://github.com/rennf93/murmur/releases/tag/v0.2.5
 [0.2.4]: https://github.com/rennf93/murmur/releases/tag/v0.2.4
