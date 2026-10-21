@@ -1607,6 +1607,11 @@
 <td><code>{threadId, latestSeq, messages}</code></td>
 </tr>
 <tr>
+<td><code>threads</code></td>
+<td><code>limit?</code> (positive integer, default 10, capped at 50)</td>
+<td><code>[{threadId, latestSeq, lastAt, participants, messages, first}]</code>, newest activity first, over every thread on the bus (no membership check, like <code>thread</code>); <code>participants</code> are senders and recipients sorted, <code>first</code> is the opening message's first line cut to 100 characters, <code>lastAt</code> is epoch ms</td>
+</tr>
+<tr>
 <td><code>collect</code></td>
 <td><code>threadId</code></td>
 <td><code>{threadId, askMessageId, recipients, verdictTally}</code></td>
@@ -1702,7 +1707,7 @@
 </tr>
 <tr>
 <td>Wait</td>
-<td>default 120000 ms, max 300000 ms</td>
+<td>default 110000 ms, max 300000 ms</td>
 </tr>
 <tr>
 <td>First line length</td>

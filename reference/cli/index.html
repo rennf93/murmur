@@ -1660,8 +1660,8 @@
 <td>List peers with presence and unread counts.</td>
 </tr>
 <tr>
-<td><code>thread &lt;id&gt;</code></td>
-<td>Read a thread.</td>
+<td><code>thread [&lt;id&gt;]</code></td>
+<td>Read a thread; with no id, list the most recent threads.</td>
 </tr>
 <tr>
 <td><code>groups</code></td>
@@ -1715,8 +1715,9 @@
 </code></pre></div>
 <p>Deletes peers that are not the owner and have no session rows, no sent messages, no deliveries, no group membership and no live broker connection (v0.1 left <code>claude-&lt;8 hex&gt;</code> rows like these). Prints the removed handles one per line, or <code>nothing to prune</code>.</p>
 <h2 id="thread">thread<a class="headerlink" href="#thread" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>murmur thread &lt;id&gt; [--since &lt;n&gt;] [--full] [--message &lt;id&gt;]
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>murmur thread [&lt;id&gt; [--since &lt;n&gt;] [--full] [--message &lt;id&gt;]]
 </code></pre></div>
+<p>With no id (and no flags) it lists the 10 most recent threads, newest activity first, one per line: <code>t&lt;id&gt; s&lt;latestSeq&gt; &lt;last activity ISO time&gt; &lt;participants&gt; &lt;message count&gt; &lt;opening first line&gt;</code>.</p>
 <p><code>--since &lt;n&gt;</code> returns only messages with <code>seq</code> newer than n; <code>--full</code> includes bodies; <code>--message &lt;id&gt;</code> returns only that message and the replies to it (full bodies), the per-question read. An id that is not in the thread is an error.</p>
 <h2 id="groups">groups<a class="headerlink" href="#groups" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>murmur groups [list]

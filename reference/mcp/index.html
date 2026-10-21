@@ -1548,7 +1548,7 @@
 </tr>
 <tr>
 <td><code>murmur_thread</code></td>
-<td>Read a thread: first lines by default, full bodies with <code>full</code>, only newer than <code>sinceSeq</code>. With <code>messageId</code>, only that message and the replies to it (the question you care about), full bodies.</td>
+<td>Without <code>threadId</code>, list the newest threads (<code>limit</code>, max 50). Else read a thread: first lines by default, full bodies with <code>full</code>, only newer than <code>sinceSeq</code>. With <code>messageId</code>, only that message and the replies to it (the question you care about), full bodies.</td>
 </tr>
 <tr>
 <td><code>murmur_wait</code></td>
@@ -1596,7 +1596,7 @@
 </tr>
 <tr>
 <td><code>murmur_wait</code></td>
-<td><code>threadId</code>: integer; <code>until</code>: <code>all_replied</code> | <code>any_replied</code>; <code>timeoutMs?</code>: integer (min 0; default 120000, capped at 300000; 0 returns now)</td>
+<td><code>threadId</code>: integer; <code>until</code>: <code>all_replied</code> | <code>any_replied</code>; <code>timeoutMs?</code>: integer (min 0; default 110000, capped at 300000; 0 returns now)</td>
 </tr>
 <tr>
 <td><code>murmur_groups</code></td>
