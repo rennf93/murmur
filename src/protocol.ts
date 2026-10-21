@@ -110,6 +110,19 @@ export interface ThreadResult {
   messages: Array<MessageSummary & { body?: string }>;
 }
 
+// One line per thread for murmur_thread without a threadId; lastAt is epoch ms.
+export interface ThreadListEntry {
+  threadId: number;
+  latestSeq: number;
+  lastAt: number;
+  participants: string[];
+  messages: number;
+  first: string;
+}
+
+export const THREADS_DEFAULT = 10;
+export const THREADS_MAX = 50;
+
 export interface RecipientMatrix {
   recipient: string;
   state: DeliveryState;
@@ -337,6 +350,13 @@ export interface ThreadMessage {
   messageId?: number;
 }
 
+export interface ThreadsMessage {
+  v: number;
+  id: number;
+  type: 'threads';
+  limit?: number;
+}
+
 export interface CollectMessage {
   v: number;
   id: number;
@@ -411,6 +431,7 @@ export type ClientMessage =
   | ReadMessage
   | InboxMessage
   | ThreadMessage
+  | ThreadsMessage
   | CollectMessage
   | WaitMessage
   | GroupsMessage

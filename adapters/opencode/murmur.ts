@@ -260,10 +260,12 @@ const plugin: Plugin = async ({ client, directory }) => {
           ctxCall({ type: 'reply', messageId: a.messageId, body: a.body, verdict: a.verdict, references: a.references }, ctx),
       }),
       murmur_thread: tool({
-        description: 'Read a murmur thread, optionally only messages after a sequence number.',
-        args: { threadId: s.number(), sinceSeq: s.number().optional(), full: s.boolean().optional() },
+        description: 'Without threadId, list the newest murmur threads (limit, max 50). Else read a thread, optionally only messages after a sequence number.',
+        args: { threadId: s.number().optional(), limit: s.number().optional(), sinceSeq: s.number().optional(), full: s.boolean().optional() },
         execute: (a, ctx) =>
-          ctxCall({ type: 'thread', threadId: a.threadId, sinceSeq: a.sinceSeq ?? null, full: a.full ?? false }, ctx),
+          a.threadId === undefined
+            ? ctxCall({ type: 'threads', ...(a.limit !== undefined ? { limit: a.limit } : {}) }, ctx)
+            : ctxCall({ type: 'thread', threadId: a.threadId, sinceSeq: a.sinceSeq ?? null, full: a.full ?? false }, ctx),
       }),
       murmur_wait: tool({
         description: 'Wait until all or any recipients of a murmur thread have replied.',

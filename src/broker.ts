@@ -16,6 +16,8 @@ import {
   MurmurError,
   NOTIFY_BATCH_MS,
   PROTOCOL_VERSION,
+  THREADS_DEFAULT,
+  THREADS_MAX,
   WAIT_MAX_MS,
   encodeLine,
   renderDelivery,
@@ -47,6 +49,7 @@ import type {
   SendResult,
   SessionResult,
   StatusResult,
+  ThreadListEntry,
   ThreadResult,
   Verdict,
   WaitReply,
@@ -526,6 +529,9 @@ export class Broker {
       case 'inbox':
         this.replyOk(conn.socket, id, this.handleInbox(conn, rec));
         return;
+      case 'threads':
+        this.replyOk(conn.socket, id, this.handleThreads(rec));
+        return;
       case 'thread':
         this.replyOk(conn.socket, id, this.handleThread(rec));
         return;
@@ -820,6 +826,14 @@ export class Broker {
     const sinceSeq = reqNumberOrNull(rec, 'sinceSeq');
     const messageId = rec.messageId === undefined ? undefined : reqNumber(rec, 'messageId');
     return this.core.threadView(threadId, sinceSeq, reqBool(rec, 'full'), messageId);
+  }
+
+  private handleThreads(rec: Record<string, unknown>): ThreadListEntry[] {
+    const limit = rec.limit === undefined ? THREADS_DEFAULT : reqNumber(rec, 'limit');
+    if (!Number.isInteger(limit) || limit < 1) {
+      throw badRequest('limit must be a positive integer');
+    }
+    return this.core.threadList(Math.min(limit, THREADS_MAX));
   }
 
   private handleCollect(rec: Record<string, unknown>): CollectResult {

@@ -488,6 +488,16 @@ describe('thread', () => {
     ]);
   });
 
+  it('lists recent threads when no id is given', async () => {
+    const cap = capture();
+    expect(await runCli(['send', 'alice', 'listed\nsecond', 'line'], cap.io)).toBe(0);
+    const threadId = Number(/thread (\d+) seq/.exec(cap.out.join(''))?.[1]);
+    const list = capture();
+    expect(await runCli(['thread'], list.io)).toBe(0);
+    const first = list.out.join('').split('\n')[0] ?? '';
+    expect(first).toMatch(new RegExp('^t' + String(threadId) + ' s0 \\d{4}-\\d\\d-\\d\\dT\\S+ alice,renn 1 listed$'));
+  });
+
   it('reads one question and its replies with --message', async () => {
     const cap = capture();
     expect(await runCli(['send', 'alice', 'q-one', 'body'], cap.io)).toBe(0);
@@ -510,7 +520,7 @@ describe('thread', () => {
 
   it('validates its arguments', async () => {
     const missing = capture();
-    expect(await runCli(['thread'], missing.io)).toBe(1);
+    expect(await runCli(['thread', '--full'], missing.io)).toBe(1);
     expect(missing.err.join('')).toContain('murmur thread: missing thread id');
     const notNumber = capture();
     expect(await runCli(['thread', 'abc'], notNumber.io)).toBe(1);

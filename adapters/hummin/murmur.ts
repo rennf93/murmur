@@ -385,13 +385,15 @@ export default function murmur(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "murmur_thread",
 		label: "Murmur Thread",
-		description: "Read a murmur thread, as a digest or with full bodies.",
+		description: "Without threadId, list the newest murmur threads (limit, max 50). Else read a thread, as a digest or with full bodies.",
 		parameters: Type.Object({
-			threadId: Type.Number(),
+			threadId: Type.Optional(Type.Number()),
+			limit: Type.Optional(Type.Number()),
 			sinceSeq: Type.Optional(Type.Number()),
 			full: Type.Optional(Type.Boolean()),
 		}),
 		async execute(_id, p) {
+			if (p.threadId === undefined) return call({ type: "threads", ...(p.limit !== undefined ? { limit: p.limit } : {}) });
 			return call({ type: "thread", threadId: p.threadId, sinceSeq: p.sinceSeq ?? null, full: p.full ?? false });
 		},
 	});

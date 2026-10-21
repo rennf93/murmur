@@ -41,6 +41,7 @@ import type {
   ServerEvent,
   SessionResult,
   StatusResult,
+  ThreadListEntry,
   ThreadResult,
   WaitResult,
 } from '../src/protocol.js';
@@ -3300,6 +3301,24 @@ describe('one reply resolving two waits', () => {
       expect([...perSocket.values()]).toEqual([1, 1]);
     } finally {
       replyOk.mockRestore();
+    }
+  });
+});
+
+describe('threads over the wire', () => {
+  it('lists threads, defaults to ten, caps at fifty and validates limit', async () => {
+    const stack = await buildStack();
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    for (let i = 0; i < 12; i += 1) {
+      await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['alice'], body: 'm' + String(i) });
+    }
+    const defaults = await req<ThreadListEntry[]>(alice.client, { type: 'threads' });
+    expect(defaults).toHaveLength(10);
+    expect(defaults[0]).toMatchObject({ first: 'm11', messages: 1, participants: ['alice'] });
+    expect(await req<ThreadListEntry[]>(alice.client, { type: 'threads', limit: 2 })).toHaveLength(2);
+    expect(await req<ThreadListEntry[]>(alice.client, { type: 'threads', limit: 99 })).toHaveLength(12);
+    for (const limit of ['x', 0, 1.5, -1]) {
+      await expect(req(alice.client, { type: 'threads', limit })).rejects.toMatchObject({ code: 'bad_request' });
     }
   });
 });

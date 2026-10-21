@@ -38,6 +38,7 @@ import type {
   ReplyResult,
   SendResult,
   StatusResult,
+  ThreadListEntry,
   ThreadResult,
   Verdict,
 } from './protocol.js';
@@ -542,6 +543,10 @@ export class MurmurCore {
     }
     threads.sort((a, b) => b.latestSeq - a.latestSeq);
     return { handle, unreadTotal, threads };
+  }
+
+  threadList(limit: number): ThreadListEntry[] {
+    return this.store.threadList(limit).map(({ firstBody, ...t }) => ({ ...t, first: firstLine(firstBody).slice(0, 100) }));
   }
 
   threadView(threadId: number, sinceSeq: number | null, full = true, messageId?: number): ThreadResult {

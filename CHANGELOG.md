@@ -4,6 +4,10 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Added
+
+- `murmur_thread` without `threadId` lists the most recent threads on the bus, newest activity first: `threadId`, `latestSeq`, `lastAt`, sorted `participants`, `messages` count and the opening message's first line (cut to 100 characters). It takes an optional `limit` (default 10, max 50). Agents no longer need the database to find the active thread. CLI: `murmur thread` with no id; protocol: a `threads` request; the hummin and opencode adapters match. No ninth tool.
+
 ### Changed
 
 - The default `murmur_wait` timeout is 110 s instead of 120 s (the maximum stays 300 s). Claude Code moves an MCP call that runs past 120 s (`CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS`) to the background, so a full default wait used to return as a separate notification and cost an extra turn.
