@@ -777,6 +777,23 @@ describe('groups', () => {
 });
 
 describe('pendingPush', () => {
+  it('hands a reply over acknowledged and an ask delivered, so only the ask is unread', () => {
+    register('asker', 'worker');
+    const ask = core.send('asker', { threadId: null, to: ['worker'], body: 'q' });
+    core.pendingPush('worker', 10);
+    const { result } = core.reply('worker', { messageId: ask.result.messageId, body: 'a' });
+    core.pendingPush('asker', 10);
+    const stateOf = (id: number, who: string): string | undefined => store.getDeliveries(id).find((d) => d.recipient === who)?.state;
+    expect(stateOf(result.messageId, 'asker')).toBe('acknowledged');
+    expect(stateOf(ask.result.messageId, 'worker')).toBe('replied');
+    const peers = core.status(() => ({ online: false })).peers;
+    expect(peers.find((p) => p.handle === 'asker')?.unread).toBe(0);
+    const second = core.send('asker', { threadId: null, to: ['worker'], body: 'q2' });
+    core.pendingPush('worker', 10);
+    expect(stateOf(second.result.messageId, 'worker')).toBe('delivered');
+    expect(core.status(() => ({ online: false })).peers.find((p) => p.handle === 'worker')?.unread).toBe(1);
+  });
+
   it('hands out queued pushes newest first and marks them delivered', () => {
     register('sender', 'receiver');
     const m1 = core.send('sender', { threadId: null, to: ['receiver'], body: 'first' });

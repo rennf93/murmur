@@ -1182,8 +1182,6 @@ export class Broker {
         // A reply held for this wait never waited on a session that was down:
         // no queued_delivered notice, which would wake the replier for nothing.
         this.markDeliveredHop(row.id, delivery.recipient, held?.has(row.id) !== true);
-        // The wait result is the asker's reading: seen, not unread.
-        this.store.markAcked(row.id, delivery.recipient, Date.now());
         replies.push({ id: row.id, seq: row.seq, sender: row.sender, verdict: row.verdict as Verdict | null, body: row.deliveredBody });
       }
     }

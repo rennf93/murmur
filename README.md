@@ -90,7 +90,7 @@ Every hook, MCP server and CLI command walks up its process ancestors and takes 
 
 ## Delivery truth table
 
-Delivery states, per recipient: `queued` (stored, nothing left the broker), `sent` (a transport accepted it), `delivered` (evidence from the receiving side), `acknowledged` (`murmur_ack`, or a reply handed over in a `murmur_wait` result: seen, answer later), `replied`. `sent` is never reported as `delivered`.
+Delivery states, per recipient: `queued` (stored, nothing left the broker), `sent` (a transport accepted it), `delivered` (evidence from the receiving side), `acknowledged` (`murmur_ack`: seen, answer later; a reply ends here as soon as it is delivered, because a reply needs no answer and counts as read), `replied`. Unread means `queued`, `sent` or `delivered`. `sent` is never reported as `delivered`.
 
 | CLI | Live push into a running session | Waiting messages also arrive | Evidence for `delivered` |
 | --- | --- | --- | --- |

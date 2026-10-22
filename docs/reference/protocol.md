@@ -52,7 +52,7 @@ Pushed on a listening connection, no `id`:
 
 ## Types
 
-- Delivery state: `queued`, `sent`, `delivered`, `acknowledged`, `replied`.
+- Delivery state: `queued`, `sent`, `delivered`, `acknowledged`, `replied`. Unread counts `queued`, `sent` and `delivered`; a reply delivery ends `acknowledged` once delivered, so it is not unread.
 - Verdict: `agree`, `disagree`, `info`, `choice`.
 - Delivery mode: `push`, `notify`, `silent`.
 - Presence: `online`, `busy`, `idle`, `offline`, `presumed-offline`.

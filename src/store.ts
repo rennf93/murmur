@@ -368,6 +368,11 @@ export class Store {
           db.exec('ALTER TABLE ' + table + ' ADD COLUMN ' + column + ' ' + ddl);
         }
       }
+      // Replies an older version left at delivered count as read. Idempotent.
+      db.exec(
+        "UPDATE deliveries SET state = 'acknowledged', acked_at = COALESCE(acked_at, delivered_at) " +
+        "WHERE state = 'delivered' AND message_id IN (SELECT id FROM messages WHERE is_reply = 1)",
+      );
     }).immediate();
     // The database holds every message and each session's native messaging
     // token: owner-only, like the token file.
@@ -634,8 +639,13 @@ export class Store {
   }
 
   markDelivered(messageId: number, recipient: string, now: number): void {
-    this.stmt("UPDATE deliveries SET state = 'delivered', delivered_at = ? WHERE message_id = ? AND recipient = ?")
-      .run(now, messageId, recipient);
+    // The one rule: a reply needs no answer, so once delivered it is read.
+    this.stmt(
+      "UPDATE deliveries SET delivered_at = ?, " +
+      "state = CASE WHEN (SELECT is_reply FROM messages WHERE id = message_id) = 1 THEN 'acknowledged' ELSE 'delivered' END, " +
+      "acked_at = CASE WHEN (SELECT is_reply FROM messages WHERE id = message_id) = 1 THEN ? ELSE acked_at END " +
+      "WHERE message_id = ? AND recipient = ?",
+    ).run(now, now, messageId, recipient);
   }
 
   markAcked(messageId: number, recipient: string, now: number): void {
