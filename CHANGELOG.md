@@ -4,6 +4,10 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Changed
+
+- A reply counts as read once it is delivered. A delivery of a reply that reaches `delivered` by any path (push proof, adapter confirmation, hook pull, `murmur_read`, `murmur_wait`) now ends `acknowledged`, so it no longer shows as unread. Asks are unchanged: they stay unread until acked or answered. A reply that is answered later still reaches `replied`. On open, reply deliveries an older version left at `delivered` become `acknowledged` (once, idempotent).
+
 ## [0.2.7] - 2026-10-21
 
 ### Added

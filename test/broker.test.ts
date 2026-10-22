@@ -2613,6 +2613,21 @@ describe('session handler', () => {
 });
 
 describe('delivered acks', () => {
+  it('ends a reply acknowledged when the adapter confirms it, and keeps an ask delivered', async () => {
+    fakeWaitWindow();
+    const stack = await buildStack();
+    const alice = await connectAdapter(stack, 'alice', 5060);
+    const bob = await connectAdapter(stack, 'bob', 5061);
+    const ask = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['bob'], body: 'q' });
+    await req(bob.client, { type: 'delivered', ids: [ask.messageId] });
+    const reply = await req<{ messageId: number }>(bob.client, { type: 'reply', messageId: ask.messageId, body: 'a' });
+    await req(alice.client, { type: 'delivered', ids: [reply.messageId] });
+    const stateOf = (id: number, who: string): string | undefined => stack.store.getDeliveries(id).find((d) => d.recipient === who)?.state;
+    expect(stateOf(reply.messageId, 'alice')).toBe('acknowledged');
+    expect(stateOf(ask.messageId, 'bob')).toBe('replied');
+    expect(stack.store.deliveryStatesForRecipient('alice', ['queued', 'sent', 'delivered'])).toBe(0);
+  });
+
   it('moves queued and sent deliveries to delivered and ignores everything else', async () => {
     fakeWaitWindow();
     const stack = await buildStack();

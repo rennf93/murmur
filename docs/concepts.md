@@ -36,14 +36,14 @@ Verdicts are `agree`, `disagree`, `info` and `choice`, with the body starting `A
 
 ## Delivery states
 
-One row per (message, recipient): `queued -> sent -> delivered -> acknowledged`, with `replied` reachable from any state.
+One row per (message, recipient): `queued -> sent -> delivered -> acknowledged`, with `replied` reachable from any state. Unread means `queued`, `sent` or `delivered`.
 
 | State | Meaning |
 | --- | --- |
 | `queued` | Stored; nothing left the broker. |
 | `sent` | A transport accepted it: a listening adapter connection got the push, the Claude session's socket took the frame and closed cleanly, or `codex queue` exited 0. Nothing more is claimed. |
 | `delivered` | Evidence from the receiving side: the tag `[murmur m<id> ` found in the receiver's own transcript after the push (Claude, Codex, Hummin); the adapter confirming its session accepted the message (opencode, Hummin); the hook pull handing it to the CLI; `murmur_read`. |
-| `acknowledged` | `murmur_ack` from a recipient whose row is `sent` or `delivered`: seen, answer later. |
+| `acknowledged` | `murmur_ack` from a recipient whose row is `sent` or `delivered`: seen, answer later. A reply skips `delivered`: once delivered by any path it ends here, because a reply needs no answer and counts as read. |
 | `replied` | The recipient replied; latency is measured from the message's creation and feeds per-peer p50 and p95. |
 
 `sent` is never reported as `delivered`. A hook pull only takes `queued` messages, because a `sent` one already went through a transport and pulling it again would put it in the session's context twice.

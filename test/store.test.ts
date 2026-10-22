@@ -243,6 +243,45 @@ describe('Store', () => {
     expect(store.getDeliveries(424242)).toEqual([]);
   });
 
+  it('ends a delivered reply acknowledged at the delivery time and lets it reach replied', () => {
+    const tid = store.createThread('s', 1);
+    const ask = appendMessage(tid, {});
+    const reply = appendMessage(tid, { isReply: true, inReplyTo: ask.id });
+    store.addDeliveries(ask.id, ['r'], 1);
+    store.addDeliveries(reply.id, ['r'], 1);
+    store.markDelivered(ask.id, 'r', 10);
+    store.markDelivered(reply.id, 'r', 10);
+    expect(store.getDeliveries(ask.id)[0]).toMatchObject({ state: 'delivered', deliveredAt: 10, ackedAt: null });
+    expect(store.getDeliveries(reply.id)[0]).toMatchObject({ state: 'acknowledged', deliveredAt: 10, ackedAt: 10 });
+    store.markReplied(reply.id, 'r', 12, 5);
+    expect(store.getDeliveries(reply.id)[0]).toMatchObject({ state: 'replied', repliedAt: 12 });
+  });
+
+  it('turns reply rows left delivered by an older version into acknowledged once at open', () => {
+    const tid = store.createThread('s', 1);
+    const ask = appendMessage(tid, {});
+    const reply = appendMessage(tid, { isReply: true, inReplyTo: ask.id });
+    store.addDeliveries(ask.id, ['r'], 1);
+    store.addDeliveries(reply.id, ['r'], 1);
+    store.close();
+    const raw = new Database(dbPath);
+    raw.exec(
+      "UPDATE deliveries SET state = 'delivered', delivered_at = 7 WHERE state = 'queued'; " +
+      'UPDATE deliveries SET acked_at = 3 WHERE message_id = ' + String(reply.id) + ';',
+    );
+    raw.close();
+    store = Store.open(dbPath);
+    expect(store.getDeliveries(ask.id)[0]).toMatchObject({ state: 'delivered', ackedAt: null });
+    // acked_at keeps an existing value, and the row stays acknowledged.
+    expect(store.getDeliveries(reply.id)[0]).toMatchObject({ state: 'acknowledged', ackedAt: 3 });
+    const raw2 = new Database(dbPath);
+    raw2.exec("UPDATE deliveries SET state = 'delivered', acked_at = NULL WHERE message_id = " + String(reply.id));
+    raw2.close();
+    store.close();
+    store = Store.open(dbPath);
+    expect(store.getDeliveries(reply.id)[0]).toMatchObject({ state: 'acknowledged', ackedAt: 7 });
+  });
+
   it('marks delivered, acked and replied with timestamps', () => {
     const tid = store.createThread('s', 1);
     const { id } = appendMessage(tid, {});
