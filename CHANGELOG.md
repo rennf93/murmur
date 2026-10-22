@@ -4,6 +4,8 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-10-22
+
 ### Changed
 
 - A reply counts as read once it is delivered. A delivery of a reply that reaches `delivered` by any path (push proof, adapter confirmation, hook pull, `murmur_read`, `murmur_wait`) now ends `acknowledged`, so it no longer shows as unread. Asks are unchanged: they stay unread until acked or answered. A reply that is answered later still reaches `replied`. On open, reply deliveries an older version left at `delivered` become `acknowledged` (once, idempotent).
@@ -162,7 +164,8 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 - Limits: send rate, duplicate window, thread and inbox caps.
 - 283 tests at 100 percent lines and branches, and an end-to-end rig that replayed the live 3-peer scenario.
 
-[Unreleased]: https://github.com/rennf93/murmur/compare/v0.2.7...HEAD
+[Unreleased]: https://github.com/rennf93/murmur/compare/v0.2.8...HEAD
+[0.2.8]: https://github.com/rennf93/murmur/releases/tag/v0.2.8
 [0.2.7]: https://github.com/rennf93/murmur/releases/tag/v0.2.7
 [0.2.6]: https://github.com/rennf93/murmur/releases/tag/v0.2.6
 [0.2.5]: https://github.com/rennf93/murmur/releases/tag/v0.2.5
