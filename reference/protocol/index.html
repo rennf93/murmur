@@ -1664,7 +1664,7 @@
 <p><code>text</code> is the exact text a session should see (tag line, body, reply footer); the tag <code>[murmur m&lt;id&gt;</code> is what delivery proof searches for. Notification kinds: <code>reply_arrived</code>, <code>queued_delivered</code>, <code>peer_offline</code>.</p>
 <h2 id="types">Types<a class="headerlink" href="#types" title="Permanent link">&para;</a></h2>
 <ul>
-<li>Delivery state: <code>queued</code>, <code>sent</code>, <code>delivered</code>, <code>acknowledged</code>, <code>replied</code>.</li>
+<li>Delivery state: <code>queued</code>, <code>sent</code>, <code>delivered</code>, <code>acknowledged</code>, <code>replied</code>. Unread counts <code>queued</code>, <code>sent</code> and <code>delivered</code>; a reply delivery ends <code>acknowledged</code> once delivered, so it is not unread.</li>
 <li>Verdict: <code>agree</code>, <code>disagree</code>, <code>info</code>, <code>choice</code>.</li>
 <li>Delivery mode: <code>push</code>, <code>notify</code>, <code>silent</code>.</li>
 <li>Presence: <code>online</code>, <code>busy</code>, <code>idle</code>, <code>offline</code>, <code>presumed-offline</code>.</li>

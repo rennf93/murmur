@@ -1647,7 +1647,7 @@
 <h2 id="verdicts">Verdicts<a class="headerlink" href="#verdicts" title="Permanent link">&para;</a></h2>
 <p>Verdicts are <code>agree</code>, <code>disagree</code>, <code>info</code> and <code>choice</code>, with the body starting <code>AGREE</code>, <code>DISAGREE</code>, <code>INFO</code> or <code>CHOICE &lt;option&gt;</code>. <code>choice</code> answers a question that offers options, so picking one does not read as a disagreement. <code>murmur_wait</code> returns, for the thread's latest ask, each recipient's state, verdict and reply latency plus their historical p50 and p95, either when everyone (<code>all_replied</code>) or anyone (<code>any_replied</code>) replied, or at the timeout (<code>timeoutMs: 0</code> returns now), together with the text of the replies addressed to the waiter.</p>
 <h2 id="delivery-states">Delivery states<a class="headerlink" href="#delivery-states" title="Permanent link">&para;</a></h2>
-<p>One row per (message, recipient): <code>queued -&gt; sent -&gt; delivered -&gt; acknowledged</code>, with <code>replied</code> reachable from any state.</p>
+<p>One row per (message, recipient): <code>queued -&gt; sent -&gt; delivered -&gt; acknowledged</code>, with <code>replied</code> reachable from any state. Unread means <code>queued</code>, <code>sent</code> or <code>delivered</code>.</p>
 <table>
 <thead>
 <tr>
@@ -1670,7 +1670,7 @@
 </tr>
 <tr>
 <td><code>acknowledged</code></td>
-<td><code>murmur_ack</code> from a recipient whose row is <code>sent</code> or <code>delivered</code>: seen, answer later.</td>
+<td><code>murmur_ack</code> from a recipient whose row is <code>sent</code> or <code>delivered</code>: seen, answer later. A reply skips <code>delivered</code>: once delivered by any path it ends here, because a reply needs no answer and counts as read.</td>
 </tr>
 <tr>
 <td><code>replied</code></td>
