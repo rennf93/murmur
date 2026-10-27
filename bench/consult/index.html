@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -1374,6 +1374,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#cache-split-and-cost" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cache split and cost
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -1476,6 +1487,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#cache-split-and-cost" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cache split and cost
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -1505,7 +1527,7 @@
 <blockquote>
 <p>Consult Peer A and Peer B: ask each of them to check whether HANDLE_RE in src/protocol.ts allows handles of up to 48 characters, and to send their answer back to you with SendMessage, AGREE or DISAGREE with the line they checked. Wait for both answers, then tell me the outcome in one line.</p>
 </blockquote>
-<p>Numbers come from each session's own transcript, counted from the task prompt onward and deduplicated by message id; arm murmur also checks the broker deliveries table. Regenerate with <code>make bench-consult</code>.</p>
+<p>Numbers come from each session's own transcript, counted from the task prompt onward and deduplicated by message id; arm murmur also checks the broker deliveries table. Regenerate with <code>make bench-consult</code>. Note: <code>replies that reached Implementer</code> counts transcript-visible incoming rows only; arm murmur delivers replies through the broker instead, so that column reads <code>none</code> there even though the replies arrive. Arm murmur <code>completed</code> is gated on the deliveries table (<code>deliveriesDb</code> in consult.json), where every reply shows state <code>delivered</code>.</p>
 <h2 id="arm-native">Arm native<a class="headerlink" href="#arm-native" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -1776,6 +1798,55 @@
 <p>Arm native: completed 0 of 3, median tokens 268272, median API calls 7, median wall time 5.7 s.</p>
 <p>Arm native-told: completed 3 of 3, median tokens 510931, median API calls 13, median wall time 13.8 s.</p>
 <p>Arm murmur: completed 3 of 3, median tokens 362879, median API calls 9, median wall time 10.1 s.</p>
+<h2 id="cache-split-and-cost">Cache split and cost<a class="headerlink" href="#cache-split-and-cost" title="Permanent link">&para;</a></h2>
+<p>Component medians from the tables above (three sessions summed per run). Arm native never completed; its row is what the failed attempts cost. Prices: $1 / $1.25 / $0.1 / $5 per MTok (in / cache write / cache read / out; haiku list, 2026-10-20).</p>
+<table>
+<thead>
+<tr>
+<th>arm</th>
+<th>in</th>
+<th>cache write</th>
+<th>cache read</th>
+<th>out</th>
+<th>cache read %</th>
+<th>cached re-read per call</th>
+<th>$ per task</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>native</td>
+<td>18</td>
+<td>15772</td>
+<td>250956</td>
+<td>1540</td>
+<td>93.5%</td>
+<td>35850.9</td>
+<td>$0.0525</td>
+</tr>
+<tr>
+<td>native-told</td>
+<td>32</td>
+<td>22050</td>
+<td>486468</td>
+<td>2317</td>
+<td>95.2%</td>
+<td>37420.6</td>
+<td>$0.0878</td>
+</tr>
+<tr>
+<td>murmur</td>
+<td>22</td>
+<td>17365</td>
+<td>343788</td>
+<td>1704</td>
+<td>94.7%</td>
+<td>38198.7</td>
+<td>$0.0646</td>
+</tr>
+</tbody>
+</table>
+<p>Both completed arms sit at ~95% cache reads, re-reading 37420.6 (native-told) and 38198.7 (murmur) cached tokens per API call, so murmur's saving comes from fewer calls, not smaller re-reads. And because the cache-read fraction matches across arms, the dollar saving tracks the token cut: 26% cheaper per task at these prices versus a 29% token cut, a ratio that holds for any price list with similar read and write multipliers.</p>
 
 
 
@@ -1870,10 +1941,10 @@
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.copy", "navigation.tabs", "navigation.sections", "navigation.indexes", "navigation.top", "navigation.footer", "search.highlight", "search.suggest", "toc.follow"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["content.code.copy", "navigation.tabs", "navigation.sections", "navigation.indexes", "navigation.top", "navigation.footer", "search.highlight", "search.suggest", "toc.follow"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>
