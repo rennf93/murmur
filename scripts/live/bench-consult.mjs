@@ -224,7 +224,8 @@ function render(j) {
   out += 'Three Claude Code sessions (Implementer, Peer A, Peer B), model `' + j.model + '`, Claude Code `' + j.claudeCodeVersion + '`, run on ' + j.date + ', cwd = this repository. ';
   out += 'Arm native has no murmur MCP and no murmur hooks; arm native-told is arm native with a prompt that also tells each peer to send its answer back with SendMessage (below); arm murmur has what `murmur install claude` writes. ';
   out += 'Sessions are renamed first (`/rename Implementer`, `/rename Peer A`, `/rename Peer B`), then this prompt (arms native and murmur) is typed into the Implementer only:\n\n> ' + j.prompt + '\n\nArm native-told gets:\n\n> ' + j.promptNativeTold + '\n\n';
-  out += 'Numbers come from each session\'s own transcript, counted from the task prompt onward and deduplicated by message id; arm murmur also checks the broker deliveries table. Regenerate with `make bench-consult`.\n\n';
+  out += 'Numbers come from each session\'s own transcript, counted from the task prompt onward and deduplicated by message id; arm murmur also checks the broker deliveries table. Regenerate with `make bench-consult`. ';
+  out += 'Note: `replies that reached Implementer` counts transcript-visible incoming rows only; arm murmur delivers replies through the broker instead, so that column reads `none` there even though the replies arrive. Arm murmur `completed` is gated on the deliveries table (`deliveriesDb` in consult.json), where every reply shows state `delivered`.\n\n';
   for (const arm of ARMS) {
     const rs = j.runs.filter((x) => x.arm === arm);
     if (rs.length === 0) continue;
@@ -248,6 +249,24 @@ function render(j) {
     const n = j.runs.filter((x) => x.arm === arm).length;
     const to = j.runs.filter((x) => x.arm === arm && x.timedOut).length;
     out += 'Arm ' + arm + ': completed ' + String(m.completed) + ' of ' + String(n) + ', median tokens ' + f(m.tokens.total) + ', median API calls ' + f(m.apiCalls) + ', median wall time ' + f(m.wallSeconds) + ' s' + (to ? ' (' + String(to) + ' of ' + String(n) + ' timed out)' : '') + '.\n\n';
+  }
+  const prices = { input: 1.0, write: 1.25, read: 0.1, output: 5.0 }; // USD per MTok (in / cache write / cache read / out), haiku list, 2026-10
+  const costRows = ARMS.map((arm) => {
+    const m = j.arms[arm]?.medians;
+    if (!m) return null;
+    const t = m.tokens;
+    const total = t.input_tokens + t.cache_creation_input_tokens + t.cache_read_input_tokens + t.output_tokens;
+    return { arm, t, total, readPct: (100 * t.cache_read_input_tokens) / total, readPerCall: t.cache_read_input_tokens / m.apiCalls,
+      cost: (t.input_tokens * prices.input + t.cache_creation_input_tokens * prices.write + t.cache_read_input_tokens * prices.read + t.output_tokens * prices.output) / 1e6 };
+  }).filter(Boolean);
+  out += '## Cache split and cost\n\n';
+  out += 'Component medians from the tables above (three sessions summed per run). Arm native never completed; its row is what the failed attempts cost. Prices: $' + prices.input + ' / $' + prices.write + ' / $' + prices.read + ' / $' + prices.output + ' per MTok (in / cache write / cache read / out; ' + j.model + ' list, ' + j.date + ').\n\n';
+  out += '| arm | in | cache write | cache read | out | cache read % | cached re-read per call | $ per task |\n|---|---|---|---|---|---|---|---|\n';
+  for (const r of costRows) out += '| ' + [r.arm, r.t.input_tokens, r.t.cache_creation_input_tokens, r.t.cache_read_input_tokens, r.t.output_tokens, r.readPct.toFixed(1) + '%', f(r.readPerCall), '$' + r.cost.toFixed(4)].join(' | ') + ' |\n';
+  const told = costRows.find((r) => r.arm === 'native-told');
+  const mur = costRows.find((r) => r.arm === 'murmur');
+  if (told && mur) {
+    out += '\nBoth completed arms sit at ~' + (Math.round(Math.min(told.readPct, mur.readPct) / 5) * 5) + '% cache reads, re-reading ' + f(told.readPerCall) + ' (native-told) and ' + f(mur.readPerCall) + ' (murmur) cached tokens per API call, so murmur\'s saving comes from fewer calls, not smaller re-reads. And because the cache-read fraction matches across arms, the dollar saving tracks the token cut: ' + ((1 - mur.cost / told.cost) * 100).toFixed(0) + '% cheaper per task at these prices versus a ' + ((1 - mur.total / told.total) * 100).toFixed(0) + '% token cut, a ratio that holds for any price list with similar read and write multipliers.\n\n';
   }
   return out.trimEnd() + '\n';
 }

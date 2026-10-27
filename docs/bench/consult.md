@@ -8,7 +8,7 @@ Arm native-told gets:
 
 > Consult Peer A and Peer B: ask each of them to check whether HANDLE_RE in src/protocol.ts allows handles of up to 48 characters, and to send their answer back to you with SendMessage, AGREE or DISAGREE with the line they checked. Wait for both answers, then tell me the outcome in one line.
 
-Numbers come from each session's own transcript, counted from the task prompt onward and deduplicated by message id; arm murmur also checks the broker deliveries table. Regenerate with `make bench-consult`.
+Numbers come from each session's own transcript, counted from the task prompt onward and deduplicated by message id; arm murmur also checks the broker deliveries table. Regenerate with `make bench-consult`. Note: `replies that reached Implementer` counts transcript-visible incoming rows only; arm murmur delivers replies through the broker instead, so that column reads `none` there even though the replies arrive. Arm murmur `completed` is gated on the deliveries table (`deliveriesDb` in consult.json), where every reply shows state `delivered`.
 
 ## Arm native
 
@@ -54,3 +54,15 @@ Arm native: completed 0 of 3, median tokens 268272, median API calls 7, median w
 Arm native-told: completed 3 of 3, median tokens 510931, median API calls 13, median wall time 13.8 s.
 
 Arm murmur: completed 3 of 3, median tokens 362879, median API calls 9, median wall time 10.1 s.
+
+## Cache split and cost
+
+Component medians from the tables above (three sessions summed per run). Arm native never completed; its row is what the failed attempts cost. Prices: $1 / $1.25 / $0.1 / $5 per MTok (in / cache write / cache read / out; haiku list, 2026-10-20).
+
+| arm | in | cache write | cache read | out | cache read % | cached re-read per call | $ per task |
+|---|---|---|---|---|---|---|---|
+| native | 18 | 15772 | 250956 | 1540 | 93.5% | 35850.9 | $0.0525 |
+| native-told | 32 | 22050 | 486468 | 2317 | 95.2% | 37420.6 | $0.0878 |
+| murmur | 22 | 17365 | 343788 | 1704 | 94.7% | 38198.7 | $0.0646 |
+
+Both completed arms sit at ~95% cache reads, re-reading 37420.6 (native-told) and 38198.7 (murmur) cached tokens per API call, so murmur's saving comes from fewer calls, not smaller re-reads. And because the cache-read fraction matches across arms, the dollar saving tracks the token cut: 26% cheaper per task at these prices versus a 29% token cut, a ratio that holds for any price list with similar read and write multipliers.
