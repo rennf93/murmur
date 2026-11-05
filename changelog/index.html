@@ -1408,7 +1408,18 @@
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="Unreleased">
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#0210-2026-11-05" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0.2.10 - 2026-11-05
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="0.2.10 - 2026-11-05">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
@@ -1960,7 +1971,18 @@
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="Unreleased">
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#0210-2026-11-05" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        0.2.10 - 2026-11-05
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="0.2.10 - 2026-11-05">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
@@ -2491,7 +2513,8 @@
 
 <h1 id="changelog">Changelog<a class="headerlink" href="#changelog" title="Permanent link">&para;</a></h1>
 <p>All notable changes to murmur are documented here. The format follows <a href="https://keepachangelog.com/en/1.1.0/">Keep a Changelog</a> and the project uses <a href="https://semver.org/">Semantic Versioning</a>.</p>
-<h2 id="unreleased"><a href="https://github.com/rennf93/murmur/compare/v0.2.9...HEAD">Unreleased</a><a class="headerlink" href="#unreleased" title="Permanent link">&para;</a></h2>
+<h2 id="unreleased"><a href="https://github.com/rennf93/murmur/compare/v0.2.10...HEAD">Unreleased</a><a class="headerlink" href="#unreleased" title="Permanent link">&para;</a></h2>
+<h2 id="0210-2026-11-05"><a href="https://github.com/rennf93/murmur/releases/tag/v0.2.10">0.2.10</a> - 2026-11-05<a class="headerlink" href="#0210-2026-11-05" title="Permanent link">&para;</a></h2>
 <h3 id="added">Added<a class="headerlink" href="#added" title="Permanent link">&para;</a></h3>
 <ul>
 <li>Pushes reach sessions on another machine. In a remote hub home the MCP server registers with <code>listen: true</code> and hands each push and notice to its own session through <code>CLAUDE_CODE_MESSAGING_SOCKET</code>, which the hub cannot reach across machines; a push the socket took is confirmed with <code>delivered</code>. An idle session there now wakes on a message instead of waiting for its next prompt. Protocol: <code>register</code> takes <code>listen</code> for <code>mcp</code> and <code>adapter</code> connections, and a listening registration gets its queued push messages right away.</li>
