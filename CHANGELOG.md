@@ -4,6 +4,8 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.2.10] - 2026-11-05
+
 ### Added
 
 - Pushes reach sessions on another machine. In a remote hub home the MCP server registers with `listen: true` and hands each push and notice to its own session through `CLAUDE_CODE_MESSAGING_SOCKET`, which the hub cannot reach across machines; a push the socket took is confirmed with `delivered`. An idle session there now wakes on a message instead of waiting for its next prompt. Protocol: `register` takes `listen` for `mcp` and `adapter` connections, and a listening registration gets its queued push messages right away.
@@ -179,7 +181,8 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 - Limits: send rate, duplicate window, thread and inbox caps.
 - 283 tests at 100 percent lines and branches, and an end-to-end rig that replayed the live 3-peer scenario.
 
-[Unreleased]: https://github.com/rennf93/murmur/compare/v0.2.9...HEAD
+[Unreleased]: https://github.com/rennf93/murmur/compare/v0.2.10...HEAD
+[0.2.10]: https://github.com/rennf93/murmur/releases/tag/v0.2.10
 [0.2.9]: https://github.com/rennf93/murmur/releases/tag/v0.2.9
 [0.2.8]: https://github.com/rennf93/murmur/releases/tag/v0.2.8
 [0.2.7]: https://github.com/rennf93/murmur/releases/tag/v0.2.7
