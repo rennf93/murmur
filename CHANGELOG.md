@@ -4,6 +4,13 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-11-05
+
+### Added
+
+- Remote hub homes. An empty `remote` file in `MURMUR_HOME` marks a home whose `bus.sock` is a tunnel to a broker on another machine. There, `murmur serve` and `murmur serve --daemon` refuse to start, autostart never spawns a broker, and the broker-down message points at the tunnel instead of `murmur serve`. Before this, a session that hit the broker-down hint could start a second broker in the hub home and split the bus.
+- Docs: a "Connect sessions across machines" how-to (one hub broker, its socket forwarded over SSH) and the matching trust boundary in the security notes.
+
 ## [0.2.8] - 2026-10-22
 
 ### Changed
@@ -164,7 +171,8 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 - Limits: send rate, duplicate window, thread and inbox caps.
 - 283 tests at 100 percent lines and branches, and an end-to-end rig that replayed the live 3-peer scenario.
 
-[Unreleased]: https://github.com/rennf93/murmur/compare/v0.2.8...HEAD
+[Unreleased]: https://github.com/rennf93/murmur/compare/v0.2.9...HEAD
+[0.2.9]: https://github.com/rennf93/murmur/releases/tag/v0.2.9
 [0.2.8]: https://github.com/rennf93/murmur/releases/tag/v0.2.8
 [0.2.7]: https://github.com/rennf93/murmur/releases/tag/v0.2.7
 [0.2.6]: https://github.com/rennf93/murmur/releases/tag/v0.2.6
