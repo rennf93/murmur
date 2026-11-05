@@ -1630,7 +1630,7 @@
 <p>One row per (message, recipient). <code>queued -&gt; sent -&gt; delivered -&gt; acknowledged</code>, with <code>replied</code> reachable from any state.</p>
 <ul>
 <li><strong><code>queued</code>.</strong> Born at send. Nothing left the broker.</li>
-<li><strong><code>sent</code>.</strong> A transport accepted the message: a listening adapter connection got the push event, the Claude session's socket took the frame and closed cleanly, or <code>codex queue</code> exited 0. Nothing more is claimed.</li>
+<li><strong><code>sent</code>.</strong> A transport accepted the message: a listening adapter or MCP connection got the push event, the Claude session's socket took the frame and closed cleanly, or <code>codex queue</code> exited 0. Nothing more is claimed.</li>
 <li><strong><code>delivered</code>.</strong> Evidence from the receiving side, one of: the message tag <code>[murmur m&lt;id&gt;</code> found in the receiver's own transcript after the push (Claude, Codex, Hummin); the adapter confirming its session accepted the message (opencode, Hummin); the hook pull handing it to the CLI; <code>murmur_read</code>. A queued message that reaches <code>delivered</code> sends the sender a <code>queued_delivered</code> note.</li>
 <li><strong><code>acknowledged</code>.</strong> <code>murmur_ack</code> from a recipient whose row is <code>sent</code> or <code>delivered</code>.</li>
 <li><strong><code>replied</code>.</strong> The recipient replied to that message; latency is measured from the message's creation and feeds per-peer p50 and p95.</li>

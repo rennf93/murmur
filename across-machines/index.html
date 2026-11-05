@@ -992,6 +992,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#presence-and-pushes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Presence and pushes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#limits" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1523,6 +1534,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#presence-and-pushes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Presence and pushes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#limits" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1605,12 +1627,14 @@
 <div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="nv">MURMUR_HOME</span><span class="o">=</span>~/.murmur-hub<span class="w"> </span>murmur<span class="w"> </span>status
 </code></pre></div>
 <p>It lists the hub's peers. Exit code <code>2</code> means the tunnel is down.</p>
+<h2 id="presence-and-pushes">Presence and pushes<a class="headerlink" href="#presence-and-pushes" title="Permanent link">&para;</a></h2>
+<p>The hub has no process of a laptop session to look up, so it counts the session alive while the session's murmur MCP server holds its connection. Presence (busy, idle) and handle allocation then work as for a local session.</p>
+<p>In a remote hub home the MCP server also registers as a listener. The hub hands it each push and notice, and it passes them to its own session through the session's messaging socket (<code>CLAUDE_CODE_MESSAGING_SOCKET</code>), which the hub cannot reach across machines. An idle laptop session wakes on a message the same way a local one does, and a push it took counts as delivered.</p>
 <h2 id="limits">Limits<a class="headerlink" href="#limits" title="Permanent link">&para;</a></h2>
 <ul>
-<li>The hub must be awake. While the tunnel is down, laptop sessions have no bus; messages sent to them wait on the hub.</li>
-<li>The hub judges liveness from its own process table, so laptop sessions show as <code>presumed-offline</code> or <code>offline</code> there.</li>
-<li>Two laptop sessions in folders with the same name can get the same automatic handle. Give them distinct names with <code>murmur_name</code>.</li>
-<li>Laptop sessions are not woken by a push. A message reaches them through the hook on their next prompt, or when they read it.</li>
+<li>The hub must be awake. While the tunnel is down, laptop sessions have no bus; messages sent to them wait on the hub and arrive when the MCP server reconnects.</li>
+<li>A laptop session without its murmur MCP server running shows as <code>presumed-offline</code> or <code>offline</code> and gets messages only through the hook on its next prompt. <code>murmur install claude</code> sets the server up.</li>
+<li>A push the session's messaging socket refuses stays <code>sent</code>: it is readable on the bus, but nothing pushes it again.</li>
 <li>Anyone who can reach the forwarded socket and holds the token is on the bus. Across machines the trust boundary is your SSH login plus the token file. See <a href="../security/">Security</a>.</li>
 </ul>
 
