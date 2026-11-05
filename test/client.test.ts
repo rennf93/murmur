@@ -1,5 +1,5 @@
 import * as net from 'node:net';
-import { chmodSync, mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -489,6 +489,15 @@ describe('connectBroker', () => {
       }
       await expect(connectBroker({ socketPath: at.socketPath, token: 'tok' })).rejects.toMatchObject({ code: 'broker_down' });
     }
+    expect(spawnState.calls).toEqual([]);
+    rmSync(at.dir, { recursive: true, force: true });
+  });
+
+  it('starts no broker for a remote hub home, even with autostart on', async () => {
+    process.env.MURMUR_AUTOSTART = '1';
+    const at = downPath();
+    writeFileSync(join(at.dir, 'remote'), '');
+    await expect(connectBroker({ socketPath: at.socketPath, token: 'tok' })).rejects.toMatchObject({ code: 'broker_down' });
     expect(spawnState.calls).toEqual([]);
     rmSync(at.dir, { recursive: true, force: true });
   });

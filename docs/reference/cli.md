@@ -6,7 +6,9 @@ murmur <command> [args]
 
 Environment: `MURMUR_HOME` relocates the home (default `~/.murmur`) for every component. The broker socket is `$MURMUR_HOME/bus.sock`, the database `murmur.db`, the token file `token`.
 
-Exit codes: `0` success, `1` usage or request error, `2` broker down (`murmur broker is down; start it with: murmur serve`).
+A remote hub home is one whose `bus.sock` is a tunnel to a broker on another machine. An empty `remote` file in the home marks it: `serve` (with or without `--daemon`) refuses to start there, and autostart never runs.
+
+Exit codes: `0` success, `1` usage or request error, `2` broker down (`murmur broker is down; start it with: murmur serve`, or in a remote hub home `murmur hub is unreachable; <home> is a remote hub home, so check its tunnel instead of starting a broker`).
 
 | Command | What it does |
 | --- | --- |

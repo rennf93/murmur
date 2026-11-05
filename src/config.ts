@@ -22,6 +22,12 @@ export function getPaths(envHome?: string): MurmurPaths {
   };
 }
 
+// A home whose bus.sock is a tunnel to a broker on another machine holds a
+// `remote` marker file; nothing may start a local broker there.
+export function isRemoteHome(home: string): boolean {
+  return existsSync(join(home, 'remote'));
+}
+
 // Creates the murmur home directory (mode 0700) and, when missing, the token
 // file (mode 0600) holding a freshly generated random token. Throws a plain
 // Error when permissions cannot be set.
