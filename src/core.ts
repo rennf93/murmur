@@ -200,6 +200,10 @@ export class MurmurCore {
   private readonly hookOverrides = new Map<string, { state: 'busy' | 'idle'; at: number }>();
   // Set by the broker: does the handle have a live mcp or adapter connection.
   hasTools: (handle: string) => boolean = () => false;
+  // Set by the broker: is a live mcp or adapter connection open from this
+  // host. A session on another machine has no process here to look up, so
+  // that connection is its liveness.
+  hostConnected: (host: HostRef) => boolean = () => false;
   // Process table source for session liveness, asked only for the pids that
   // matter; injectable for tests.
   private readonly procTable: (pids: number[]) => ProcTable;
@@ -640,7 +644,7 @@ export class MurmurCore {
       const hookState = override !== undefined ? override.state : normalizeHookState(peer.hookState);
       const hookAt = override !== undefined ? override.at : peer.lastHookActivityAt;
       const sessions = byHandle.get(peer.handle) ?? [];
-      const session = sessions.find((row) => row.state !== 'ended' && isAlive(table, row.hostPid, row.hostStart));
+      const session = sessions.find((row) => row.state !== 'ended' && this.alive(table, row));
       let presence: PresenceKind;
       let busySince: number | null = null;
       let idleSince: number | null = null;
@@ -846,7 +850,7 @@ export class MurmurCore {
       .listSessions()
       .filter((row) => row.state !== 'ended' && ancestors.includes(row.hostPid));
     const table = this.safeProcTable(candidates.map((row) => row.hostPid));
-    const live = candidates.filter((row) => isAlive(table, row.hostPid, row.hostStart));
+    const live = candidates.filter((row) => this.alive(table, row));
     for (const pid of ancestors) {
       const match = live.find((row) => row.hostPid === pid);
       if (match !== undefined) {
@@ -920,7 +924,7 @@ export class MurmurCore {
     }
     const holders = this.store.sessionsForHandle(handle).filter((r) => r.id !== exceptId && r.state !== 'ended');
     const table = this.safeProcTable(holders.map((r) => r.hostPid));
-    return !holders.some((r) => isAlive(table, r.hostPid, r.hostStart));
+    return !holders.some((r) => this.alive(table, r));
   }
 
   // <client>-<cwd basename>, then -2, -3, ... until no live session holds
@@ -934,6 +938,10 @@ export class MurmurCore {
       handle = base + '-' + String(n);
     }
     return handle;
+  }
+
+  private alive(table: ProcTable, row: SessionRow): boolean {
+    return isAlive(table, row.hostPid, row.hostStart) || this.hostConnected(row);
   }
 
   private safeProcTable(pids: number[]): ProcTable {

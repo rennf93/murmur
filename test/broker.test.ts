@@ -3320,6 +3320,100 @@ describe('one reply resolving two waits', () => {
   });
 });
 
+describe('sessions on another machine', () => {
+  // A host the hub's process table does not know: the session runs elsewhere
+  // and reaches the broker through a forwarded socket.
+  const REMOTE = { hostPid: 424242, hostStart: 'Thu Nov  5 17:43:34 2026' };
+
+  async function announceRemote(stack: Stack, handle: string): Promise<void> {
+    const hook = await connectPeer(stack);
+    await req<SessionResult>(hook.client, {
+      type: 'session',
+      event: 'session-start',
+      client: 'claude',
+      cliSessionId: 'cli-' + handle,
+      host: REMOTE,
+      handle,
+    });
+  }
+
+  async function presenceOf(viewer: MurmurClient, handle: string): Promise<string | undefined> {
+    return (await statusOf(viewer)).peers.find((p) => p.handle === handle)?.presence;
+  }
+
+  it('is alive while an MCP connection from its host is open', async () => {
+    const stack = await buildStack();
+    await announceRemote(stack, 'laptop');
+    const viewer = await connectPeer(stack, { handle: 'viewer' });
+    expect(await presenceOf(viewer.client, 'laptop')).not.toBe('idle');
+    expect(stack.core.claimable('laptop', null)).toBe(true);
+    const mcp = await connectPeer(stack);
+    await req<RegisterResult>(mcp.client, { type: 'register', clientKind: 'mcp', host: REMOTE });
+    expect(await presenceOf(viewer.client, 'laptop')).toBe('idle');
+    expect(stack.core.claimable('laptop', null)).toBe(false);
+    // A shell command in that session names its host among its ancestors.
+    const cli = await connectPeer(stack);
+    expect(await req<RegisterResult>(cli.client, { type: 'register', clientKind: 'cli', ancestors: [REMOTE.hostPid] })).toMatchObject({
+      handle: 'laptop',
+    });
+    mcp.client.close();
+    await settle(() => stack.core.claimable('laptop', null), 'laptop released');
+  });
+
+  it('pushes to a listening MCP connection, queued messages first', async () => {
+    const stack = await buildStack();
+    await announceRemote(stack, 'laptop');
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    const early = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['laptop'], body: 'while away' });
+    expect(early.deliveries[0]?.state).toBe('queued');
+    const mcp = await connectPeer(stack);
+    await req<RegisterResult>(mcp.client, { type: 'register', clientKind: 'mcp', host: REMOTE, listen: true });
+    await settle(() => pushesOf(mcp).length === 1, 'queued push');
+    const late = await req<SendResult>(alice.client, { type: 'send', threadId: early.threadId, to: ['laptop'], body: 'now' });
+    expect(late.deliveries[0]?.state).toBe('sent');
+    await settle(() => pushesOf(mcp).length === 2, 'second push');
+    expect(pushesOf(mcp).map((ev) => ev.payload.message.id)).toEqual([early.messageId, late.messageId]);
+    expect(await req<{ delivered: number[] }>(mcp.client, { type: 'delivered', ids: [early.messageId, late.messageId] })).toEqual({
+      delivered: [early.messageId, late.messageId],
+    });
+  });
+
+  it('keeps listen when the MCP server registers before its session announces itself', async () => {
+    const stack = await buildStack();
+    const mcp = await connectPeer(stack);
+    await req<RegisterResult>(mcp.client, { type: 'register', clientKind: 'mcp', host: REMOTE, listen: true });
+    await announceRemote(stack, 'laptop');
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    const sent = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['laptop'], body: 'hi' });
+    expect(sent.deliveries[0]?.state).toBe('sent');
+    await settle(() => pushesOf(mcp).length === 1, 'push');
+  });
+
+  it('keeps a listener listening, and its host, across a rename that omits them', async () => {
+    const stack = await buildStack();
+    await announceRemote(stack, 'laptop');
+    const mcp = await connectPeer(stack);
+    await req<RegisterResult>(mcp.client, { type: 'register', clientKind: 'mcp', host: REMOTE, listen: true });
+    // murmur_name and the adapters rename by registering again on the same connection.
+    await req<RegisterResult>(mcp.client, { type: 'register', clientKind: 'mcp', handle: 'laptop-two' });
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    const sent = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['laptop-two'], body: 'still there?' });
+    expect(sent.deliveries[0]?.state).toBe('sent');
+    expect(stack.core.claimable('laptop', null)).toBe(false);
+  });
+
+  it('ignores listen on a connection that is not long-lived', async () => {
+    const stack = await buildStack();
+    await announceRemote(stack, 'laptop');
+    const cli = await connectPeer(stack);
+    await req<RegisterResult>(cli.client, { type: 'register', clientKind: 'cli', handle: 'laptop', listen: true });
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    const sent = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['laptop'], body: 'hi' });
+    expect(sent.deliveries[0]?.state).toBe('queued');
+    expect(pushesOf(cli)).toEqual([]);
+  });
+});
+
 describe('threads over the wire', () => {
   it('lists threads, defaults to ten, caps at fifty and validates limit', async () => {
     const stack = await buildStack();

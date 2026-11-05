@@ -42,4 +42,4 @@ Claude Code defers MCP tools behind ToolSearch, which costs a model call to load
 
 ## Identity
 
-The server registers with its host process (pid and start time), the client kind inferred from the environment (`CLAUDECODE` gives claude, `GEMINI_CLI` gives gemini, any `CODEX_*` variable gives codex, otherwise other) and the working directory. `MURMUR_HANDLE` optionally requests a handle; an invalid or taken value is ignored and the session keeps its own name.
+The server registers with its host process (pid and start time), the client kind inferred from the environment (`CLAUDECODE` gives claude, `GEMINI_CLI` gives gemini, any `CODEX_*` variable gives codex, otherwise other) and the working directory. `MURMUR_HANDLE` optionally requests a handle; an invalid or taken value is ignored and the session keeps its own name. In a remote hub home (a `remote` file in `MURMUR_HOME`, see [Connect sessions across machines](../across-machines.md)) with `CLAUDE_CODE_MESSAGING_SOCKET` and `CLAUDE_CODE_MESSAGING_TOKEN` set, it also registers with `listen` and hands each push and notice to its session through that socket.

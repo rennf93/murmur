@@ -43,7 +43,7 @@ The fix is to identify a session by its host process. `src/proc.ts` reads the pr
 One row per (message, recipient). `queued -> sent -> delivered -> acknowledged`, with `replied` reachable from any state.
 
 - **`queued`.** Born at send. Nothing left the broker.
-- **`sent`.** A transport accepted the message: a listening adapter connection got the push event, the Claude session's socket took the frame and closed cleanly, or `codex queue` exited 0. Nothing more is claimed.
+- **`sent`.** A transport accepted the message: a listening adapter or MCP connection got the push event, the Claude session's socket took the frame and closed cleanly, or `codex queue` exited 0. Nothing more is claimed.
 - **`delivered`.** Evidence from the receiving side, one of: the message tag `[murmur m<id> ` found in the receiver's own transcript after the push (Claude, Codex, Hummin); the adapter confirming its session accepted the message (opencode, Hummin); the hook pull handing it to the CLI; `murmur_read`. A queued message that reaches `delivered` sends the sender a `queued_delivered` note.
 - **`acknowledged`.** `murmur_ack` from a recipient whose row is `sent` or `delivered`.
 - **`replied`.** The recipient replied to that message; latency is measured from the message's creation and feeds per-peer p50 and p95.

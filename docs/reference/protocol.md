@@ -14,7 +14,7 @@ Every client message carries `v` (protocol version) and `id` (a per-connection m
 | `type` | Fields | Result |
 | --- | --- | --- |
 | `auth` | `token` | none |
-| `register` | `handle?`, `display?`, `role?`, `clientKind` (`mcp`\|`cli`\|`hook`\|`adapter`), `host?` ({`hostPid`,`hostStart`}), `ancestors?` (pids), `client?`, `cwd?`, `owner?` | `{handle, owner}` |
+| `register` | `handle?`, `display?`, `role?`, `clientKind` (`mcp`\|`cli`\|`hook`\|`adapter`), `host?` ({`hostPid`,`hostStart`}), `ancestors?` (pids), `client?`, `cwd?`, `owner?`, `listen?` | `{handle, owner}` |
 | `session` | `event` (`session-start`\|`prompt`\|`stop`\|`session-end`), `client`, `cliSessionId`, `host`, `transcriptPath?`, `title?`, `cwd?`, `handle?`, `native?` ({`socketPath`,`token`}), `listen?` | `{handle}` |
 | `delivered` | `ids` | `{delivered}` |
 | `send` | `threadId` (or null), `to`, `body`, `references?`, `mode?` | `{messageId, threadId, seq, via, deliveries}` |
@@ -33,7 +33,7 @@ Every client message carries `v` (protocol version) and `id` (a per-connection m
 | `native-register` | `handle`, `socketPath`, `token` | none |
 | `fetch-push` | `handle`, `limit` | `{messages, texts?}` |
 
-`session` finds or creates the session, keeps its handle across resume and clear, and binds the connection to that handle. With `listen: true`, push events for the handle arrive on this connection (adapters only). `title` is the name the user gave the session in its CLI (Claude's `/rename`): the session's display becomes the title, and its handle becomes the title's slug (lowercase, runs of other characters as one hyphen, at most 48 characters) while the handle is automatic and the slug is free; connections bound to the old handle follow a rename. `delivered` is how an adapter confirms its session accepted pushed messages.
+`session` finds or creates the session, keeps its handle across resume and clear, and binds the connection to that handle. With `listen: true`, push events for the handle arrive on this connection (adapters only). `register` takes `listen` too, for `mcp` and `adapter` connections (ignored for the others): the MCP server sets it in a remote hub home and hands pushes to its session itself, and queued push messages are pushed as soon as it registers. An open `mcp` or `adapter` connection that registered with a `host` keeps the session on that host alive, so a session on another machine, which has no process on the hub, counts as alive while it is connected. `title` is the name the user gave the session in its CLI (Claude's `/rename`): the session's display becomes the title, and its handle becomes the title's slug (lowercase, runs of other characters as one hyphen, at most 48 characters) while the handle is automatic and the slug is free; connections bound to the old handle follow a rename. `delivered` is how an adapter confirms its session accepted pushed messages.
 
 `register` with `owner: true` may carry `ancestors`: the broker resolves the nearest live session among them as the connection's `via`, and every `send` and `reply` on that connection stores it on the message. Message summaries (thread views, push payloads) expose `via` (a handle or null), `send` returns it, and the delivery tag reads `from renn via <handle>`. A reply goes to every sender, every recipient and every `via` of the thread, minus the replier. `prune` deletes peers that are not the owner and have no session, sent message, delivery, group membership or live connection.
 

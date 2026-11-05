@@ -4,6 +4,14 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Added
+
+- Pushes reach sessions on another machine. In a remote hub home the MCP server registers with `listen: true` and hands each push and notice to its own session through `CLAUDE_CODE_MESSAGING_SOCKET`, which the hub cannot reach across machines; a push the socket took is confirmed with `delivered`. An idle session there now wakes on a message instead of waiting for its next prompt. Protocol: `register` takes `listen` for `mcp` and `adapter` connections, and a listening registration gets its queued push messages right away.
+
+### Fixed
+
+- Sessions on another machine count as alive. A session counts as alive when its host process runs on the hub or when a live `mcp` or `adapter` connection from its host is open. Before, the hub looked only at its own process table, so a session on another machine showed as `presumed-offline` and two of them in folders with the same name could get the same handle.
+
 ## [0.2.9] - 2026-11-05
 
 ### Added
