@@ -537,6 +537,8 @@
       
         
       
+        
+      
     
     
     
@@ -867,6 +869,34 @@
     
   
     Consult several sessions with one message
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../across-machines/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Connect sessions across machines
   
 
     
@@ -1610,7 +1640,8 @@
 <div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>murmur &lt;command&gt; [args]
 </code></pre></div>
 <p>Environment: <code>MURMUR_HOME</code> relocates the home (default <code>~/.murmur</code>) for every component. The broker socket is <code>$MURMUR_HOME/bus.sock</code>, the database <code>murmur.db</code>, the token file <code>token</code>.</p>
-<p>Exit codes: <code>0</code> success, <code>1</code> usage or request error, <code>2</code> broker down (<code>murmur broker is down; start it with: murmur serve</code>).</p>
+<p>A remote hub home is one whose <code>bus.sock</code> is a tunnel to a broker on another machine. An empty <code>remote</code> file in the home marks it: <code>serve</code> (with or without <code>--daemon</code>) refuses to start there, and autostart never runs.</p>
+<p>Exit codes: <code>0</code> success, <code>1</code> usage or request error, <code>2</code> broker down (<code>murmur broker is down; start it with: murmur serve</code>, or in a remote hub home <code>murmur hub is unreachable; &lt;home&gt; is a remote hub home, so check its tunnel instead of starting a broker</code>).</p>
 <table>
 <thead>
 <tr>
