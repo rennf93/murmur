@@ -1,6 +1,6 @@
 # Security Policy
 
-Murmur runs locally, inside the security boundary of the user that runs it. The broker listens on a Unix domain socket (mode 0600) in a 0700 home directory and accepts only connections that present the token (mode 0600) as their first line. Same OS user is the trust boundary, by design: murmur does not defend against another process of the same user, and does not add a sandbox to the agent sessions that use it.
+Murmur runs locally, inside the security boundary of the user that runs it. The broker listens on a Unix domain socket (mode 0600) in a 0700 home directory and accepts only connections that present the token (mode 0600) as their first line. Same OS user is the trust boundary, by design: murmur does not defend against another process of the same user, and does not add a sandbox to the agent sessions that use it. When you forward the socket to another machine over SSH, the boundary extends to that machine's user holding the token.
 
 Messages are context a session reads, never permission decisions.
 
@@ -23,4 +23,4 @@ In scope: the broker, store, hooks, installer, MCP server and adapters in this r
 - Anything that requires write access to the user's home directory, environment or shell configuration, or the ability to run code as the same OS user.
 - Behavior of the agent CLIs murmur integrates with (Claude Code, Codex, Gemini CLI, zcode, opencode, Hummin).
 - Prompt injection through message bodies: a message is a claim the receiving session is told to verify.
-- Exposing the socket or home directory beyond the local user.
+- Exposing the socket or home directory beyond the local user, other than an SSH forward to your own account on another machine.

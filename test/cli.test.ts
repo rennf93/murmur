@@ -764,6 +764,22 @@ describe('serve', () => {
     expect(spawnState.unrefs).toBe(2);
   });
 
+  it('refuses to start a broker in a remote hub home, with or without --daemon', async () => {
+    const remoteHome = mkdtempSync(join(tmpdir(), 'murmur-cli-remote-'));
+    extraHomes.push(remoteHome);
+    writeFileSync(join(remoteHome, 'remote'), '');
+    process.env.MURMUR_HOME = remoteHome;
+    const spawnsBefore = spawnState.calls.length;
+    for (const args of [['serve', '--daemon'], ['serve']]) {
+      const cap = capture();
+      expect(await runCli(args, cap.io)).toBe(1);
+      expect(cap.err.join('')).toContain(remoteHome + ' is a remote hub home');
+      expect(cap.out).toEqual([]);
+    }
+    expect(spawnState.calls).toHaveLength(spawnsBefore);
+    expect(existsSync(getPaths(remoteHome).socketPath)).toBe(false);
+  });
+
   // Runs `murmur serve` in this process against serveHome until SIGTERM,
   // calling during() once the broker accepts connections.
   async function serveOnce(serveHome: string, during: (servePaths: MurmurPaths, out: string) => Promise<void>): Promise<void> {
@@ -1162,5 +1178,18 @@ describe('broker down', () => {
     expect(await runCli(['slash'], slash.io)).toBe(2);
     expect(slash.err.join('')).toBe('murmur broker is down; start it with: murmur serve\n');
     expect(slash.out).toEqual([]);
+  });
+
+  it('points at the tunnel instead of serve in a remote hub home', async () => {
+    const downHome = mkdtempSync(join(tmpdir(), 'murmur-cli-down-'));
+    extraHomes.push(downHome);
+    ensureHome(getPaths(downHome));
+    writeFileSync(join(downHome, 'remote'), '');
+    process.env.MURMUR_HOME = downHome;
+    const status = capture();
+    expect(await runCli(['status'], status.io)).toBe(2);
+    expect(status.err.join('')).toBe(
+      'murmur hub is unreachable; ' + downHome + ' is a remote hub home, so check its tunnel instead of starting a broker\n',
+    );
   });
 });

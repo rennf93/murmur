@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { MurmurClient, connectBroker, isBrokerDown } from './client.js';
-import { ensureHome, getPaths, readToken } from './config.js';
+import { ensureHome, getPaths, isRemoteHome, readToken } from './config.js';
 import type { CoreEvents } from './core.js';
 import { HOOK_CLIENTS, runHook } from './hooks.js';
 import type { HookClient } from './hooks.js';
@@ -62,7 +63,12 @@ export async function runCli(argv: string[], io?: CliIo): Promise<number> {
     return await dispatch(argv, out, err);
   } catch (e) {
     if (isBrokerDown(e)) {
-      err('murmur broker is down; start it with: murmur serve\n');
+      const home = getPaths().home;
+      err(
+        isRemoteHome(home)
+          ? 'murmur hub is unreachable; ' + home + ' is a remote hub home, so check its tunnel instead of starting a broker\n'
+          : 'murmur broker is down; start it with: murmur serve\n',
+      );
       return 2;
     }
     if (e instanceof MurmurError) {
@@ -158,6 +164,13 @@ async function cmdInit(out: Sink): Promise<number> {
 }
 
 async function cmdServe(args: string[], out: Sink): Promise<number> {
+  const paths = getPaths();
+  if (isRemoteHome(paths.home)) {
+    throw new Error(
+      'murmur: ' + paths.home + ' is a remote hub home; start its tunnel, not a broker (delete ' +
+        join(paths.home, 'remote') + ' to serve here)',
+    );
+  }
   if (args.includes('--daemon')) {
     // Re-spawn this exact entry file without the flag, detached from the
     // current terminal, then report success immediately.
@@ -171,7 +184,6 @@ async function cmdServe(args: string[], out: Sink): Promise<number> {
     import('./core.js'),
     import('./broker.js'),
   ]);
-  const paths = getPaths();
   ensureHome(paths);
   const store = Store.open(paths.dbPath);
   // An autostarted broker may run before murmur init ever did.

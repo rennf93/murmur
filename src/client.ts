@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
 import { Socket, createConnection } from 'node:net';
+import { dirname } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
+import { isRemoteHome } from './config.js';
 import { LineReader, MurmurError, PROTOCOL_VERSION, encodeLine } from './protocol.js';
 import type { ClientMessage, ServerEvent, ServerReply } from './protocol.js';
 
@@ -214,12 +216,18 @@ export function isBrokerDown(e: unknown): boolean {
 
 // Connects, and when the broker is down and autostart is on (the murmur bin
 // sets MURMUR_AUTOSTART=1; tests and library callers never do), starts one
-// detached broker and retries for up to three seconds.
+// detached broker and retries for up to three seconds. A remote hub home's
+// broker lives on another machine, so it is never started here.
 export async function connectBroker(opts: MurmurClientOptions): Promise<MurmurClient> {
   try {
     return await MurmurClient.connect(opts);
   } catch (err) {
-    if (process.env.MURMUR_AUTOSTART !== '1' || !(err instanceof MurmurError) || err.code !== 'broker_down') {
+    if (
+      process.env.MURMUR_AUTOSTART !== '1' ||
+      !(err instanceof MurmurError) ||
+      err.code !== 'broker_down' ||
+      isRemoteHome(dirname(opts.socketPath))
+    ) {
       throw err;
     }
     spawn(process.execPath, [process.argv[1] ?? '', 'serve'], { detached: true, stdio: 'ignore' }).unref();

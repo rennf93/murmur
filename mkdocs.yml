@@ -54,6 +54,7 @@ nav:
       - Hummin: clients/hummin.md
     - Use /murmur and groups: using-murmur.md
     - Consult several sessions with one message: consult.md
+    - Connect sessions across machines: across-machines.md
     - Troubleshooting: troubleshooting.md
     - Releasing: releasing.md
   - Reference:
