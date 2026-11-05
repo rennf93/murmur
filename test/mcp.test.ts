@@ -1,7 +1,8 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -11,7 +12,7 @@ import { MurmurClient } from '../src/client.js';
 import { ensureHome, getPaths, readToken } from '../src/config.js';
 import type { MurmurPaths } from '../src/config.js';
 import { MurmurCore } from '../src/core.js';
-import { buildMcpServer, clientFromEnv, identityFor, runMcpServer } from '../src/mcp.js';
+import { buildMcpServer, clientFromEnv, deliverLocally, identityFor, pushTarget, runMcpServer } from '../src/mcp.js';
 import type { HostInfo, ProcInfo } from '../src/proc.js';
 import type {
   AckResult,
@@ -96,10 +97,20 @@ const stacks: Stack[] = [];
 const homes: string[] = [];
 const clients: MurmurClient[] = [];
 const pairs: Pair[] = [];
-const savedEnv: { home: string | undefined; handle: string | undefined } = {
+const savedEnv: { home: string | undefined; handle: string | undefined; socket: string | undefined; token: string | undefined } = {
   home: process.env.MURMUR_HOME,
   handle: process.env.MURMUR_HANDLE,
+  socket: process.env.CLAUDE_CODE_MESSAGING_SOCKET,
+  token: process.env.CLAUDE_CODE_MESSAGING_TOKEN,
 };
+
+function restoreEnv(key: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[key];
+  } else {
+    process.env[key] = value;
+  }
+}
 
 function freshHome(): string {
   const home = mkdtempSync(join(tmpdir(), 'murmur-mcp-'));
@@ -203,6 +214,61 @@ afterEach(async () => {
   } else {
     process.env.MURMUR_HANDLE = savedEnv.handle;
   }
+  restoreEnv('CLAUDE_CODE_MESSAGING_SOCKET', savedEnv.socket);
+  restoreEnv('CLAUDE_CODE_MESSAGING_TOKEN', savedEnv.token);
+});
+
+describe('local push in a remote hub home', () => {
+  const MESSAGING = { CLAUDE_CODE_MESSAGING_SOCKET: '/tmp/cc.sock', CLAUDE_CODE_MESSAGING_TOKEN: 'ntok' };
+
+  it('pushTarget is set only in a remote hub home with both messaging variables', () => {
+    const home = freshHome();
+    expect(pushTarget(MESSAGING, home)).toBeNull();
+    writeFileSync(join(home, 'remote'), '');
+    expect(pushTarget(MESSAGING, home)).toEqual({ socketPath: '/tmp/cc.sock', token: 'ntok' });
+    expect(pushTarget({ CLAUDE_CODE_MESSAGING_SOCKET: '/tmp/cc.sock' }, home)).toBeNull();
+    expect(pushTarget({ CLAUDE_CODE_MESSAGING_TOKEN: 'ntok' }, home)).toBeNull();
+  });
+
+  it('deliverLocally sends a push, confirms it only when accepted, and sends notices as text', async () => {
+    const target = { socketPath: '/tmp/cc.sock', token: 'ntok' };
+    const sends: Array<{ socketPath: string; token: string; text: string }> = [];
+    let accept = true;
+    const send = async (socketPath: string, token: string, text: string): Promise<{ ok: boolean; error: string | null }> => {
+      sends.push({ socketPath, token, text });
+      return accept ? { ok: true, error: null } : { ok: false, error: 'refused' };
+    };
+    const requests: unknown[] = [];
+    const client = {
+      request: async <T>(msg: unknown): Promise<T> => {
+        requests.push(msg);
+        return { delivered: [] } as T;
+      },
+    };
+    const push = { v: 2, type: 'event', event: 'push', payload: { message: { id: 7 }, mode: 'push', footer: '', text: '[murmur m7] hi' } } as unknown as ServerEvent;
+    await deliverLocally(push, target, client, send);
+    expect(sends).toEqual([{ ...target, text: '[murmur m7] hi' }]);
+    expect(requests).toEqual([{ type: 'delivered', ids: [7] }]);
+    accept = false;
+    await deliverLocally(push, target, client, send);
+    expect(requests).toHaveLength(1);
+    const notice = {
+      v: 2,
+      type: 'event',
+      event: 'notification',
+      payload: [
+        { kind: 'reply_arrived', threadId: 1, fromHandle: 'a', detail: 'reply from a in thread 1' },
+        { kind: 'peer_offline', threadId: 2, fromHandle: 'b', detail: 'peer b went offline' },
+      ],
+    } as unknown as ServerEvent;
+    await deliverLocally(notice, target, client, send);
+    expect(sends[2]).toEqual({ ...target, text: '[murmur notice] reply from a in thread 1; peer b went offline' });
+    expect(requests).toHaveLength(1);
+    // A broker connection that went away does not turn into a rejection.
+    accept = true;
+    const gone = { request: async (): Promise<never> => Promise.reject(new Error('broker_closed')) };
+    await expect(deliverLocally(push, target, gone, send)).resolves.toBeUndefined();
+  });
 });
 
 describe('identity helpers', () => {
@@ -547,5 +613,41 @@ describe('runMcpServer', () => {
     up.stdin.end();
     await up.running;
     await settle(async () => (await presenceOf(stack, 'stdin-closes')) !== 'online', 'offline once stdin closed');
+  });
+
+  it('in a remote hub home listens and hands pushes to the local messaging socket', async () => {
+    const stack = await buildStack();
+    writeFileSync(join(stack.home, 'remote'), '');
+    const sockPath = join(freshHome(), 'cc.sock');
+    const frames: string[] = [];
+    const native = createServer((sock) => {
+      let buf = '';
+      sock.on('data', (chunk) => {
+        buf += chunk.toString();
+      });
+      sock.on('end', () => {
+        frames.push(buf);
+        sock.end();
+      });
+    });
+    await new Promise<void>((resolve) => {
+      native.listen(sockPath, resolve);
+    });
+    process.env.CLAUDE_CODE_MESSAGING_SOCKET = sockPath;
+    process.env.CLAUDE_CODE_MESSAGING_TOKEN = 'ntok';
+    hostState.host = HOST;
+    await announce(stack, 'remote-a');
+    const up = await launch(stack);
+    try {
+      const alice = await connectRaw(stack, 'alice');
+      const sent = await req<SendResult>(alice.client, { type: 'send', threadId: null, to: ['remote-a'], body: 'over the tunnel' });
+      await settle(() => frames.length === 1, 'local native frame');
+      expect(frames[0]).toContain('"token":"ntok"');
+      expect(frames[0]).toContain('over the tunnel');
+      await settle(() => stack.store.getDeliveries(sent.messageId)[0]?.state === 'delivered', 'delivered');
+    } finally {
+      await up.stop();
+      native.close();
+    }
   });
 });

@@ -230,6 +230,11 @@ export interface NotificationPayload {
   detail: string;
 }
 
+// A notification batch as the plain text a session reads.
+export function noticeText(payloads: NotificationPayload[]): string {
+  return '[murmur notice] ' + payloads.map((p) => p.detail).join('; ');
+}
+
 // Client messages. Every member carries the protocol version and a
 // per-connection monotonic request id. The first line on any connection
 // must be auth, before anything else.
@@ -253,6 +258,8 @@ export interface HostRef {
 // session. ancestors (CLI): the nearest live session host among them, else
 // the owner. owner: true forces the owner (the human surface); with ancestors
 // it also records the live session among them as the via of its sends.
+// listen (mcp and adapter only): push and notification events for the handle
+// arrive on this connection, as with session listen.
 export interface RegisterMessage {
   v: number;
   id: number;
@@ -266,6 +273,7 @@ export interface RegisterMessage {
   client?: CliName;
   cwd?: string;
   owner?: boolean;
+  listen?: boolean;
 }
 
 // Sent by hooks (one per lifecycle event) and by in-process adapters. Finds

@@ -5,15 +5,19 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { MurmurClient, connectBroker } from './client.js';
-import { getPaths, readToken } from './config.js';
+import { getPaths, isRemoteHome, readToken } from './config.js';
 import type { MurmurPaths } from './config.js';
+import { nativeSend } from './native.js';
+import type { NativeSendResult } from './native.js';
 import { currentHost } from './proc.js';
 import type { HostInfo } from './proc.js';
-import { HANDLE_RE, MurmurError, WAIT_DEFAULT_MS, WAIT_MAX_MS } from './protocol.js';
+import { HANDLE_RE, MurmurError, WAIT_DEFAULT_MS, WAIT_MAX_MS, noticeText } from './protocol.js';
 import type {
   AckMessage,
   AckResult,
   CliName,
+  DeliveredMessage,
+  DeliveredResult,
   GroupsMessage,
   RegisterMessage,
   RegisterResult,
@@ -21,6 +25,7 @@ import type {
   ReplyResult,
   SendMessage,
   SendResult,
+  ServerEvent,
   StatusMessage,
   StatusResult,
   ThreadListEntry,
@@ -242,25 +247,71 @@ export function buildMcpServer(client: Pick<MurmurClient, 'request'>, identity: 
   return server;
 }
 
+// This session's own messaging socket, when the home is a remote hub home:
+// the hub cannot reach a socket on this machine, so this server listens for
+// pushes and hands them over itself. Null otherwise.
+export function pushTarget(env: NodeJS.ProcessEnv, home: string): { socketPath: string; token: string } | null {
+  const socketPath = env.CLAUDE_CODE_MESSAGING_SOCKET;
+  const token = env.CLAUDE_CODE_MESSAGING_TOKEN;
+  if (!isRemoteHome(home) || !socketPath || !token) {
+    return null;
+  }
+  return { socketPath, token };
+}
+
+// Hands one broker event to the session: a push through its messaging
+// socket, confirmed as delivered once the socket took it (as an adapter
+// confirms), or a notification batch as notice text.
+// shortcut: a push the socket refuses stays sent (readable on the bus, never re-pushed), as with adapters; add a requeue message if refusals show up.
+export async function deliverLocally(
+  ev: ServerEvent,
+  target: { socketPath: string; token: string },
+  client: Pick<MurmurClient, 'request'>,
+  send: (socketPath: string, token: string, text: string) => Promise<NativeSendResult> = nativeSend,
+): Promise<void> {
+  if (ev.event === 'notification') {
+    await send(target.socketPath, target.token, noticeText(ev.payload));
+    return;
+  }
+  if ((await send(target.socketPath, target.token, ev.payload.text)).ok) {
+    const msg: Omit<DeliveredMessage, 'v' | 'id'> = { type: 'delivered', ids: [ev.payload.message.id] };
+    await client.request<DeliveredResult>(msg).catch(() => {
+      // The broker connection went away: the push stays sent and readable on the bus.
+    });
+  }
+}
+
 // Retries after the broker connection drops: a restart or an upgrade takes a
 // moment, and the murmur bin starts a broker itself when none answers.
 const RECONNECT_ATTEMPTS = 20;
 const RECONNECT_DELAY_MS = 250;
 
-async function connect(paths: MurmurPaths): Promise<MurmurClient> {
-  return connectBroker({ socketPath: paths.socketPath, token: readToken(paths) });
+type PushTarget = ReturnType<typeof pushTarget>;
+
+async function connect(paths: MurmurPaths, target: PushTarget): Promise<MurmurClient> {
+  if (target === null) {
+    return connectBroker({ socketPath: paths.socketPath, token: readToken(paths) });
+  }
+  const client: MurmurClient = await connectBroker({
+    socketPath: paths.socketPath,
+    token: readToken(paths),
+    onEvent: (ev) => {
+      void deliverLocally(ev, target, client);
+    },
+  });
+  return client;
 }
 
 // MURMUR_HANDLE is an optional per-process override; anything invalid
 // (like an old CHANGE-ME placeholder) or already taken is ignored so the
 // server still registers under its session's own handle.
-async function register(client: MurmurClient, identity: Identity): Promise<void> {
+async function register(client: MurmurClient, identity: Identity, listen: boolean): Promise<void> {
   const explicit = process.env.MURMUR_HANDLE;
   const wanted = explicit !== undefined && HANDLE_RE.test(explicit) ? explicit : undefined;
   const base: Omit<RegisterMessage, 'v' | 'id'> =
     identity.host === undefined
       ? { type: 'register', handle: wanted ?? 'anon-' + String(process.pid), clientKind: 'mcp' }
-      : { ...identity, type: 'register', clientKind: 'mcp' };
+      : { ...identity, type: 'register', clientKind: 'mcp', ...(listen ? { listen } : {}) };
   try {
     await client.request<RegisterResult>(wanted !== undefined && identity.host !== undefined ? { ...base, handle: wanted } : base);
   } catch (err) {
@@ -274,7 +325,12 @@ async function register(client: MurmurClient, identity: Identity): Promise<void>
 // A new registered connection for the same session, or null when no broker
 // answered within the attempts or the server is going away meanwhile (a try
 // may start a broker, which a session that is gone must not do).
-async function reconnect(paths: MurmurPaths, identity: Identity, stopping: () => boolean): Promise<MurmurClient | null> {
+async function reconnect(
+  paths: MurmurPaths,
+  identity: Identity,
+  target: PushTarget,
+  stopping: () => boolean,
+): Promise<MurmurClient | null> {
   for (let attempt = 0; attempt < RECONNECT_ATTEMPTS; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, RECONNECT_DELAY_MS));
     if (stopping()) {
@@ -282,8 +338,8 @@ async function reconnect(paths: MurmurPaths, identity: Identity, stopping: () =>
     }
     let client: MurmurClient | undefined;
     try {
-      client = await connect(paths);
-      await register(client, identity);
+      client = await connect(paths, target);
+      await register(client, identity, target !== null);
       return client;
     } catch {
       client?.close();
@@ -295,9 +351,10 @@ async function reconnect(paths: MurmurPaths, identity: Identity, stopping: () =>
 export async function runMcpServer(stdin: Readable = process.stdin): Promise<void> {
   const paths = getPaths();
   const identity = identityFor(currentHost(undefined, false), process.env, process.cwd());
+  const target = pushTarget(process.env, paths.home);
   let client: MurmurClient;
   try {
-    client = await connect(paths);
+    client = await connect(paths, target);
   } catch (err) {
     const code = err instanceof MurmurError ? err.code : 'internal';
     process.stderr.write(
@@ -306,7 +363,7 @@ export async function runMcpServer(stdin: Readable = process.stdin): Promise<voi
     process.exit(1);
   }
   try {
-    await register(client, identity);
+    await register(client, identity, target !== null);
   } catch (err) {
     const code = err instanceof MurmurError ? err.code : 'internal';
     process.stderr.write('murmur mcp: broker rejected registration (' + code + '): ' + (err as Error).message + '\n');
@@ -343,7 +400,7 @@ export async function runMcpServer(stdin: Readable = process.stdin): Promise<voi
         client.onClosed = resolve;
       }),
     ]);
-    next = stopping ? null : await reconnect(paths, identity, () => stopping);
+    next = stopping ? null : await reconnect(paths, identity, target, () => stopping);
   }
   client.close();
 }

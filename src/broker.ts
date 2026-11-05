@@ -20,6 +20,7 @@ import {
   THREADS_MAX,
   WAIT_MAX_MS,
   encodeLine,
+  noticeText,
   renderDelivery,
   replyFooter,
 } from './protocol.js';
@@ -89,6 +90,9 @@ interface ConnState {
   // An MCP server whose session has not announced itself yet: bound as soon
   // as a session event arrives for this host, or created on first use.
   pendingHost: { host: HostRef; client: CliName; cwd?: string } | null;
+  // The host process this connection runs under, when it said so. An open
+  // long-lived connection keeps that host's session alive (core.hostConnected).
+  host: HostRef | null;
   // Bytes of the not yet complete trailing line, for the 1 MiB line guard.
   pendingBytes: number;
   // Waiters registered by this connection, so close can clear their timers.
@@ -267,6 +271,8 @@ export class Broker {
     this.nativeSendFn = opts.nativeSend ?? nativeSend;
     this.wakeFn = opts.wake ?? defaultWake;
     this.core.hasTools = (handle) => this.presence.has(handle);
+    this.core.hostConnected = (host) =>
+      [...this.conns].some((c) => c.live && c.host?.hostPid === host.hostPid && c.host.hostStart === host.hostStart);
     this.proof = new ProofWatcher((messageId, recipient) => this.onProof(messageId, recipient), opts.proofPollMs);
   }
 
@@ -358,6 +364,7 @@ export class Broker {
       live: false,
       listening: false,
       pendingHost: null,
+      host: null,
       pendingBytes: 0,
       waiters: new Set<Waiter>(),
       chain: Promise.resolve(),
@@ -494,7 +501,7 @@ export class Broker {
       case 'auth':
         throw badRequest('connection is already authenticated');
       case 'register':
-        this.replyOk(conn.socket, id, this.handleRegister(conn, rec));
+        this.replyOk(conn.socket, id, await this.handleRegister(conn, rec));
         return;
       case 'hook':
         this.replyOk(conn.socket, id, this.handleHook(conn, rec));
@@ -562,7 +569,7 @@ export class Broker {
   // Handlers.
 
   // See RegisterMessage for the identity rules.
-  private handleRegister(conn: ConnState, rec: Record<string, unknown>): RegisterResult {
+  private async handleRegister(conn: ConnState, rec: Record<string, unknown>): Promise<RegisterResult> {
     const kind = reqEnum<ClientKind>(rec, 'clientKind', CLIENT_KINDS);
     const handle = optString(rec, 'handle');
     const display = optString(rec, 'display');
@@ -575,6 +582,14 @@ export class Broker {
     const live = kind === 'mcp' || kind === 'adapter';
     let resolved: string;
     conn.via = null;
+    // A rename registers again without these, so only a given value changes them.
+    const listen = optBool(rec, 'listen');
+    if (host !== undefined) {
+      conn.host = host;
+    }
+    if (live && listen !== undefined) {
+      conn.listening = listen;
+    }
     if (owner) {
       resolved = this.ownerHandle();
       if (ancestors !== undefined) {
@@ -606,6 +621,10 @@ export class Broker {
     }
     this.bind(conn, resolved, live);
     this.core.touchSeen(resolved);
+    if (live && listen === true) {
+      // A listener that comes (back) up gets what waited for it.
+      await this.pushQueued(resolved);
+    }
     return { handle: resolved, owner: this.store.getPeer(resolved)?.isOwner === true };
   }
 
@@ -663,6 +682,7 @@ export class Broker {
       this.rebind(before.handle, session.handle);
     }
     conn.listening = listen;
+    conn.host = host;
     this.bind(conn, session.handle, listen);
     // MCP servers of this session that registered before it announced itself.
     for (const other of this.conns) {
@@ -1080,8 +1100,7 @@ export class Broker {
     if (transport === null) {
       return;
     }
-    const text = '[murmur notice] ' + entry.payloads.map((p) => p.detail).join('; ');
-    this.nativeSendFn(transport.socketPath, transport.token, text).catch(() => {
+    this.nativeSendFn(transport.socketPath, transport.token, noticeText(entry.payloads)).catch(() => {
       // Notifications are best effort; the data stays in the DB.
     });
   }

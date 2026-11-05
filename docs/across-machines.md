@@ -76,10 +76,15 @@ MURMUR_HOME=~/.murmur-hub murmur status
 
 It lists the hub's peers. Exit code `2` means the tunnel is down.
 
+## Presence and pushes
+
+The hub has no process of a laptop session to look up, so it counts the session alive while the session's murmur MCP server holds its connection. Presence (busy, idle) and handle allocation then work as for a local session.
+
+In a remote hub home the MCP server also registers as a listener. The hub hands it each push and notice, and it passes them to its own session through the session's messaging socket (`CLAUDE_CODE_MESSAGING_SOCKET`), which the hub cannot reach across machines. An idle laptop session wakes on a message the same way a local one does, and a push it took counts as delivered.
+
 ## Limits
 
-- The hub must be awake. While the tunnel is down, laptop sessions have no bus; messages sent to them wait on the hub.
-- The hub judges liveness from its own process table, so laptop sessions show as `presumed-offline` or `offline` there.
-- Two laptop sessions in folders with the same name can get the same automatic handle. Give them distinct names with `murmur_name`.
-- Laptop sessions are not woken by a push. A message reaches them through the hook on their next prompt, or when they read it.
+- The hub must be awake. While the tunnel is down, laptop sessions have no bus; messages sent to them wait on the hub and arrive when the MCP server reconnects.
+- A laptop session without its murmur MCP server running shows as `presumed-offline` or `offline` and gets messages only through the hook on its next prompt. `murmur install claude` sets the server up.
+- A push the session's messaging socket refuses stays `sent`: it is readable on the bus, but nothing pushes it again.
 - Anyone who can reach the forwarded socket and holds the token is on the bus. Across machines the trust boundary is your SSH login plus the token file. See [Security](security.md).
