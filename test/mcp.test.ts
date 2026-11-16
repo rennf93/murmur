@@ -626,7 +626,7 @@ describe('one host process serving several sessions', () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
     murmur.close();
     await pending;
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    await new Promise((resolve) => setTimeout(resolve, 900));
     const after = stack.store.listSessions().filter((r) => stack.core.hasTools(r.handle)).length;
     expect(after).toBeLessThanOrEqual(before);
     expect(after).toBe(0);

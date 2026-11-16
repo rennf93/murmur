@@ -133,10 +133,11 @@ const WAIT_UNTILS: readonly WaitUntil[] = ['all_replied', 'any_replied'];
 // Wire guard: no single request line may exceed 1 MiB.
 const MAX_LINE_BYTES = 1024 * 1024;
 
-// A tool call's id may reach the broker before the session transcript that
-// records it is flushed: look again before guessing which session called.
-const CALL_RETRIES = 4;
-const CALL_RETRY_MS = 75;
+// A tool call's id reaches the broker before the session transcript records
+// it (measured on Claude Code 2.1.325: the line lands 95 to 160 ms later, 3 of
+// 3 calls): look again every 25 ms, up to 600 ms, before guessing the caller.
+const CALL_RETRIES = 24;
+const CALL_RETRY_MS = 25;
 
 function badRequest(message: string): MurmurError {
   return new MurmurError('bad_request', message);
