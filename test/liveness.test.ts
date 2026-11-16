@@ -38,8 +38,8 @@ const local = (pid: number) => {
   procs.set(pid, { ppid: 1, start: 'S' + String(pid), comm: 'claude' });
   return { hostPid: pid, hostStart: 'S' + String(pid), machine: OMEN };
 };
-const remote = (pid = 51234, boot = MAC, name = 'mac') => ({ hostPid: pid, hostStart: 'T' + String(pid), machine: boot, machineName: name });
-type Host = { hostPid: number; hostStart: string; machine?: string; machineName?: string };
+const remote = (pid = 51234, boot = MAC, name = 'mac', uptime?: number) => ({ hostPid: pid, hostStart: 'T' + String(pid), machine: boot, machineName: name, ...(uptime !== undefined ? { machineUptime: uptime } : {}) });
+type Host = { hostPid: number; hostStart: string; machine?: string; machineName?: string; machineUptime?: number };
 const open = (cli: string, host: Host, cwd: string, title?: string) =>
   core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: cli, host, cwd, source: 'startup', ...(title !== undefined ? { title } : {}) });
 
@@ -285,13 +285,46 @@ describe('a broker that restarts', () => {
   });
 });
 
+describe('two machines that share a host name', () => {
+  it('do not end each other: the old sessions were heard from after the new machine booted', () => {
+    const a = open('a', remote(100, 'boot-a', 'Mac', 3 * 86400), '/Users/a/work/guard');
+    now += HOUR;
+    const b = open('b', remote(200, 'boot-b', 'Mac', 3 * 86400), '/Users/b/work/guard');
+    expect(store.sessionById(a.id)?.state).not.toBe('ended');
+    core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'a', host: remote(100, 'boot-a', 'Mac', 3 * 86400 + 5) });
+    expect(store.sessionById(b.id)?.state).not.toBe('ended');
+    now += 40 * 1000;
+    core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'b', host: remote(200, 'boot-b', 'Mac', 3 * 86400 + 45) });
+    core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'a', host: remote(100, 'boot-a', 'Mac', 3 * 86400 + 50) });
+    expect(store.listSessions().map((r) => r.state)).toEqual(['busy', 'busy']);
+  });
+
+  it('do not end each other when a late event of the older boot arrives', () => {
+    const fresh = open('fresh', remote(900, 'boot-new', 'Mac', 600), '/Users/a/work/guard');
+    now += 120 * 1000;
+    core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'late', host: remote(100, 'boot-old', 'Mac', 3 * 86400) });
+    expect(store.sessionById(fresh.id)?.state).not.toBe('ended');
+  });
+
+  it('leave the old sessions to their lease when the event says nothing about the boot, or their host is connected', () => {
+    const a = open('a', remote(100, 'boot-a', 'Mac'), '/Users/a/work/guard');
+    now += HOUR;
+    open('b', remote(200, 'boot-b', 'Mac'), '/Users/b/work/guard');
+    expect(store.sessionById(a.id)?.state).not.toBe('ended');
+    core.hostConnected = (h) => h.hostPid === 100;
+    open('c', remote(300, 'boot-c', 'Mac', 10), '/Users/c/work/guard');
+    expect(store.sessionById(a.id)?.state).not.toBe('ended');
+  });
+});
+
 describe('a machine that reboots', () => {
   it('ends its old sessions at once when an event arrives with a new boot id under the same host name', () => {
     const old = open('old', remote(51234, 'mac-boot-1', 'mac'), '/Users/renzof/work/guard');
     store.createGroup('crew', now);
     store.addMember('crew', old.handle, now);
     core.registerNative({ handle: old.handle, socketPath: '/tmp/old.sock', token: 't' });
-    const fresh = open('fresh', remote(777, 'mac-boot-2', 'mac'), '/Users/renzof/work/guard');
+    now += 3 * 60 * 1000;
+    const fresh = open('fresh', remote(777, 'mac-boot-2', 'mac', 90), '/Users/renzof/work/guard');
     expect(store.sessionById(old.id)?.state).toBe('ended');
     expect(fresh.handle).toBe(old.handle);
     expect(store.getNativeTransport(old.handle)).toBeNull();
@@ -303,7 +336,8 @@ describe('a machine that reboots', () => {
     const local1 = open('omen', local(100), '/home/renzof/work/other');
     store.reassignSession(local1.id, local1.handle, old.handle, false);
     core.registerNative({ handle: old.handle, socketPath: '/tmp/shared.sock', token: 't' });
-    open('fresh', remote(777, 'mac-boot-2', 'mac'), '/Users/renzof/work/third');
+    now += 3 * 60 * 1000;
+    open('fresh', remote(777, 'mac-boot-2', 'mac', 90), '/Users/renzof/work/third');
     expect(store.sessionById(old.id)?.state).toBe('ended');
     expect(store.getNativeTransport(old.handle)?.socketPath).toBe('/tmp/shared.sock');
   });
@@ -312,27 +346,88 @@ describe('a machine that reboots', () => {
     const resumed = open('resumed', remote(51234, 'mac-boot-1', 'mac'), '/Users/renzof/work/guard');
     const other = open('other', remote(51300, 'mac-boot-1', 'mac'), '/Users/renzof/work/other');
     core.registerNative({ handle: resumed.handle, socketPath: '/tmp/resumed.sock', token: 't' });
-    const back = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'resumed', host: remote(900, 'mac-boot-2', 'mac'), source: 'resume' });
+    now += 3 * 60 * 1000;
+    const back = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'resumed', host: remote(900, 'mac-boot-2', 'mac', 90), source: 'resume' });
     expect(back.id).toBe(resumed.id);
     expect(back).toMatchObject({ hostMachine: 'mac-boot-2', state: 'idle' });
     expect(store.sessionById(other.id)?.state).toBe('ended');
     expect(store.getNativeTransport(resumed.handle)?.socketPath).toBe('/tmp/resumed.sock');
   });
 
+  it('reads a session heard from at the very moment the new boot began as not before it', () => {
+    const old = open('old', remote(51234, 'mac-boot-1', 'mac'), '/Users/renzof/work/guard');
+    open('fresh', remote(777, 'mac-boot-2', 'mac', 0), '/Users/renzof/work/other');
+    expect(store.sessionById(old.id)?.state).not.toBe('ended');
+    now += 1;
+    open('later', remote(778, 'mac-boot-2', 'mac', 0), '/Users/renzof/work/third');
+    expect(store.sessionById(old.id)?.state).toBe('ended');
+  });
+
   it('leaves the old sessions to their lease when the host name changed too, and keeps other machines apart', () => {
     const old = open('old', remote(51234, 'mac-boot-1', 'mac'), '/Users/renzof/work/guard');
-    const renamed = open('renamed', remote(777, 'mac-boot-2', 'mac-renamed'), '/Users/renzof/work/guard');
+    now += 3 * 60 * 1000;
+    const renamed = open('renamed', remote(777, 'mac-boot-2', 'mac-renamed', 90), '/Users/renzof/work/guard');
     expect(store.sessionById(old.id)?.state).not.toBe('ended');
     expect(renamed.handle).toBe('claude-guard-2');
-    open('elsewhere', remote(5, 'linux-boot-1', 'box'), '/w/x');
+    open('elsewhere', remote(5, 'linux-boot-1', 'box', 90), '/w/x');
     expect(store.sessionById(old.id)?.state).not.toBe('ended');
   });
 
   it('does not end sessions of the broker machine or of a client without a host name', () => {
     const here = open('here', local(100), '/w/a');
     const noLabel = open('nolabel', { hostPid: 61, hostStart: 'T61', machine: 'mac-boot-1' }, '/w/b');
-    open('fresh', remote(777, 'mac-boot-2', 'mac'), '/w/c');
+    now += 3 * 60 * 1000;
+    open('fresh', remote(777, 'mac-boot-2', 'mac', 90), '/w/c');
     expect(store.sessionById(here.id)?.state).not.toBe('ended');
     expect(store.sessionById(noLabel.id)?.state).not.toBe('ended');
+  });
+});
+
+describe('an event that carries less than the session had', () => {
+  it('keeps the machine and the label of a session whose client could not read a boot id', () => {
+    const first = open('mac', remote(51234, MAC, 'mac'), '/Users/renzof/work/guard');
+    const bare = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'mac', host: { hostPid: 51234, hostStart: 'T51234' } });
+    expect(bare.id).toBe(first.id);
+    expect(store.sessionById(first.id)).toMatchObject({ hostMachine: MAC, hostLabel: 'mac' });
+    expect(core.claimable('claude-guard', null)).toBe(false);
+  });
+
+  it('keeps the label when an event names the same machine without one, and drops it for another machine', () => {
+    const first = open('mac', remote(51234, MAC, 'mac'), '/Users/renzof/work/guard');
+    core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'mac', host: { hostPid: 51234, hostStart: 'T51234', machine: MAC } });
+    expect(store.sessionById(first.id)?.hostLabel).toBe('mac');
+    core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'mac', host: { hostPid: 51234, hostStart: 'T51234', machine: 'another-boot' } });
+    expect(store.sessionById(first.id)).toMatchObject({ hostMachine: 'another-boot', hostLabel: null });
+  });
+
+  it('lets an event with the broker machine id take a session back to the broker machine', () => {
+    const first = open('mac', remote(51234, MAC, 'mac'), '/Users/renzof/work/guard');
+    core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'mac', host: { hostPid: 51234, hostStart: 'T51234', machine: OMEN } });
+    expect(store.sessionById(first.id)).toMatchObject({ hostMachine: null, hostLabel: null });
+  });
+});
+
+describe('a client that gains a machine id', () => {
+  it('finds the row an old client of the same process wrote, and no second one appears', () => {
+    const host = { hostPid: 500, hostStart: 'T500' };
+    const old = open('old', host, '/Users/renzof/work/guard', 'Proveground S4c bait');
+    expect(old.hostMachine).toBeNull();
+    const upgraded = { ...host, machine: MAC, machineName: 'mac' };
+    expect(core.sessionForHost(upgraded)?.id).toBe(old.id);
+    expect(store.sessionById(old.id)).toMatchObject({ hostMachine: MAC, hostLabel: 'mac', handle: 'proveground-s4c-bait' });
+    const again = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'old', host: upgraded });
+    expect(again.id).toBe(old.id);
+    expect(store.listSessions()).toHaveLength(1);
+  });
+
+  it('does not take the row of a process that is alive on this machine, nor one that ended', () => {
+    const alive = local(100);
+    const mine = open('mine', { hostPid: alive.hostPid, hostStart: alive.hostStart }, '/w/a');
+    expect(core.sessionForHost({ ...alive, machine: MAC, machineName: 'mac' })).toBeNull();
+    expect(store.sessionById(mine.id)?.hostMachine).toBeNull();
+    const host = { hostPid: 500, hostStart: 'T500' };
+    open('gone', host, '/w/b');
+    core.sessionEvent({ event: 'session-end', client: 'claude', cliSessionId: 'gone', host });
+    expect(core.sessionForHost({ ...host, machine: MAC, machineName: 'mac' })).toBeNull();
   });
 });

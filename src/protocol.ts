@@ -255,6 +255,9 @@ export interface HostRef {
   // read a boot id: the broker then reads it as its own machine.
   machine?: string;
   machineName?: string;
+  // Seconds since that machine booted, at the time of the event (hooks and
+  // adapters send it with a session event).
+  machineUptime?: number;
 }
 
 // Identity, three ways. handle alone: that exact handle (scripts, --as,

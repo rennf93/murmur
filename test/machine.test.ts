@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { machineId, machineOf, machineRef, parseBootId, readBootId, thisMachine, thisMachineRef, validField } from '../src/machine.js';
+import { SYSCTL_OPTIONS, machineId, machineOf, machineRef, parseBootId, readBootId, readUptime, thisMachine, thisMachineRef, validField, validUptime } from '../src/machine.js';
 
 const SAMPLE = '8E3A9F1B-1C2D-4E5F-8A9B-0C1D2E3F4A5B';
 
@@ -74,5 +74,40 @@ describe('validField', () => {
     for (const bad of ['', 'x'.repeat(256), 'a\nb', 'a\u0000b', 'a\u007fb', 12, null, undefined, {}]) {
       expect(validField(bad)).toBeUndefined();
     }
+  });
+});
+
+describe('readUptime', () => {
+  it('reads /proc/uptime on Linux and the boot time sysctl prints on macOS, and nothing else', () => {
+    expect(readUptime('linux', () => '12345.67 54321.00\n')).toBe(12345);
+    expect(readUptime('linux', () => 'garbage')).toBeUndefined();
+    expect(readUptime('linux', () => '-4.0 1.0')).toBeUndefined();
+    const sysctl = (): string => '{ sec = 1700000000, usec = 123456 } Tue Nov 14 22:13:20 2023\n';
+    expect(readUptime('darwin', () => '', sysctl, 1700000600_000)).toBe(600);
+    expect(readUptime('darwin', () => '', sysctl, 1600000000_000)).toBe(0);
+    expect(readUptime('darwin', () => '', () => 'nothing here')).toBeUndefined();
+    expect(readUptime('win32')).toBeUndefined();
+    const boom = (): string => {
+      throw new Error('no');
+    };
+    expect(readUptime('linux', boom)).toBeUndefined();
+    expect(readUptime('darwin', () => '', boom)).toBeUndefined();
+    expect(readUptime()).toEqual(expect.any(Number));
+    expect(readUptime('darwin')).toBeUndefined();
+  });
+
+  it('is kept to finite seconds of at most ten years where it enters the broker', () => {
+    expect(validUptime(0)).toBe(0);
+    expect(validUptime(86400)).toBe(86400);
+    for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY, 315_360_001, '5', null, undefined]) {
+      expect(validUptime(bad)).toBeUndefined();
+    }
+  });
+});
+
+describe('the sysctl call', () => {
+  it('is bounded to one second and never writes to the terminal', () => {
+    expect(SYSCTL_OPTIONS.timeout).toBe(1000);
+    expect(SYSCTL_OPTIONS.stdio).toEqual(['ignore', 'pipe', 'ignore']);
   });
 });

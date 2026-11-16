@@ -40,7 +40,32 @@ function machineRef(): { machine?: string; machineName?: string } {
   }
   return {};
 }
-const host = { hostPid: process.pid, hostStart, ...machineRef() };
+// Seconds since this machine booted, read when a message is serialized (src/machine.ts readUptime).
+function machineUptime(): number | undefined {
+  try {
+    if (process.platform === 'linux') {
+      const seconds = Number.parseFloat(readFileSync('/proc/uptime', 'utf8'));
+      return Number.isFinite(seconds) && seconds >= 0 ? Math.floor(seconds) : undefined;
+    }
+    if (process.platform === 'darwin') {
+      const out = execFileSync('/usr/sbin/sysctl', ['-n', 'kern.boottime'], { encoding: 'utf8', timeout: 1000 });
+      const booted = /sec\s*=\s*(\d+)/.exec(out)?.[1];
+      return booted === undefined ? undefined : Math.max(0, Math.floor(Date.now() / 1000) - Number(booted));
+    }
+  } catch {
+    // no uptime
+  }
+  return undefined;
+}
+const machine = machineRef();
+const host = {
+  hostPid: process.pid,
+  hostStart,
+  ...machine,
+  get machineUptime(): number | undefined {
+    return machine.machine === undefined ? undefined : machineUptime();
+  },
+};
 
 type Pending = { resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> };
 

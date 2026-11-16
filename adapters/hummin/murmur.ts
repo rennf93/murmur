@@ -41,7 +41,7 @@ const RECONNECT_MS = 5000;
 const REQUEST_TIMEOUT_MS = 30_000;
 
 type Json = Record<string, unknown>;
-interface Host { hostPid: number; hostStart: string; machine?: string; machineName?: string }
+interface Host { hostPid: number; hostStart: string; machine?: string; machineName?: string; readonly machineUptime?: number }
 
 // ---------------------------------------------------------------------------
 // socket client (request/reply by id, events to a callback)
@@ -150,7 +150,34 @@ function readHost(): Host {
 	} catch {
 		// broker will treat the host as unverifiable
 	}
-	return { hostPid: process.pid, hostStart, ...machineRef() };
+	const machine = machineRef();
+	return {
+		hostPid: process.pid,
+		hostStart,
+		...machine,
+		// Read when a message is serialized, so the broker sees the uptime of that moment.
+		get machineUptime(): number | undefined {
+			return machine.machine === undefined ? undefined : machineUptime();
+		},
+	};
+}
+
+// Seconds since this machine booted (src/machine.ts readUptime).
+function machineUptime(): number | undefined {
+	try {
+		if (process.platform === "linux") {
+			const seconds = Number.parseFloat(readFileSync("/proc/uptime", "utf8"));
+			return Number.isFinite(seconds) && seconds >= 0 ? Math.floor(seconds) : undefined;
+		}
+		if (process.platform === "darwin") {
+			const out = execFileSync("/usr/sbin/sysctl", ["-n", "kern.boottime"], { encoding: "utf8", timeout: 1000 });
+			const booted = /sec\s*=\s*(\d+)/.exec(out)?.[1];
+			return booted === undefined ? undefined : Math.max(0, Math.floor(Date.now() / 1000) - Number(booted));
+		}
+	} catch {
+		// no uptime
+	}
+	return undefined;
 }
 
 // What the broker keeps with a host (src/machine.ts): the boot id, and the host

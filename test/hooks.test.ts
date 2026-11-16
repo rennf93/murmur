@@ -138,6 +138,30 @@ describe('session events', () => {
     expect(stack.store.sessionByCliId('claude', 'there')).toMatchObject({ hostMachine: 'mac-boot-9', hostLabel: 'mac' });
   });
 
+  it('sends no machine and no uptime when it has no boot id, and is read as a client of the broker machine', async () => {
+    const stack = await buildStack();
+    await runHook('session-start', JSON.stringify({ session_id: 'bare', cwd: '/work/bare' }), envFor(stack), { host: HOST, machine: {} });
+    expect(stack.store.sessionByCliId('claude', 'bare')).toMatchObject({ hostMachine: null, hostLabel: null });
+  });
+
+  it('sends the uptime of its machine so the broker can tell a reboot from a machine with the same host name', async () => {
+    const stack = await buildStack();
+    const remote = (pid: number, boot: string, uptime?: number | string) => ({
+      host: { ...HOST, hostPid: pid },
+      machine: { machine: boot, machineName: 'mac' },
+      ...(uptime !== undefined ? { uptime: uptime as number } : {}),
+    });
+    const start = (cli: string, opts: ReturnType<typeof remote>) =>
+      runHook('session-start', JSON.stringify({ session_id: cli, cwd: '/work/' + cli }), envFor(stack), opts);
+    await start('old', remote(5001, 'boot-1'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // A bogus uptime reads as none: the old session is left to its lease.
+    await start('bogus', remote(5002, 'boot-2', 'a day'));
+    expect(stack.store.sessionByCliId('claude', 'old')?.state).not.toBe('ended');
+    await start('fresh', remote(5003, 'boot-2', 0));
+    expect(stack.store.sessionByCliId('claude', 'old')?.state).toBe('ended');
+  });
+
   it('defaults the client to claude, and a bare session gets the plain client handle', async () => {
     const stack = await buildStack();
     await runHook('session-start', '{}', envFor(stack), { host: HOST });

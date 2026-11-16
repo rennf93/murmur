@@ -818,6 +818,39 @@ describe('sessions of two machines at one broker', () => {
     expect(registered.handle).toBe(row('huge')?.handle);
   });
 
+  it('names the session of a shell on another machine by its ancestors and its machine', async () => {
+    hostState.host = HOST;
+    const stack = await buildStack();
+    stack.store.upsertPeer('renn', 'renn (owner)', null, true, Date.now());
+    const remote = start(stack, 'mac', { hostPid: 4000, hostStart: 'T4000', ancestors: [4000] }, MAC);
+    const register = async (fields: Record<string, unknown>): Promise<{ client: MurmurClient; result: RegisterResult }> => {
+      const conn = await connectRaw(stack, 'shell-' + String(Math.random()).slice(2, 8));
+      return { client: conn.client, result: await req<RegisterResult>(conn.client, { type: 'register', clientKind: 'cli', ...fields }) };
+    };
+    // On its own machine the shell speaks as the session; without the machine it is the owner's.
+    expect((await register({ ancestors: [4000, 1], machine: MAC })).result.handle).toBe(remote.handle);
+    expect((await register({ ancestors: [4000, 1] })).result.handle).toBe('renn');
+    // The owner typing in that shell is recorded as typing in that session.
+    stack.core.register({ handle: 'target' });
+    const owner = await register({ owner: true, ancestors: [4000, 1], machine: MAC });
+    const sent = await req<{ threadId: number }>(owner.client, { type: 'send', threadId: null, to: ['target'], body: 'typed in the remote session', mode: 'silent' });
+    expect(stack.store.threadMessages(sent.threadId, null)[0]?.via).toBe(remote.handle);
+  });
+
+  it('moves the connection of a session of another machine along with its title', async () => {
+    hostState.host = HOST;
+    const stack = await buildStack();
+    const remote = start(stack, 'mac', HOST, MAC);
+    const made = await connect(stack, HOST, MAC);
+    stack.core.register({ handle: 'target' });
+    const hook = await connectRaw(stack, 'hookish');
+    // No CLI session id: the session is found by its host, with its machine.
+    await req(hook.client, { type: 'session', event: 'prompt', client: 'claude', cliSessionId: null, host: ref(HOST, MAC), title: 'Proveground S4c: bait' });
+    const sent = await call<{ threadId: number }>(made.sdk, 'murmur_send', { to: ['target'], body: 'after the title', mode: 'silent' });
+    expect(remote.handle).not.toBe('proveground-s4c-bait');
+    expect(stack.store.threadMessages(sent.threadId, null)[0]?.sender).toBe('proveground-s4c-bait');
+  });
+
   it('does not bind a connection waiting for its session to a session of another machine with the same pid and start', async () => {
     hostState.host = HOST;
     const stack = await buildStack();
@@ -842,7 +875,7 @@ describe('sessions of two machines at one broker', () => {
     const right = await connect(stack, HOST, MAC);
     expect(stack.core.claimable(row.handle, null)).toBe(false);
     right.murmur.close();
-    expect(wrong.sdk).toBeDefined();
+    wrong.murmur.close();
   });
 
   it('moves the connections of the renamed session only, by machine as well as pid and start', async () => {

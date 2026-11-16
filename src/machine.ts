@@ -25,10 +25,15 @@ export function parseBootId(text: string): string {
 // Linux reads /proc, macOS asks sysctl by absolute path with a one second
 // limit (the one thing to confirm on a Mac: `sysctl -n kern.bootsessionuuid`
 // prints a uuid). Anything else, or a failure, has no boot id.
+export const SYSCTL_OPTIONS: { encoding: 'utf8'; timeout: number; stdio: Array<'ignore' | 'pipe'> } = { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] };
+
+const defaultRead = (path: string): string => readFileSync(path, 'utf8');
+const defaultRun = (cmd: string, args: string[]): string => execFileSync(cmd, args, SYSCTL_OPTIONS);
+
 export function readBootId(
   platform: string = process.platform,
-  readFile: (path: string) => string = (path) => readFileSync(path, 'utf8'),
-  run: (cmd: string, args: string[]) => string = (cmd, args) => execFileSync(cmd, args, { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] }),
+  readFile: (path: string) => string = defaultRead,
+  run: (cmd: string, args: string[]) => string = defaultRun,
 ): string {
   try {
     if (platform === 'linux') {
@@ -47,6 +52,37 @@ export function readBootId(
 // part of it (it is only the label of machineRef), so it is not consulted.
 export function machineId(_name: string = hostname(), bootId: string = readBootId()): string {
   return bootId;
+}
+
+// Seconds since this machine booted: /proc/uptime on Linux, the boot time that
+// `sysctl -n kern.boottime` prints (`{ sec = 1700000000, usec = 0 } ...`) on
+// macOS; undefined when it cannot be read. Sent with a session event so the
+// broker can tell that a machine booted after the last time it heard from the
+// old sessions it holds under the same host name (src/core.ts).
+export function readUptime(
+  platform: string = process.platform,
+  readFile: (path: string) => string = defaultRead,
+  run: (cmd: string, args: string[]) => string = defaultRun,
+  nowMs: number = Date.now(),
+): number | undefined {
+  try {
+    if (platform === 'linux') {
+      const seconds = Number.parseFloat(readFile('/proc/uptime'));
+      return Number.isFinite(seconds) && seconds >= 0 ? Math.floor(seconds) : undefined;
+    }
+    if (platform === 'darwin') {
+      const booted = /sec\s*=\s*(\d+)/.exec(run('/usr/sbin/sysctl', ['-n', 'kern.boottime']))?.[1];
+      return booted === undefined ? undefined : Math.max(0, Math.floor(nowMs / 1000) - Number(booted));
+    }
+  } catch {
+    // No uptime.
+  }
+  return undefined;
+}
+
+// A machine uptime from the wire: finite seconds, 0 to 10 years.
+export function validUptime(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 315_360_000 ? value : undefined;
 }
 
 export interface MachineRef {

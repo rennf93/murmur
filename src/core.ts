@@ -239,13 +239,39 @@ export class MurmurCore {
     return host.machine === undefined || this.machine === '' || host.machine === this.machine ? null : host.machine;
   }
 
+  // The machine and label to store on an event of a known session. An event
+  // that carries no machine at all (a client whose boot id read failed) leaves
+  // what the session had; one that carries a machine sets it, and keeps the
+  // label when it carries none for the same machine.
+  private machineFields(row: SessionRow, host: HostRef): { hostMachine: string | null; hostLabel: string | null } | Record<string, never> {
+    if (host.machine === undefined && row.hostMachine !== null) {
+      return {};
+    }
+    const key = this.machineKey(host);
+    return { hostMachine: key, hostLabel: this.labelOf(host) ?? (key === row.hostMachine ? row.hostLabel : null) };
+  }
+
   // The host name label stored with a machine other than this broker's.
   private labelOf(host: HostRef): string | null {
     return this.machineKey(host) === null ? null : (host.machineName ?? null);
   }
 
+  // The session of this host process. A client that gains a machine id (an
+  // upgrade) finds the row an old client of the same process wrote without one,
+  // when no live process of this machine has that pid and start; the row takes
+  // the machine from then on, so one session never becomes two.
   private rowAt(host: HostRef): SessionRow | null {
-    return this.store.sessionByHost(host.hostPid, host.hostStart, this.machineKey(host));
+    const key = this.machineKey(host);
+    const row = this.store.sessionByHost(host.hostPid, host.hostStart, key);
+    if (row !== null || key === null) {
+      return row;
+    }
+    const old = this.store.sessionByHost(host.hostPid, host.hostStart, null);
+    if (old === null || old.state === 'ended' || this.alive(this.safeProcTable([old.hostPid]), old)) {
+      return null;
+    }
+    this.store.updateSession(old.id, { hostMachine: key, hostLabel: this.labelOf(host) });
+    return this.store.sessionById(old.id);
   }
 
   private nowMs(): number {
@@ -831,8 +857,7 @@ export class MurmurCore {
         client: arg.client,
         hostPid: arg.host.hostPid,
         hostStart: arg.host.hostStart,
-        hostMachine: this.machineKey(arg.host),
-        hostLabel: this.labelOf(arg.host),
+        ...this.machineFields(row, arg.host),
         updatedAt: ts,
         ...(arg.cliSessionId !== null ? { cliSessionId: arg.cliSessionId } : {}),
         ...(arg.transcriptPath !== undefined ? { transcriptPath: arg.transcriptPath } : {}),
@@ -885,7 +910,19 @@ export class MurmurCore {
     if (key === null || label === null) {
       return;
     }
+    // Two different machines can share a host name (raspberrypi, localhost), and
+    // then each one's events look like a reboot of the other. A reboot is told
+    // from that by the clock of the new boot: its sessions of the old boot were
+    // last heard from before the machine booted. Without an uptime, or while
+    // the old session's host is connected, nothing says so and the lease applies.
+    if (host.machineUptime === undefined) {
+      return;
+    }
+    const bootedAt = ts - host.machineUptime * 1000;
     for (const old of this.store.rebootedSessions(label, key, id)) {
+      if (this.hostConnected(old) || old.updatedAt >= bootedAt) {
+        continue;
+      }
       this.store.updateSession(old.id, { state: 'ended', stateAt: ts });
       if (!this.sharesHandle(old)) {
         this.store.deleteNativeTransport(old.handle);

@@ -2,7 +2,7 @@ import { chmodSync, existsSync, unlinkSync } from 'node:fs';
 import { Server, Socket, createConnection, createServer } from 'node:net';
 import { StringDecoder } from 'node:string_decoder';
 import { readToken } from './config.js';
-import { validField } from './machine.js';
+import { validField, validUptime } from './machine.js';
 import type { MurmurPaths } from './config.js';
 import { fullOf } from './core.js';
 import type { MurmurCore, PushTarget } from './core.js';
@@ -229,11 +229,13 @@ function reqHost(value: unknown): HostRef {
   // A machine field that is not 1 to 255 printable characters reads as absent.
   const machine = validField(rec.machine);
   const machineName = machine === undefined ? undefined : validField(rec.machineName);
+  const machineUptime = machine === undefined ? undefined : validUptime(rec.machineUptime);
   return {
     hostPid: reqNumber(rec, 'hostPid'),
     hostStart: reqString(rec, 'hostStart'),
     ...(machine !== undefined ? { machine } : {}),
     ...(machineName !== undefined ? { machineName } : {}),
+    ...(machineUptime !== undefined ? { machineUptime } : {}),
   };
 }
 
