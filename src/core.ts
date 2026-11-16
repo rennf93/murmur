@@ -87,6 +87,11 @@ const OFFLINE_AFTER_MS = 5 * 60 * 1000;
 // A session of another machine counts as alive this long after its last event
 // (its hooks only fire on a prompt or a stop, so an idle session is quiet).
 const REMOTE_LEASE_MS = 12 * 60 * 60 * 1000;
+// After a broker start the connections that kept sessions of other machines
+// alive are gone until their MCP servers reconnect, which they do within 5
+// seconds (20 attempts, 250 ms apart); a minute covers that twelve times over
+// and is short enough not to hold the handle of a session that is really gone.
+const STARTUP_GRACE_MS = 60 * 1000;
 
 // A session title as a handle: lowercase, runs of anything else become one
 // hyphen, trimmed, cut to the handle limit. Not necessarily a valid handle.
@@ -211,9 +216,11 @@ export class MurmurCore {
   // Process table source for session liveness, asked only for the pids that
   // matter; injectable for tests.
   private readonly procTable: (pids: number[]) => ProcTable;
-  // The machine this broker runs on: its host references are judged by the
-  // process table, every other machine's by a lease.
+  // The boot id of the machine this broker runs on ('' when unreadable): its
+  // host references are judged by the process table, every other machine's by
+  // a connection, a lease or the startup grace.
   private readonly machine: string;
+  private readonly startedAt: number;
 
   constructor(store: Store, events: CoreEvents, now?: () => number, procTable?: (pids: number[]) => ProcTable, machine?: string) {
     this.store = store;
@@ -221,12 +228,20 @@ export class MurmurCore {
     this.nowFn = now ?? Date.now;
     this.procTable = procTable ?? ((pids) => liveTable(pids));
     this.machine = machine ?? thisMachine();
+    this.startedAt = this.nowMs();
   }
 
-  // The machine a host reference names as stored: null for this broker's own
-  // machine and for a client that sends none.
+  // The machine a host reference names as stored (its boot id): null for this
+  // broker's own machine, for a client that sends none, and for every client
+  // while this broker has no boot id of its own. Two names are one machine when
+  // their boot ids are; the host name is never compared.
   machineKey(host: { machine?: string }): string | null {
-    return host.machine === undefined || host.machine === this.machine ? null : host.machine;
+    return host.machine === undefined || this.machine === '' || host.machine === this.machine ? null : host.machine;
+  }
+
+  // The host name label stored with a machine other than this broker's.
+  private labelOf(host: HostRef): string | null {
+    return this.machineKey(host) === null ? null : (host.machineName ?? null);
   }
 
   private rowAt(host: HostRef): SessionRow | null {
@@ -784,6 +799,8 @@ export class MurmurCore {
     const ts = this.nowMs();
     let row = arg.cliSessionId === null ? null : this.store.sessionByCliId(arg.client, arg.cliSessionId);
     row ??= this.rowAt(arg.host);
+    // Before a new row takes a handle, so it can have the handle of a session that a reboot ended.
+    this.endRebootedSessions(row?.id ?? -1, arg.host, ts);
     if (row === null) {
       const explicit = arg.handle !== undefined && this.claimable(arg.handle, null);
       const slug = arg.title === undefined ? '' : slugify(arg.title);
@@ -800,6 +817,7 @@ export class MurmurCore {
         hostPid: arg.host.hostPid,
         hostStart: arg.host.hostStart,
         hostMachine: this.machineKey(arg.host),
+        hostLabel: this.labelOf(arg.host),
         transcriptPath: arg.transcriptPath ?? null,
         cwd: arg.cwd ?? null,
         now: ts,
@@ -814,6 +832,7 @@ export class MurmurCore {
         hostPid: arg.host.hostPid,
         hostStart: arg.host.hostStart,
         hostMachine: this.machineKey(arg.host),
+        hostLabel: this.labelOf(arg.host),
         updatedAt: ts,
         ...(arg.cliSessionId !== null ? { cliSessionId: arg.cliSessionId } : {}),
         ...(arg.transcriptPath !== undefined ? { transcriptPath: arg.transcriptPath } : {}),
@@ -854,6 +873,24 @@ export class MurmurCore {
     }
     this.store.upsertPeer(current.handle, title, null, false, this.nowMs());
     return current;
+  }
+
+  // An event that carries a boot id other than the one stored for sessions of
+  // the same host name means that machine rebooted, which ended every process
+  // on it: those sessions end at once. When the host name changed too, nothing
+  // says it is the same machine, and the lease applies.
+  private endRebootedSessions(id: number, host: HostRef, ts: number): void {
+    const key = this.machineKey(host);
+    const label = this.labelOf(host);
+    if (key === null || label === null) {
+      return;
+    }
+    for (const old of this.store.rebootedSessions(label, key, id)) {
+      this.store.updateSession(old.id, { state: 'ended', stateAt: ts });
+      if (!this.sharesHandle(old)) {
+        this.store.deleteNativeTransport(old.handle);
+      }
+    }
   }
 
   // The session running under this exact host process, if one announced
@@ -1000,7 +1037,12 @@ export class MurmurCore {
     if (this.hostConnected(row)) {
       return true;
     }
-    return row.hostMachine === null ? isAlive(table, row.hostPid, row.hostStart) : this.nowMs() - row.updatedAt <= REMOTE_LEASE_MS;
+    if (row.hostMachine === null) {
+      return isAlive(table, row.hostPid, row.hostStart);
+    }
+    // Right after this broker starts no connection has come back yet, so every
+    // session of another machine counts as alive until they have had time to.
+    return this.nowMs() - row.updatedAt <= REMOTE_LEASE_MS || this.nowMs() - this.startedAt <= STARTUP_GRACE_MS;
   }
 
   private safeProcTable(pids: number[]): ProcTable {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { machineId, parseBootId, readBootId } from '../src/machine.js';
+import { machineId, machineOf, machineRef, parseBootId, readBootId, thisMachine, thisMachineRef, validField } from '../src/machine.js';
 
 const SAMPLE = '8E3A9F1B-1C2D-4E5F-8A9B-0C1D2E3F4A5B';
 
@@ -17,7 +17,7 @@ describe('parseBootId', () => {
 });
 
 describe('readBootId', () => {
-  it('reads /proc on Linux, sysctl on macOS, and nothing elsewhere or on failure', () => {
+  it('reads /proc on Linux, /usr/sbin/sysctl on macOS, and nothing elsewhere or on failure', () => {
     const files: string[] = [];
     const cmds: string[][] = [];
     const readFile = (path: string): string => {
@@ -31,7 +31,7 @@ describe('readBootId', () => {
     expect(readBootId('linux', readFile, run)).toBe(SAMPLE.toLowerCase());
     expect(files).toEqual(['/proc/sys/kernel/random/boot_id']);
     expect(readBootId('darwin', readFile, run)).toBe(SAMPLE.toLowerCase());
-    expect(cmds).toEqual([['sysctl', '-n', 'kern.bootsessionuuid']]);
+    expect(cmds).toEqual([['/usr/sbin/sysctl', '-n', 'kern.bootsessionuuid']]);
     expect(readBootId('win32', readFile, run)).toBe('');
     const boom = (): string => {
       throw new Error('no such file');
@@ -39,9 +39,7 @@ describe('readBootId', () => {
     expect(readBootId('linux', boom, run)).toBe('');
     expect(readBootId('darwin', readFile, boom)).toBe('');
   });
-});
 
-describe('readBootId with the real readers', () => {
   it('asks the system, and reads a uuid or nothing', () => {
     expect(readBootId()).toMatch(/^([0-9a-f-]{36})?$/);
     expect(readBootId('darwin')).toMatch(/^([0-9a-f-]{36})?$/);
@@ -49,10 +47,32 @@ describe('readBootId with the real readers', () => {
 });
 
 describe('machineId', () => {
-  it('is the boot id, and falls back to the host name when there is none', () => {
+  it('is the boot id whatever the host name is, and empty without one', () => {
     expect(machineId('omen', SAMPLE.toLowerCase())).toBe(SAMPLE.toLowerCase());
     expect(machineId('omen-renamed', SAMPLE.toLowerCase())).toBe(SAMPLE.toLowerCase());
-    expect(machineId('omen', '')).toBe('omen');
-    expect(machineId()).toMatch(/\S/);
+    expect(machineId('omen', '')).toBe('');
+    expect(machineId()).toMatch(/^([0-9a-f-]{36})?$/);
+  });
+});
+
+describe('machineRef', () => {
+  it('is the boot id with the host name as a label, and nothing at all without a boot id', () => {
+    expect(machineRef(SAMPLE.toLowerCase(), 'omen')).toEqual({ machine: SAMPLE.toLowerCase(), machineName: 'omen' });
+    expect(machineRef(SAMPLE.toLowerCase(), 'omen-renamed').machine).toBe(SAMPLE.toLowerCase());
+    expect(machineRef('', 'omen')).toEqual({});
+    expect(thisMachineRef()).toEqual(thisMachineRef());
+    expect(thisMachine()).toBe(machineOf(thisMachineRef()));
+    expect(machineOf({})).toBe('');
+    expect(machineOf({ machine: 'x' })).toBe('x');
+  });
+});
+
+describe('validField', () => {
+  it('takes 1 to 255 printable characters without a line break, and nothing else', () => {
+    expect(validField('renn-omen')).toBe('renn-omen');
+    expect(validField('x'.repeat(255))).toBe('x'.repeat(255));
+    for (const bad of ['', 'x'.repeat(256), 'a\nb', 'a\u0000b', 'a\u007fb', 12, null, undefined, {}]) {
+      expect(validField(bad)).toBeUndefined();
+    }
   });
 });

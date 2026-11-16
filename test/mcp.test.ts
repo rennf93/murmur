@@ -282,8 +282,8 @@ describe('identity helpers', () => {
 
   it('identityFor is empty without a host and carries host, client and cwd with one', () => {
     expect(identityFor(null, { CLAUDECODE: '1' }, '/work')).toEqual({});
-    expect(identityFor(HOST, { GEMINI_CLI: '1' }, '/work', 'omen#boot')).toEqual({
-      host: { hostPid: 9001, hostStart: 'S1', machine: 'omen#boot' },
+    expect(identityFor(HOST, { GEMINI_CLI: '1' }, '/work', { machine: 'omen-boot', machineName: 'omen' })).toEqual({
+      host: { hostPid: 9001, hostStart: 'S1', machine: 'omen-boot', machineName: 'omen' },
       client: 'gemini',
       cwd: '/work',
     });
@@ -794,6 +794,29 @@ describe('sessions of two machines at one broker', () => {
   };
   const start = (stack: Stack, cli: string, host: HostInfo, machine?: string, title?: string) =>
     stack.core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: cli, host: ref(host, machine), cwd: '/w/guard', source: 'startup', ...(title !== undefined ? { title } : {}) });
+
+  it('reads a machine field that is too long or not printable as absent, where it enters the broker', async () => {
+    hostState.host = HOST;
+    const stack = await buildStack();
+    const hook = await connectRaw(stack, 'hookish');
+    const startAs = (cli: string, pid: number, fields: Record<string, unknown>) =>
+      req(hook.client, { type: 'session', event: 'session-start', client: 'claude', cliSessionId: cli, host: { hostPid: pid, hostStart: 'S' + String(pid), ...fields }, cwd: '/w/' + cli });
+    await req(hook.client, { type: 'session', event: 'session-start', client: 'claude', cliSessionId: 'huge', host: { hostPid: HOST.hostPid, hostStart: HOST.hostStart, machine: 'x'.repeat(1_000_000), machineName: 'mac' }, cwd: '/w/huge' });
+    await startAs('lines', 1002, { machine: 'a\nb', machineName: 'mac' });
+    await startAs('typed', 1003, { machine: 12, machineName: 'mac' });
+    await startAs('good', 1004, { machine: 'mac-boot', machineName: 'mac' });
+    await startAs('badlabel', 1005, { machine: 'mac-boot', machineName: 'x'.repeat(300) });
+    const row = (cli: string) => stack.store.sessionByCliId('claude', cli);
+    for (const cli of ['huge', 'lines', 'typed']) {
+      expect(row(cli)).toMatchObject({ hostMachine: null, hostLabel: null });
+    }
+    expect(row('good')).toMatchObject({ hostMachine: 'mac-boot', hostLabel: 'mac' });
+    expect(row('badlabel')).toMatchObject({ hostMachine: 'mac-boot', hostLabel: null });
+    // A register that names ancestors with a bad machine is a client of the broker's own machine.
+    const cli = await connectRaw(stack, 'shell');
+    const registered = await req<RegisterResult>(cli.client, { type: 'register', clientKind: 'cli', ancestors: [HOST.hostPid], machine: 'x'.repeat(1_000_000) });
+    expect(registered.handle).toBe(row('huge')?.handle);
+  });
 
   it('does not bind a connection waiting for its session to a session of another machine with the same pid and start', async () => {
     hostState.host = HOST;

@@ -7,7 +7,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { Broker } from '../src/broker.js';
 import * as cliModule from '../src/cli.js';
 import { identityMessage, nameMessage } from '../src/cli-identity.js';
-import { thisMachine } from '../src/machine.js';
+import { thisMachineRef } from '../src/machine.js';
 import { runCli } from '../src/cli.js';
 import type { CliIo } from '../src/cli.js';
 import { MurmurClient } from '../src/client.js';
@@ -1038,10 +1038,10 @@ describe('reply', () => {
 
 describe('the machine id of the cli', () => {
   it('rides on the register of a shell command and of murmur name', () => {
-    expect(identityMessage(null, 'session')).toMatchObject({ clientKind: 'cli', machine: thisMachine() });
-    expect(identityMessage(null, 'owner')).toMatchObject({ owner: true, machine: thisMachine() });
+    expect(identityMessage(null, 'session')).toMatchObject({ clientKind: 'cli', ...thisMachineRef() });
+    expect(identityMessage(null, 'owner')).toMatchObject({ owner: true, ...thisMachineRef() });
     expect(nameMessage('fine-name', hostOf(9001, 'S1'))).toEqual({
-      type: 'register', clientKind: 'cli', handle: 'fine-name', host: { hostPid: 9001, hostStart: 'S1', machine: thisMachine() },
+      type: 'register', clientKind: 'cli', handle: 'fine-name', host: { hostPid: 9001, hostStart: 'S1', ...thisMachineRef() },
     });
   });
 });

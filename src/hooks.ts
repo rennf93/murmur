@@ -1,7 +1,8 @@
 import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
 import { connectBroker } from './client.js';
 import { getPaths, readToken } from './config.js';
-import { thisMachine } from './machine.js';
+import { thisMachineRef } from './machine.js';
+import type { MachineRef } from './machine.js';
 import { currentHost } from './proc.js';
 import type { HostInfo } from './proc.js';
 import type { FetchPushMessage, FetchPushResult, HookEvent, SessionMessage, SessionResult } from './protocol.js';
@@ -44,7 +45,7 @@ export async function runHook(
   event: HookEvent,
   stdinText: string,
   env: NodeJS.ProcessEnv,
-  opts?: { client?: HookClient; host?: HostInfo | null; machine?: string },
+  opts?: { client?: HookClient; host?: HostInfo | null; machine?: MachineRef },
 ): Promise<HookOutcome> {
   try {
     const client = opts?.client ?? 'claude';
@@ -61,7 +62,7 @@ export async function runHook(
       conn.close();
     }, HOOK_DEADLINE_MS);
     try {
-      const { handle } = await conn.request<SessionResult>(sessionMessage(event, client, input, host, env, opts?.machine ?? thisMachine()));
+      const { handle } = await conn.request<SessionResult>(sessionMessage(event, client, input, host, env, opts?.machine ?? thisMachineRef()));
       if (event === 'session-end') {
         return { exitCode: 0, stdout: '' };
       }
@@ -89,14 +90,14 @@ function sessionMessage(
   input: HookInput,
   host: HostInfo,
   env: NodeJS.ProcessEnv,
-  machine: string,
+  machine: MachineRef,
 ): Omit<SessionMessage, 'v' | 'id'> {
   const msg: Omit<SessionMessage, 'v' | 'id'> = {
     type: 'session',
     event,
     client,
     cliSessionId: input.sessionId,
-    host: { hostPid: host.hostPid, hostStart: host.hostStart, machine },
+    host: { hostPid: host.hostPid, hostStart: host.hostStart, ...machine },
   };
   // zcode hands hooks a synthetic transcript it deletes afterwards, so it
   // cannot serve as delivery proof.

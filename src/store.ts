@@ -27,6 +27,8 @@ export interface SessionRow {
   // The machine of the host process, or null for the broker's own (and for a
   // row written before machines existed).
   hostMachine: string | null;
+  // The host name of that machine when the row was last written, a label.
+  hostLabel: string | null;
   transcriptPath: string | null;
   cwd: string | null;
   // busy, idle or ended; null until a lifecycle event says otherwise.
@@ -129,6 +131,7 @@ interface SessionRecord {
   host_pid: number;
   host_start: string;
   host_machine: string | null;
+  host_label: string | null;
   transcript_path: string | null;
   cwd: string | null;
   state: string | null;
@@ -252,6 +255,7 @@ const ADDED_COLUMNS: Array<[table: string, column: string, ddl: string]> = [
   ['messages', 'via', 'TEXT'],
   ['sessions', 'pinned', 'INTEGER NOT NULL DEFAULT 0'],
   ['sessions', 'host_machine', 'TEXT'],
+  ['sessions', 'host_label', 'TEXT'],
 ];
 
 // Delivery states that still count as unread for inbox purposes.
@@ -279,6 +283,7 @@ function toSessionRow(r: SessionRecord): SessionRow {
     hostPid: r.host_pid,
     hostStart: r.host_start,
     hostMachine: r.host_machine,
+    hostLabel: r.host_label,
     transcriptPath: r.transcript_path,
     cwd: r.cwd,
     state: r.state,
@@ -742,6 +747,15 @@ export class Store {
     return rec === undefined ? null : toSessionRow(rec);
   }
 
+  // The sessions that have not ended, of the machine named by this host name
+  // label, recorded under a boot id other than `machine`: a reboot ended them.
+  rebootedSessions(label: string, machine: string, exceptId: number): SessionRow[] {
+    const recs = this.stmt(
+      "SELECT * FROM sessions WHERE host_label = ? AND host_machine IS NOT NULL AND host_machine != ? AND id != ? AND (state IS NULL OR state != 'ended')",
+    ).all(label, machine, exceptId) as SessionRecord[];
+    return recs.map(toSessionRow);
+  }
+
   // Points one session at another, existing handle and moves its native
   // transport along.
   // The target's old transport is stale once the session takes the handle; the
@@ -799,14 +813,15 @@ export class Store {
     hostPid: number;
     hostStart: string;
     hostMachine: string | null;
+    hostLabel: string | null;
     transcriptPath: string | null;
     cwd: string | null;
     now: number;
   }): number {
     const info = this.stmt(
-      `INSERT INTO sessions (client, cli_session_id, handle, host_pid, host_start, host_machine, transcript_path, cwd, state, state_at, started_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
-    ).run(arg.client, arg.cliSessionId, arg.handle, arg.hostPid, arg.hostStart, arg.hostMachine, arg.transcriptPath, arg.cwd, arg.now, arg.now);
+      `INSERT INTO sessions (client, cli_session_id, handle, host_pid, host_start, host_machine, host_label, transcript_path, cwd, state, state_at, started_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
+    ).run(arg.client, arg.cliSessionId, arg.handle, arg.hostPid, arg.hostStart, arg.hostMachine, arg.hostLabel, arg.transcriptPath, arg.cwd, arg.now, arg.now);
     return Number(info.lastInsertRowid);
   }
 
@@ -819,6 +834,7 @@ export class Store {
       hostPid?: number;
       hostStart?: string;
       hostMachine?: string | null;
+      hostLabel?: string | null;
       transcriptPath?: string | null;
       cwd?: string | null;
       state?: string;
@@ -833,6 +849,7 @@ export class Store {
       ['hostPid', 'host_pid'],
       ['hostStart', 'host_start'],
       ['hostMachine', 'host_machine'],
+      ['hostLabel', 'host_label'],
       ['transcriptPath', 'transcript_path'],
       ['cwd', 'cwd'],
       ['state', 'state'],

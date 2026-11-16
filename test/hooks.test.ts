@@ -134,8 +134,8 @@ describe('session events', () => {
     const stack = await buildStack();
     await runHook('session-start', JSON.stringify({ session_id: 'here', cwd: '/work/here' }), envFor(stack), CLIENT_OPT('claude'));
     expect(stack.store.sessionByCliId('claude', 'here')?.hostMachine).toBeNull();
-    await runHook('session-start', JSON.stringify({ session_id: 'there', cwd: '/work/there' }), envFor(stack), { host: { ...HOST, hostPid: HOST.hostPid + 1 }, machine: 'mac#boot-9' });
-    expect(stack.store.sessionByCliId('claude', 'there')?.hostMachine).toBe('mac#boot-9');
+    await runHook('session-start', JSON.stringify({ session_id: 'there', cwd: '/work/there' }), envFor(stack), { host: { ...HOST, hostPid: HOST.hostPid + 1 }, machine: { machine: 'mac-boot-9', machineName: 'mac' } });
+    expect(stack.store.sessionByCliId('claude', 'there')).toMatchObject({ hostMachine: 'mac-boot-9', hostLabel: 'mac' });
   });
 
   it('defaults the client to claude, and a bare session gets the plain client handle', async () => {

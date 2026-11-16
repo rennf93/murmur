@@ -3,14 +3,17 @@ import { readFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 
 // A host reference is a pid and a start time, which only mean something on the
-// machine that ran the process. The machine id names that machine and rides
-// along with every host reference. It is the boot id (a uuid per machine and
-// boot, so a rebooted machine or a clone is another machine); the host name is
-// the fallback only, because a host name can change while the machine runs
-// (macOS renames itself with the network) and would make one machine look like
-// two.
+// machine that ran the process. `machine` names that machine and rides along
+// with every host reference: the boot id, a uuid per machine and boot (a
+// rebooted machine or a clone is another machine). `machineName`, the host
+// name, is only a label: it is never compared for sameness (a host name can
+// change while a machine runs), and only tells the broker that a machine it
+// knew rebooted. A client that cannot read a boot id sends neither field and
+// is judged as one of the broker's own machine, as before this existed.
 
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+// What a machine field may hold where it enters the broker.
+const FIELD = /^[^\u0000-\u001f\u007f]{1,255}$/;
 
 // The boot uuid inside Linux's /proc/sys/kernel/random/boot_id or macOS's
 // `sysctl -n kern.bootsessionuuid` (also with its `name: ` prefix), lower
@@ -19,35 +22,64 @@ export function parseBootId(text: string): string {
   return UUID.exec(text)?.[0].toLowerCase() ?? '';
 }
 
-// Linux reads /proc, macOS asks sysctl (the one thing to confirm on a Mac:
-// `sysctl -n kern.bootsessionuuid` prints a uuid). Anything else, or a failure,
-// has no boot id.
+// Linux reads /proc, macOS asks sysctl by absolute path with a one second
+// limit (the one thing to confirm on a Mac: `sysctl -n kern.bootsessionuuid`
+// prints a uuid). Anything else, or a failure, has no boot id.
 export function readBootId(
   platform: string = process.platform,
   readFile: (path: string) => string = (path) => readFileSync(path, 'utf8'),
-  run: (cmd: string, args: string[]) => string = (cmd, args) => execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }),
+  run: (cmd: string, args: string[]) => string = (cmd, args) => execFileSync(cmd, args, { encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] }),
 ): string {
   try {
     if (platform === 'linux') {
       return parseBootId(readFile('/proc/sys/kernel/random/boot_id'));
     }
     if (platform === 'darwin') {
-      return parseBootId(run('sysctl', ['-n', 'kern.bootsessionuuid']));
+      return parseBootId(run('/usr/sbin/sysctl', ['-n', 'kern.bootsessionuuid']));
     }
   } catch {
-    // No boot id: the host name alone names the machine.
+    // No boot id.
   }
   return '';
 }
 
-export function machineId(name: string = hostname(), bootId: string = readBootId()): string {
-  return bootId === '' ? name : bootId;
+// The machine id: the boot id, or '' when there is none. The host name is not
+// part of it (it is only the label of machineRef), so it is not consulted.
+export function machineId(_name: string = hostname(), bootId: string = readBootId()): string {
+  return bootId;
 }
 
-let cached: string | undefined;
+export interface MachineRef {
+  machine?: string;
+  machineName?: string;
+}
 
-// This machine's id, read once.
-export function thisMachine(): string {
-  cached ??= machineId();
+// What a client puts next to its host reference: the boot id and the host
+// name, or nothing when there is no boot id.
+export function machineRef(bootId: string = readBootId(), name: string = hostname()): MachineRef {
+  return bootId === '' ? {} : { machine: bootId, machineName: name };
+}
+
+let cached: MachineRef | undefined;
+
+// This machine's reference, read once.
+export function thisMachineRef(): MachineRef {
+  cached ??= machineRef();
   return cached;
+}
+
+// The boot id of a reference, or '' when it has none.
+export function machineOf(ref: MachineRef): string {
+  return ref.machine ?? '';
+}
+
+// This machine's boot id, or '' when it has none.
+export function thisMachine(): string {
+  return machineOf(thisMachineRef());
+}
+
+// A machine field from the wire: undefined unless it is 1 to 255 printable
+// characters without a line break.
+export function validField(value: unknown): string | undefined {
+  return typeof value === 'string' && FIELD.test(value) ? value : undefined;
 }

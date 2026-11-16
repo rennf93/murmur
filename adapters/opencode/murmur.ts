@@ -20,26 +20,27 @@ try {
 } catch {
   // leave empty; the broker will refuse the announce and we retry quietly
 }
-// The machine id the broker keeps with a host (src/machine.ts): the boot id,
-// the host name when there is none.
-function machineId(): string {
+// What the broker keeps with a host (src/machine.ts): the boot id, and the host
+// name as a label; neither when there is no boot id, so the broker reads this
+// as an old client of its own machine.
+function machineRef(): { machine?: string; machineName?: string } {
   try {
     const raw =
       process.platform === 'linux'
         ? readFileSync('/proc/sys/kernel/random/boot_id', 'utf8')
         : process.platform === 'darwin'
-          ? execFileSync('sysctl', ['-n', 'kern.bootsessionuuid'], { encoding: 'utf8' })
+          ? execFileSync('/usr/sbin/sysctl', ['-n', 'kern.bootsessionuuid'], { encoding: 'utf8', timeout: 1000 })
           : '';
     const uuid = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.exec(raw);
     if (uuid !== null) {
-      return uuid[0].toLowerCase();
+      return { machine: uuid[0].toLowerCase(), machineName: hostname() };
     }
   } catch {
-    // fall back to the host name
+    // no boot id
   }
-  return hostname();
+  return {};
 }
-const host = { hostPid: process.pid, hostStart, machine: machineId() };
+const host = { hostPid: process.pid, hostStart, ...machineRef() };
 
 type Pending = { resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> };
 

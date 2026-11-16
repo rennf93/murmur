@@ -10,8 +10,8 @@ import { Store } from '../src/store.js';
 // The broker runs on OMEN. A session of the Mac is a session of another
 // machine: the broker cannot see its pid, so it is alive for a lease after
 // its last event, or while one of its connections is open.
-const OMEN = 'omen#boot-1';
-const MAC = 'mac#boot-9';
+const OMEN = 'omen-boot-1';
+const MAC = 'mac-boot-9';
 const HOUR = 60 * 60 * 1000;
 const LEASE = 12 * HOUR;
 
@@ -38,8 +38,8 @@ const local = (pid: number) => {
   procs.set(pid, { ppid: 1, start: 'S' + String(pid), comm: 'claude' });
   return { hostPid: pid, hostStart: 'S' + String(pid), machine: OMEN };
 };
-const remote = (pid = 51234) => ({ hostPid: pid, hostStart: 'T' + String(pid), machine: MAC });
-type Host = { hostPid: number; hostStart: string; machine?: string };
+const remote = (pid = 51234, boot = MAC, name = 'mac') => ({ hostPid: pid, hostStart: 'T' + String(pid), machine: boot, machineName: name });
+type Host = { hostPid: number; hostStart: string; machine?: string; machineName?: string };
 const open = (cli: string, host: Host, cwd: string, title?: string) =>
   core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: cli, host, cwd, source: 'startup', ...(title !== undefined ? { title } : {}) });
 
@@ -180,9 +180,11 @@ describe('the native transport of a handle two live sessions hold', () => {
 });
 
 describe('what the review of the first version found', () => {
-  it('keeps the lease to the second: alive at exactly 12 hours, gone one millisecond later', () => {
+  it('keeps the lease to the millisecond: alive at 12 hours minus 1 ms and at exactly 12 hours, gone 1 ms later', () => {
     open('mac', remote(), '/Users/renzof/work/guard');
-    now += LEASE;
+    now += LEASE - 1;
+    expect(core.claimable('claude-guard', null)).toBe(false);
+    now += 1;
     expect(core.claimable('claude-guard', null)).toBe(false);
     now += 1;
     expect(core.claimable('claude-guard', null)).toBe(true);
@@ -212,10 +214,11 @@ describe('a database made by the code before host_machine', () => {
     copyFileSync(join(import.meta.dirname, 'fixtures', 'murmur-master-schema.db'), copy);
     const before = new Database(copy, { readonly: true });
     expect((before.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>).map((c) => c.name)).not.toContain('host_machine');
+    expect((before.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>).map((c) => c.name)).not.toContain('host_label');
     before.close();
     const old = Store.open(copy);
     const row = old.sessionByCliId('claude', 'old-1');
-    expect(row).toMatchObject({ handle: 'old-session', hostPid: 4242, hostMachine: null });
+    expect(row).toMatchObject({ handle: 'old-session', hostPid: 4242, hostMachine: null, hostLabel: null });
     expect(old.sessionByHost(4242, 'Mon Nov  9 10:00:00 2026', null)?.id).toBe(row?.id);
     expect(old.sessionByHost(4242, 'Mon Nov  9 10:00:00 2026', MAC)).toBeNull();
     expect(old.threadMessages(1, null)).toHaveLength(1);
@@ -225,5 +228,111 @@ describe('a database made by the code before host_machine', () => {
     const again = Store.open(copy);
     expect(again.sessionByCliId('claude', 'old-1')?.handle).toBe('old-session');
     again.close();
+  });
+});
+
+describe('one machine under two host names, and clients without a boot id', () => {
+  it('keeps one session when the host name of a machine changes and its boot id does not', () => {
+    const first = open('mac', remote(51234, MAC, 'mac-mini'), '/Users/renzof/work/guard');
+    const again = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'mac', host: remote(51234, MAC, 'mac-mini-2') });
+    expect(again.id).toBe(first.id);
+    const byHost = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: null, host: remote(51234, MAC, 'renamed-again') });
+    expect(byHost.id).toBe(first.id);
+    expect(store.listSessions()).toHaveLength(1);
+    expect(store.sessionById(first.id)).toMatchObject({ handle: 'claude-guard', hostMachine: MAC, hostLabel: 'renamed-again' });
+  });
+
+  it('judges a client that has no boot id, so sends no machine, by the process table: one session', () => {
+    const host = local(100);
+    const first = open('omen', { hostPid: host.hostPid, hostStart: host.hostStart }, '/w/guard');
+    const second = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'omen', host: { hostPid: host.hostPid, hostStart: host.hostStart } });
+    expect(second.id).toBe(first.id);
+    expect(first.hostMachine).toBeNull();
+    expect(core.claimable('claude-guard', null)).toBe(false);
+    procs.delete(100);
+    expect(core.claimable('claude-guard', null)).toBe(true);
+  });
+
+  it('reads every client as its own machine while the broker has no boot id', () => {
+    const noBoot = new MurmurCore(store, { onAppend: () => {}, onStateChange: () => {} }, () => now, () => procs, '');
+    const row = noBoot.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'x', host: remote(), cwd: '/w/guard', source: 'startup' });
+    expect(row).toMatchObject({ hostMachine: null, hostLabel: null });
+    expect(noBoot.claimable('claude-guard', null)).toBe(true);
+  });
+});
+
+describe('a broker that restarts', () => {
+  it('counts every session of another machine alive for a minute, then judges it by lease and connection', () => {
+    open('mac', remote(), '/Users/renzof/work/guard');
+    core.hostConnected = () => true;
+    now += 20 * HOUR;
+    expect(core.claimable('claude-guard', null)).toBe(false);
+    // The broker restarts: the connection that kept the session alive is gone.
+    const restarted = new MurmurCore(store, { onAppend: () => {}, onStateChange: () => {} }, () => now, () => procs, OMEN);
+    expect(restarted.claimable('claude-guard', null)).toBe(false);
+    now += 60 * 1000;
+    expect(restarted.claimable('claude-guard', null)).toBe(false);
+    now += 1;
+    expect(restarted.claimable('claude-guard', null)).toBe(true);
+  });
+
+  it('does not extend the grace to a session that ended', () => {
+    const host = remote();
+    open('mac', host, '/Users/renzof/work/guard');
+    core.sessionEvent({ event: 'session-end', client: 'claude', cliSessionId: 'mac', host });
+    const restarted = new MurmurCore(store, { onAppend: () => {}, onStateChange: () => {} }, () => now, () => procs, OMEN);
+    expect(restarted.claimable('claude-guard', null)).toBe(true);
+  });
+});
+
+describe('a machine that reboots', () => {
+  it('ends its old sessions at once when an event arrives with a new boot id under the same host name', () => {
+    const old = open('old', remote(51234, 'mac-boot-1', 'mac'), '/Users/renzof/work/guard');
+    store.createGroup('crew', now);
+    store.addMember('crew', old.handle, now);
+    core.registerNative({ handle: old.handle, socketPath: '/tmp/old.sock', token: 't' });
+    const fresh = open('fresh', remote(777, 'mac-boot-2', 'mac'), '/Users/renzof/work/guard');
+    expect(store.sessionById(old.id)?.state).toBe('ended');
+    expect(fresh.handle).toBe(old.handle);
+    expect(store.getNativeTransport(old.handle)).toBeNull();
+    expect(store.listGroups().find((g) => g.name === 'crew')?.members).toEqual([old.handle]);
+  });
+
+  it('keeps the transport of a handle another live session still holds when a reboot ends one of them', () => {
+    const old = open('old', remote(51234, 'mac-boot-1', 'mac'), '/Users/renzof/work/guard');
+    const local1 = open('omen', local(100), '/home/renzof/work/other');
+    store.reassignSession(local1.id, local1.handle, old.handle, false);
+    core.registerNative({ handle: old.handle, socketPath: '/tmp/shared.sock', token: 't' });
+    open('fresh', remote(777, 'mac-boot-2', 'mac'), '/Users/renzof/work/third');
+    expect(store.sessionById(old.id)?.state).toBe('ended');
+    expect(store.getNativeTransport(old.handle)?.socketPath).toBe('/tmp/shared.sock');
+  });
+
+  it('keeps a resumed session of the same CLI id and ends the others of the old boot', () => {
+    const resumed = open('resumed', remote(51234, 'mac-boot-1', 'mac'), '/Users/renzof/work/guard');
+    const other = open('other', remote(51300, 'mac-boot-1', 'mac'), '/Users/renzof/work/other');
+    core.registerNative({ handle: resumed.handle, socketPath: '/tmp/resumed.sock', token: 't' });
+    const back = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'resumed', host: remote(900, 'mac-boot-2', 'mac'), source: 'resume' });
+    expect(back.id).toBe(resumed.id);
+    expect(back).toMatchObject({ hostMachine: 'mac-boot-2', state: 'idle' });
+    expect(store.sessionById(other.id)?.state).toBe('ended');
+    expect(store.getNativeTransport(resumed.handle)?.socketPath).toBe('/tmp/resumed.sock');
+  });
+
+  it('leaves the old sessions to their lease when the host name changed too, and keeps other machines apart', () => {
+    const old = open('old', remote(51234, 'mac-boot-1', 'mac'), '/Users/renzof/work/guard');
+    const renamed = open('renamed', remote(777, 'mac-boot-2', 'mac-renamed'), '/Users/renzof/work/guard');
+    expect(store.sessionById(old.id)?.state).not.toBe('ended');
+    expect(renamed.handle).toBe('claude-guard-2');
+    open('elsewhere', remote(5, 'linux-boot-1', 'box'), '/w/x');
+    expect(store.sessionById(old.id)?.state).not.toBe('ended');
+  });
+
+  it('does not end sessions of the broker machine or of a client without a host name', () => {
+    const here = open('here', local(100), '/w/a');
+    const noLabel = open('nolabel', { hostPid: 61, hostStart: 'T61', machine: 'mac-boot-1' }, '/w/b');
+    open('fresh', remote(777, 'mac-boot-2', 'mac'), '/w/c');
+    expect(store.sessionById(here.id)?.state).not.toBe('ended');
+    expect(store.sessionById(noLabel.id)?.state).not.toBe('ended');
   });
 });

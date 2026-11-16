@@ -250,9 +250,11 @@ export interface AuthMessage {
 export interface HostRef {
   hostPid: number;
   hostStart: string;
-  // The machine the process runs on (src/machine.ts). Absent from a client
-  // that predates it: the broker then reads it as its own machine.
+  // The machine the process runs on (src/machine.ts): its boot id, and its
+  // host name as a label. Absent from a client that predates it or cannot
+  // read a boot id: the broker then reads it as its own machine.
   machine?: string;
+  machineName?: string;
 }
 
 // Identity, three ways. handle alone: that exact handle (scripts, --as,
@@ -275,6 +277,7 @@ export interface RegisterMessage {
   ancestors?: number[];
   // The machine the ancestors are pids of; absent reads as the broker's own.
   machine?: string;
+  machineName?: string;
   client?: CliName;
   cwd?: string;
   owner?: boolean;
