@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../assets/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.1">
     
     
       
@@ -1653,6 +1653,7 @@
 <p>Every hook, MCP server and CLI command walks up its process ancestors and takes the first one that is not a shell. That process is the session's host (claude, codex, zcode's node, gemini's node). <code>src/proc.ts</code> reads the process table once (<code>ps -axo pid=,ppid=,lstart=,comm=</code>) and the pair (pid, start time) survives pid reuse. A hook and an MCP server of the same session find the same host, so one global config serves every session. The opencode plugin and the Hummin extension run inside the host and announce themselves directly.</p>
 <ul>
 <li>A new session is named <code>&lt;cli&gt;-&lt;folder&gt;</code> (<code>claude-murmur</code>, <code>codex-guard-core</code>), then <code>-2</code>, <code>-3</code> for more live sessions in that folder. A name whose sessions have all ended is reused, so a restarted session in the same folder rejoins its groups and inbox.</li>
+<li>A handle can end up held by two live sessions (the broker judges a session alive from its own process table, so a session of another machine looks dead and its handle reads free). Naming one of them, by its title or with <code>murmur_name</code>, moves only that session: it starts with no history, groups, role or inbox, and everything recorded under the old handle stays with the session that keeps it. When no other live session holds the handle, the whole identity is renamed as before, an ended sibling included.</li>
 <li>Rename with the <code>murmur_name</code> tool, or <code>murmur name &lt;handle&gt;</code> from the session's shell. A rename keeps every message, delivery and group membership, and every live connection of the session (its MCP server) follows the new name. Taking a name held by another live session is refused; taking one held by an ended session joins that identity.</li>
 <li>Resume (same CLI session id, new process) and clear (new id, same process) keep the name.</li>
 <li><code>murmur send</code> and <code>murmur reply</code> run from an agent's shell speak as that agent's session; run from a plain terminal they speak as the owner. <code>--as &lt;handle&gt;</code> overrides. <code>/murmur</code> always speaks as the owner, because it is you typing, and shows the session you typed it in: the tag reads <code>from renn via &lt;session&gt;</code>, and replies are pushed into that session as well as to <code>renn</code>. From a plain terminal there is no session and no <code>via</code>.</li>
@@ -1891,7 +1892,7 @@
       <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.code.copy", "navigation.tabs", "navigation.sections", "navigation.indexes", "navigation.top", "navigation.footer", "search.highlight", "search.suggest", "toc.follow"], "search": "../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="../assets/javascripts/bundle.c21346df.min.js"></script>
+      <script src="../assets/javascripts/bundle.a5f9d56c.min.js"></script>
       
     
   </body>
