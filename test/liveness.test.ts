@@ -597,6 +597,31 @@ describe('adopting the row of the same process', () => {
     expect(store.sessionById(noId.id)).toMatchObject({ hostMachine: MAC, hostLabel: 'mac' });
   });
 
+  it('does not take the row of a session in another folder: same pid and start on two machines, no CLI ids', () => {
+    const host = { hostPid: 500, hostStart: 'T500' };
+    const a = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: null, host, cwd: '/Users/renzof/work/guard' });
+    const b = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: null, host: { ...host, machine: MAC, machineName: 'mac' }, cwd: '/Users/renzof/work/other' });
+    expect(b.id).not.toBe(a.id);
+    expect(store.listSessions()).toHaveLength(2);
+    expect(store.sessionById(a.id)).toMatchObject({ hostMachine: null, handle: 'claude-guard' });
+    expect(store.sessionById(b.id)).toMatchObject({ hostMachine: MAC, handle: 'claude-other' });
+  });
+
+  it('still takes the row in the same folder, and when either side has no folder', () => {
+    const host = { hostPid: 500, hostStart: 'T500' };
+    const a = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: null, host, cwd: '/Users/renzof/work/guard' });
+    const same = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: null, host: { ...host, machine: MAC, machineName: 'mac' }, cwd: '/Users/renzof/work/guard' });
+    expect(same.id).toBe(a.id);
+    const quiet = { hostPid: 600, hostStart: 'T600' };
+    const noCwd = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: null, host: quiet });
+    const withCwd = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: null, host: { ...quiet, machine: MAC, machineName: 'mac' }, cwd: '/Users/renzof/work/third' });
+    expect(withCwd.id).toBe(noCwd.id);
+    const hasCwd = { hostPid: 700, hostStart: 'T700' };
+    const first = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: null, host: hasCwd, cwd: '/Users/renzof/work/fourth' });
+    const sparse = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: null, host: { ...hasCwd, machine: MAC, machineName: 'mac' } });
+    expect(sparse.id).toBe(first.id);
+  });
+
   it('finds the row of a remote session for a sparse event without a CLI id, and leaves its machine alone', () => {
     const first = open('mac', remote(51234, MAC, 'mac'), '/Users/renzof/work/guard');
     const sparse = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: null, host: { hostPid: 51234, hostStart: 'T51234' } });
@@ -686,6 +711,13 @@ describe('what tells a reboot from a stranger with the same host name: the finge
     expect(store.listGroups().find((g) => g.name === 'crew')?.members).toEqual(['claude-guard']);
     expect(store.getNativeTransport('claude-guard')?.socketPath).toBe('/tmp/a.sock');
     expect(store.getDeliveries(mail.result.messageId).map((d) => [d.recipient, d.state])).toEqual([['claude-guard', 'queued']]);
+    // The queue, the groups and the native transport stay with A, and B starts with none of them.
+    expect(core.inbox(a.handle, true).unreadTotal).toBe(1);
+    expect(core.inbox(b.handle, true).unreadTotal).toBe(0);
+    expect(store.listGroups().filter((g) => g.members.includes(b.handle))).toEqual([]);
+    expect(store.getNativeTransport(b.handle)).toBeNull();
+    expect(core.pendingPush(b.handle, 10).messages).toEqual([]);
+    expect(core.pendingPush(a.handle, 10).messages.map((m) => m.body)).toEqual(['waiting for a']);
   });
 
   it('ends the old sessions of the same machine at once when it comes back with a new boot id', () => {
@@ -779,5 +811,93 @@ describe('a database made by the code before host_fingerprint', () => {
     const again = Store.open(copy);
     expect(again.sessionByCliId('claude', 'remote-1')?.hostFingerprint).toBe(FP_A);
     again.close();
+  });
+});
+
+describe('a broker that gains its own boot id late', () => {
+  const events = { onAppend: () => {}, onStateChange: () => {} };
+  let boot = '';
+  const late = (): MurmurCore => new MurmurCore(store, events, () => now, () => procs, () => boot);
+  const sees = (c: MurmurCore, cli: string, host: Host, cwd: string) =>
+    c.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: cli, host, cwd, source: 'startup' });
+
+  beforeEach(() => {
+    boot = '';
+  });
+
+  it('re-keys the rows its own machine wrote while it had none, and leaves the rows of other machines alone', () => {
+    const c = late();
+    const mine = sees(c, 'mine', { ...local(100), machineName: 'omen', machineFingerprint: FP_B }, '/w/guard');
+    const gone = sees(c, 'gone', { hostPid: 200, hostStart: 'S200', machine: OMEN, machineName: 'omen' }, '/w/other');
+    const mac = sees(c, 'mac', remote(), '/Users/renzof/work/third');
+    expect(store.sessionById(mine.id)).toMatchObject({ hostMachine: OMEN, hostLabel: 'omen' });
+    // Until the boot id is known, a crashed session of this machine holds its handle on the lease.
+    expect(c.claimable(gone.handle, null)).toBe(false);
+    boot = OMEN;
+    expect(c.claimable(gone.handle, null)).toBe(true);
+    expect(c.claimable(mine.handle, null)).toBe(false);
+    expect(c.claimable(mac.handle, null)).toBe(false);
+    expect(store.sessionById(mine.id)).toMatchObject({ hostMachine: null, hostLabel: null, hostFingerprint: null });
+    expect(store.sessionById(gone.id)).toMatchObject({ hostMachine: null, hostLabel: null });
+    expect(store.sessionById(mac.id)).toMatchObject({ hostMachine: MAC, hostLabel: 'mac', hostFingerprint: FP_A });
+    procs.delete(100);
+    expect(c.claimable(mine.handle, null)).toBe(true);
+  });
+
+  it('re-keys on the first event after the boot id appears, so the session of this process is found again', () => {
+    const c = late();
+    const mine = sees(c, 'mine', local(100), '/w/guard');
+    boot = OMEN;
+    const again = c.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: null, host: { hostPid: 100, hostStart: 'S100' } });
+    expect(again.id).toBe(mine.id);
+    expect(store.sessionById(mine.id)?.hostMachine).toBeNull();
+    expect(store.listSessions()).toHaveLength(1);
+  });
+
+  it('re-keys on a sparse event of a session found by its CLI id, and when holdsHandle is the first thing to ask', () => {
+    const c = late();
+    const mine = sees(c, 'mine', local(100), '/w/guard');
+    boot = OMEN;
+    c.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'mine', host: { hostPid: 100, hostStart: 'S100' } });
+    expect(store.sessionById(mine.id)).toMatchObject({ hostMachine: null, hostLabel: null });
+    boot = '';
+    const d = late();
+    const other = sees(d, 'other', { hostPid: 200, hostStart: 'S200', machine: OMEN }, '/w/other');
+    boot = OMEN;
+    expect(d.holdsHandle(other.handle)).toBe(false);
+    expect(store.sessionById(other.id)?.hostMachine).toBeNull();
+  });
+
+  it('re-keys when the ancestors of a command are the first thing to ask', () => {
+    const c = late();
+    const mine = sees(c, 'mine', local(100), '/w/guard');
+    boot = OMEN;
+    expect(c.sessionForAncestors([100], OMEN)?.id).toBe(mine.id);
+    expect(store.sessionById(mine.id)?.hostMachine).toBeNull();
+  });
+
+  it('re-keys when the status is the first thing to ask', () => {
+    const c = late();
+    const mine = sees(c, 'mine', local(100), '/w/guard');
+    boot = OMEN;
+    c.status(() => ({ online: false }));
+    expect(store.sessionById(mine.id)?.hostMachine).toBeNull();
+  });
+
+  it('does nothing when the boot id never appears, or was there from the start', () => {
+    const c = late();
+    const mac = sees(c, 'mac', remote(), '/Users/renzof/work/guard');
+    c.status(() => ({ online: false }));
+    expect(store.sessionById(mac.id)?.hostMachine).toBe(MAC);
+    boot = OMEN;
+    const started = late();
+    const mine = sees(started, 'mine', local(100), '/w/guard');
+    expect(mine.hostMachine).toBeNull();
+    expect(store.sessionById(mac.id)?.hostMachine).toBe(MAC);
+    // Losing the id again re-keys nothing.
+    boot = '';
+    started.status(() => ({ online: false }));
+    expect(store.sessionById(mac.id)?.hostMachine).toBe(MAC);
+    expect(store.sessionById(mine.id)?.hostMachine).toBeNull();
   });
 });

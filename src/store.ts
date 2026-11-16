@@ -769,6 +769,13 @@ export class Store {
     return recs.map(toSessionRow);
   }
 
+  // The sessions recorded under this machine are the broker's own: it learned
+  // its boot id after they were written. Their machine, label and fingerprint
+  // go back to the own-machine form (NULL), which the process table judges.
+  rekeyMachine(machine: string): void {
+    this.stmt('UPDATE sessions SET host_machine = NULL, host_label = NULL, host_fingerprint = NULL WHERE host_machine = ?').run(machine);
+  }
+
   // Points one session at another, existing handle and moves its native
   // transport along.
   // The target's old transport is stale once the session takes the handle; the

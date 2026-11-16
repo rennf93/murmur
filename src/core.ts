@@ -216,19 +216,37 @@ export class MurmurCore {
   // Process table source for session liveness, asked only for the pids that
   // matter; injectable for tests.
   private readonly procTable: (pids: number[]) => ProcTable;
-  // The boot id of the machine this broker runs on ('' when unreadable): its
-  // host references are judged by the process table, every other machine's by
-  // a connection, a lease or the startup grace.
-  private readonly fixedMachine: string | undefined;
+  // Where the boot id of the machine this broker runs on is read ('' when
+  // unreadable): its host references are judged by the process table, every
+  // other machine's by a connection, a lease or the startup grace. A function
+  // is read each time, since the broker retries a read that failed at start.
+  private readonly machineSource: () => string;
+  // The own machine as last read, to see it appear.
+  private seenMachine: string;
   private readonly startedAt: number;
 
-  constructor(store: Store, events: CoreEvents, now?: () => number, procTable?: (pids: number[]) => ProcTable, machine?: string) {
+  constructor(store: Store, events: CoreEvents, now?: () => number, procTable?: (pids: number[]) => ProcTable, machine?: string | (() => string)) {
     this.store = store;
     this.events = events;
     this.nowFn = now ?? Date.now;
     this.procTable = procTable ?? ((pids) => liveTable(pids));
-    this.fixedMachine = machine;
+    this.machineSource = typeof machine === 'function' ? machine : machine === undefined ? thisMachine : () => machine;
+    this.seenMachine = this.machineSource();
     this.startedAt = this.nowMs();
+  }
+
+  // The boot id of this broker's machine. A broker that could not read it at
+  // start and now can finds rows that clients wrote under that id while it was
+  // taken for another machine: they are its own, so they are re-keyed once, and
+  // the process table judges them from then on.
+  private ownMachine(): string {
+    const read = this.machineSource();
+    if (read !== this.seenMachine) {
+      // No row is keyed to '', so losing the id re-keys nothing.
+      this.store.rekeyMachine(read);
+      this.seenMachine = read;
+    }
+    return read;
   }
 
   // The machine a host reference names as stored (its boot id): null for this
@@ -238,7 +256,8 @@ export class MurmurCore {
   // Two names are one machine when their boot ids are; the host name is never
   // compared.
   machineKey(host: { machine?: string }): string | null {
-    return host.machine === undefined || host.machine === (this.fixedMachine ?? thisMachine()) ? null : host.machine;
+    const own = this.ownMachine();
+    return host.machine === undefined || host.machine === own ? null : host.machine;
   }
 
   // The machine, label and fingerprint to store on an event of a known session.
@@ -275,8 +294,11 @@ export class MurmurCore {
   // row that carries one, in both cases only when no live process of this
   // machine has that pid and start and the CLI ids do not conflict (an event and
   // a row that both carry one and differ are two sessions). The row takes the
-  // machine of the event when it has one, so one session never becomes two.
-  private rowAt(host: HostRef, cliSessionId: string | null = null): SessionRow | null {
+  // machine of the event when it has one, so one session never becomes two. An
+  // event and a row that both carry a folder and differ are two sessions too:
+  // the same pid and start second can come up on two machines started from one
+  // image.
+  private rowAt(host: HostRef, cliSessionId: string | null = null, cwd?: string): SessionRow | null {
     const key = this.machineKey(host);
     const row = this.store.sessionByHost(host.hostPid, host.hostStart, key);
     if (row !== null) {
@@ -287,6 +309,7 @@ export class MurmurCore {
       other === null ||
       other.state === 'ended' ||
       (cliSessionId !== null && other.cliSessionId !== null && other.cliSessionId !== cliSessionId) ||
+      (cwd !== undefined && other.cwd !== null && other.cwd !== cwd) ||
       isAlive(this.safeProcTable([other.hostPid]), other.hostPid, other.hostStart)
     ) {
       return null;
@@ -707,6 +730,7 @@ export class MurmurCore {
   // online before any; then a live connection; then the legacy hook state;
   // then the five minute window over last_seen_at, then presumed-offline.
   status(live: (handle: string) => { online: boolean }): StatusResult {
+    this.ownMachine();
     const ts = this.nowMs();
     const byHandle = new Map<string, SessionRow[]>();
     for (const row of this.store.listSessions()) {
@@ -847,7 +871,7 @@ export class MurmurCore {
   sessionEvent(arg: SessionEventArg): SessionRow {
     const ts = this.nowMs();
     let row = arg.cliSessionId === null ? null : this.store.sessionByCliId(arg.client, arg.cliSessionId);
-    row ??= this.rowAt(arg.host, arg.cliSessionId);
+    row ??= this.rowAt(arg.host, arg.cliSessionId, arg.cwd);
     // Before a new row takes a handle, so it can have the handle of a session that a reboot ended.
     this.endRebootedSessions(row?.id ?? -1, arg.host, ts);
     if (row === null) {
@@ -1056,6 +1080,7 @@ export class MurmurCore {
   // True when a session that has not ended holds the handle, whether or not
   // this machine can see its process.
   holdsHandle(handle: string): boolean {
+    this.ownMachine();
     return this.liveHolders(handle, null).length > 0;
   }
 
@@ -1076,6 +1101,7 @@ export class MurmurCore {
   // A handle can be claimed when it is valid, not the owner's, and no live
   // session other than exceptId holds it.
   claimable(handle: string, exceptId: number | null): boolean {
+    this.ownMachine();
     if (!HANDLE_RE.test(handle)) {
       return false;
     }
