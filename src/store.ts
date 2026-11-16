@@ -735,6 +735,14 @@ export class Store {
     return rec === undefined ? null : toSessionRow(rec);
   }
 
+  // Every session recorded for this exact host process, newest first. The
+  // desktop app runs several sessions inside one process.
+  sessionsByHost(hostPid: number, hostStart: string): SessionRow[] {
+    const recs = this.stmt('SELECT * FROM sessions WHERE host_pid = ? AND host_start = ? ORDER BY updated_at DESC, id DESC')
+      .all(hostPid, hostStart) as SessionRecord[];
+    return recs.map(toSessionRow);
+  }
+
   // Points one session at another, existing handle and moves its native
   // transport along.
   reassignSession(id: number, fromHandle: string, toHandle: string): void {

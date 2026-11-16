@@ -141,6 +141,12 @@ export interface CollectResult {
 
 export interface PeerStatus {
   handle: string;
+  // Present when another live session runs in the same host process (one
+  // MCP server then serves them all).
+  sharesHost?: true;
+  // Present when MCP calls were attributed to this session by the busy
+  // heuristic because no transcript named the call: they may be wrong.
+  guessedCalls?: number;
   display: string | null;
   role: string | null;
   isOwner: boolean;
@@ -280,6 +286,10 @@ export interface SessionMessage {
   client: CliName;
   cliSessionId: string | null;
   host: HostRef;
+  // Why a SessionStart fired (Claude: startup, resume, clear, compact). Only
+  // clear replaces the session a host process already runs; any other source
+  // with a new CLI id is a second session in the same process.
+  source?: string;
   transcriptPath?: string;
   // The name the user gave the session in its CLI (Claude's /rename).
   title?: string;

@@ -1,7 +1,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -547,5 +547,129 @@ describe('runMcpServer', () => {
     up.stdin.end();
     await up.running;
     await settle(async () => (await presenceOf(stack, 'stdin-closes')) !== 'online', 'offline once stdin closed');
+  });
+});
+
+// The Claude desktop app runs several sessions inside ONE claude process, so
+// they share one host and one MCP server. Claude Code stamps every tool call
+// with claudecode/toolUseId, which each session's transcript records.
+describe('one host process serving several sessions', () => {
+  const USE = 'claudecode/toolUseId';
+
+  function transcript(name: string, ids: string[]): string {
+    const path = join(freshHome(), name + '.jsonl');
+    writeFileSync(path, ids.map((id) => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id }] } })).join('\n') + '\n');
+    return path;
+  }
+
+  async function asSession(sdk: Client, toolUseId: string, name: string, args: Record<string, unknown>): Promise<unknown> {
+    const result = (await sdk.callTool({ name, arguments: args, _meta: { [USE]: toolUseId } })) as CallToolResult;
+    expect(result.isError ?? false).toBe(false);
+    return JSON.parse((result.content[0] as { type: 'text'; text: string }).text);
+  }
+
+  async function setup(): Promise<{ stack: Stack; sdk: Client; murmur: MurmurClient; a: string; b: string }> {
+    hostState.host = HOST;
+    const stack = await buildStack();
+    const start = (cliSessionId: string, ids: string[]): string =>
+      stack.core.sessionEvent({
+        event: 'session-start', client: 'claude', cliSessionId, host: HOST, cwd: '/w/proj', source: 'startup',
+        transcriptPath: transcript(cliSessionId, ids),
+      }).handle;
+    const a = start('cli-a', ['toolu_a1', 'toolu_a2']);
+    const b = start('cli-b', ['toolu_b1']);
+    const { sdk, murmur } = await pair(stack, identityFor(HOST, { CLAUDECODE: '1' }, '/w/proj'));
+    await req<RegisterResult>(murmur, { type: 'register', clientKind: 'mcp', host: { hostPid: HOST.hostPid, hostStart: HOST.hostStart }, client: 'claude', cwd: '/w/proj' });
+    stack.core.register({ handle: 'target' });
+    return { stack, sdk, murmur, a, b };
+  }
+
+  it('records each murmur_send under the calling session', async () => {
+    const { stack, sdk, a, b } = await setup();
+    expect(a).not.toBe(b);
+    const first = (await asSession(sdk, 'toolu_a1', 'murmur_send', { to: ['target'], body: 'from a', mode: 'silent' })) as { threadId: number };
+    const second = (await asSession(sdk, 'toolu_b1', 'murmur_send', { to: ['target'], body: 'from b', mode: 'silent' })) as { threadId: number };
+    expect(stack.store.threadMessages(first.threadId, null)[0]?.sender).toBe(a);
+    expect(stack.store.threadMessages(second.threadId, null)[0]?.sender).toBe(b);
+  });
+
+  it('delivers a message addressed to one session to that session only', async () => {
+    const { stack, sdk, a, b } = await setup();
+    const target = await connectRaw(stack, 'target');
+    await req(target.client, { type: 'send', threadId: null, to: [a], body: 'for a', mode: 'push' });
+    expect(stack.core.pendingPush(b, 10).messages).toHaveLength(0);
+    expect(stack.core.pendingPush(a, 10).messages).toHaveLength(1);
+    const own = (await asSession(sdk, 'toolu_b1', 'murmur_status', {})) as { peers: Array<{ handle: string }> };
+    expect(own.peers.map((p) => p.handle)).toEqual(expect.arrayContaining([a, b]));
+  });
+
+  it('finds a Task subagent call in the session subagents folder', async () => {
+    const { stack, sdk, a } = await setup();
+    const path = stack.store.sessionByCliId('claude', 'cli-a')?.transcriptPath as string;
+    const dir = path.replace(/\.jsonl$/, '') + '/subagents';
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(dir + '/agent-1.jsonl', JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'toolu_sub' }] } }) + '\n');
+    writeFileSync(dir + '/notes.txt', 'toolu_other');
+    stack.core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'cli-b', host: HOST });
+    const sent = (await asSession(sdk, 'toolu_sub', 'murmur_send', { to: ['target'], body: 'from a subagent', mode: 'silent' })) as { threadId: number };
+    expect(stack.store.threadMessages(sent.threadId, null)[0]?.sender).toBe(a);
+    const status = (await asSession(sdk, 'toolu_sub', 'murmur_status', {})) as { peers: Array<{ handle: string; guessedCalls?: number }> };
+    expect(status.peers.find((p) => p.handle === a)?.guessedCalls).toBeUndefined();
+  });
+
+  it('binds nothing when the socket closes while the broker waits for a transcript', async () => {
+    const { stack, murmur } = await setup();
+    // The guess lands on the session the connection is not bound to.
+    stack.core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'cli-a', host: HOST });
+    const before = [...stack.store.listSessions()].filter((r) => stack.core.hasTools(r.handle)).length;
+    const pending = req(murmur, { type: 'status', toolUseId: 'toolu_nowhere' }).catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    murmur.close();
+    await pending;
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const after = stack.store.listSessions().filter((r) => stack.core.hasTools(r.handle)).length;
+    expect(after).toBeLessThanOrEqual(before);
+    expect(after).toBe(0);
+  });
+
+  it('reuses the derived connection and renames only the calling session', async () => {
+    const { stack, sdk, a, b } = await setup();
+    for (const [n, id] of ['toolu_a1', 'toolu_a2', 'toolu_b1', 'toolu_b1'].entries()) {
+      await asSession(sdk, id, 'murmur_send', { to: ['target'], body: id + String(n), mode: 'silent' });
+    }
+    const named = (await asSession(sdk, 'toolu_a2', 'murmur_name', { handle: 'alpha' })) as RegisterResult;
+    expect(named.handle).toBe('alpha');
+    expect(stack.store.sessionByCliId('claude', 'cli-a')?.handle).toBe('alpha');
+    expect(stack.store.sessionByCliId('claude', 'cli-b')?.handle).toBe(b);
+    expect(a).not.toBe('alpha');
+  });
+
+  it('falls back to the busy session when no transcript names the call and says so in status', async () => {
+    const { stack, sdk, a, b } = await setup();
+    stack.core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'cli-b', host: HOST });
+    const sent = (await asSession(sdk, 'toolu_unknown', 'murmur_send', { to: ['target'], body: 'who am i', mode: 'silent' })) as { threadId: number };
+    expect(stack.store.threadMessages(sent.threadId, null)[0]?.sender).toBe(b);
+    const status = (await asSession(sdk, 'toolu_b1', 'murmur_status', {})) as { peers: Array<{ handle: string; sharesHost?: boolean; guessedCalls?: number }> };
+    expect(status.peers.find((p) => p.handle === b)).toMatchObject({ sharesHost: true, guessedCalls: 1 });
+    expect(status.peers.find((p) => p.handle === a)).toMatchObject({ sharesHost: true });
+    expect(status.peers.find((p) => p.handle === a)?.guessedCalls).toBeUndefined();
+  });
+
+  it('leaves a call on the connection when no hook announced the host yet', async () => {
+    hostState.host = HOST;
+    const stack = await buildStack();
+    const { sdk, murmur } = await pair(stack, identityFor(HOST, { CLAUDECODE: '1' }, '/w/proj'));
+    await req<RegisterResult>(murmur, { type: 'register', clientKind: 'mcp', host: { hostPid: HOST.hostPid, hostStart: HOST.hostStart }, client: 'claude', cwd: '/w/proj' });
+    stack.core.register({ handle: 'target' });
+    const sent = (await asSession(sdk, 'toolu_first', 'murmur_send', { to: ['target'], body: 'hi', mode: 'silent' })) as { threadId: number };
+    expect(stack.store.threadMessages(sent.threadId, null)[0]?.sender).toBe('claude-proj');
+  });
+
+  it('keeps one handle for one session and reuses it for a clear', async () => {
+    hostState.host = HOST;
+    const stack = await buildStack();
+    const one = stack.core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'c1', host: HOST, cwd: '/w/proj', source: 'startup' });
+    const cleared = stack.core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'c2', host: HOST, cwd: '/w/proj', source: 'clear' });
+    expect(cleared.id).toBe(one.id);
   });
 });

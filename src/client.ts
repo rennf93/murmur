@@ -96,7 +96,10 @@ export class MurmurClient {
     });
   }
 
-  request<T>(msg: Omit<ClientMessage, 'v' | 'id'>): Promise<T> {
+  // toolUseId rides on any request an MCP server makes for a tool call: the
+  // broker resolves it to the calling session when one host process serves
+  // several.
+  request<T>(msg: Omit<ClientMessage, 'v' | 'id'> & { toolUseId?: string }): Promise<T> {
     if (this.closed) {
       return Promise.reject(new MurmurError('broker_closed', 'connection to the broker is closed'));
     }

@@ -4,6 +4,10 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Fixed
+
+- Several sessions served by one host process (the Claude desktop app runs many inside one `claude` process) no longer share one handle. A SessionStart hook with a new CLI session id and a source other than `clear`, next to a live session with another id in the same process, now creates its own session; `clear` still keeps the session. Every MCP tool call carries Claude Code's `claudecode/toolUseId`, and the broker attributes it to the session whose transcript records that id, so `murmur_send`, `murmur_reply`, `murmur_name` and the rest speak as the calling session. If no transcript names the call (not flushed yet), the busiest session of that process is used, and `murmur_status` shows `guessedCalls` for it; `sharesHost` marks sessions that share a process. Hosts with one session behave as before.
+
 ## [0.2.8] - 2026-10-22
 
 ### Changed

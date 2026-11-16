@@ -1117,6 +1117,27 @@ describe('sessionEvent', () => {
     expect(nullId).toMatchObject({ id: first.id, cliSessionId: 'c2' });
   });
 
+  it('opens a second session for Claude only: a prompt of an unknown id too, never for other CLIs', () => {
+    const host = alive(100);
+    const first = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'a', host, source: 'startup' });
+    const second = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'b', host });
+    expect(second.id).not.toBe(first.id);
+    const codexHost = alive(200);
+    const one = core.sessionEvent({ event: 'session-start', client: 'codex', cliSessionId: 'x', host: codexHost, source: 'startup' });
+    const two = core.sessionEvent({ event: 'session-start', client: 'codex', cliSessionId: 'y', host: codexHost, source: 'startup' });
+    expect(two.id).toBe(one.id);
+  });
+
+  it('names the session of a tool call by its transcript, and reads a missing transcript as no', () => {
+    const host = alive(100);
+    expect(core.sessionForToolUse(host, 'toolu_x')).toBeNull();
+    const a = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'a', host, source: 'startup', transcriptPath: '/nonexistent/a.jsonl' });
+    expect(core.sessionForToolUse(host, 'toolu_x')).toEqual({ row: expect.objectContaining({ id: a.id }) });
+    core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'b', host, source: 'startup' });
+    const result = core.sessionForToolUse(host, 'toolu_x');
+    expect(result).toMatchObject({ ambiguous: [expect.anything(), expect.anything()] });
+  });
+
   it('honors a claimable explicit handle on create and falls back when it is not claimable', () => {
     const owner = core.register({ handle: 'boss' });
     store.upsertPeer('boss', null, null, true, now);

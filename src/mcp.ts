@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { readFileSync } from 'node:fs';
 import type { Readable } from 'node:stream';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -77,8 +78,28 @@ export function identityFor(host: HostInfo | null, env: NodeJS.ProcessEnv, cwd: 
   return { host: { hostPid: host.hostPid, hostStart: host.hostStart }, client: clientFromEnv(env), cwd };
 }
 
-export function buildMcpServer(client: Pick<MurmurClient, 'request'>, identity: Identity = {}): McpServer {
+// Claude Code stamps every MCP tool call with the id of the tool_use that made
+// it. The desktop app runs several sessions in one process (one MCP server),
+// and the id is the only per-call mark: the broker finds the calling session
+// by the transcript that records it.
+const TOOL_USE_KEY = 'claudecode/toolUseId';
+const calls = new AsyncLocalStorage<string | undefined>();
+
+export function buildMcpServer(rawClient: Pick<MurmurClient, 'request'>, identity: Identity = {}): McpServer {
+  const client: Pick<MurmurClient, 'request'> = {
+    request: <T>(msg: Parameters<MurmurClient['request']>[0]) => {
+      const toolUseId = calls.getStore();
+      return rawClient.request<T>(toolUseId === undefined ? msg : { ...msg, toolUseId });
+    },
+  };
   const server = new McpServer({ name: 'murmur', version: VERSION }, { instructions: INSTRUCTIONS });
+  const register = server.registerTool.bind(server) as (name: string, config: unknown, cb: (...a: unknown[]) => unknown) => unknown;
+  server.registerTool = ((name: string, config: unknown, cb: (...a: unknown[]) => unknown) =>
+    // The SDK passes (args, extra), or only (extra) for a tool without input.
+    register(name, config, (...a: unknown[]) => {
+      const id = (a[a.length - 1] as { _meta?: Record<string, unknown> } | undefined)?._meta?.[TOOL_USE_KEY];
+      return calls.run(typeof id === 'string' ? id : undefined, () => cb(...a));
+    })) as unknown as typeof server.registerTool;
 
   server.registerTool('murmur_name', {
     _meta: META,

@@ -130,6 +130,18 @@ describe('session events', () => {
     });
   });
 
+  it('keeps two sessions of one host process apart unless the start is a clear', async () => {
+    const stack = await buildStack();
+    const start = (id: string, source: string, event: 'session-start' | 'prompt' = 'session-start'): Promise<unknown> =>
+      runHook(event, JSON.stringify({ session_id: id, cwd: '/work/proj', source }), envFor(stack), { host: HOST });
+    await start('s1', 'startup');
+    await start('s2', 'startup');
+    expect(stack.store.sessionsByHost(HOST.hostPid, HOST.hostStart).map((r) => r.cliSessionId).sort()).toEqual(['s1', 's2']);
+    await start('s3', 'clear');
+    await start('s1', 'resume', 'prompt');
+    expect(stack.store.sessionsByHost(HOST.hostPid, HOST.hostStart)).toHaveLength(2);
+  });
+
   it('defaults the client to claude, and a bare session gets the plain client handle', async () => {
     const stack = await buildStack();
     await runHook('session-start', '{}', envFor(stack), { host: HOST });

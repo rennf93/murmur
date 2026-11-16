@@ -89,6 +89,13 @@ interface ConnState {
   // An MCP server whose session has not announced itself yet: bound as soon
   // as a session event arrives for this host, or created on first use.
   pendingHost: { host: HostRef; client: CliName; cwd?: string } | null;
+  // The host process an MCP server runs under, when it registered with one.
+  host: HostRef | null;
+  // Set on a derived connection speaking for one session of a shared host.
+  callSessionId: number | null;
+  // Derived connections, one per session this MCP server has spoken for:
+  // each carries its own handle, presence and waiters on the same socket.
+  shadows: Map<number, ConnState>;
   // Bytes of the not yet complete trailing line, for the 1 MiB line guard.
   pendingBytes: number;
   // Waiters registered by this connection, so close can clear their timers.
@@ -125,6 +132,11 @@ const WAIT_UNTILS: readonly WaitUntil[] = ['all_replied', 'any_replied'];
 
 // Wire guard: no single request line may exceed 1 MiB.
 const MAX_LINE_BYTES = 1024 * 1024;
+
+// A tool call's id may reach the broker before the session transcript that
+// records it is flushed: look again before guessing which session called.
+const CALL_RETRIES = 4;
+const CALL_RETRY_MS = 75;
 
 function badRequest(message: string): MurmurError {
   return new MurmurError('bad_request', message);
@@ -249,6 +261,8 @@ export class Broker {
   private readonly proof: ProofWatcher;
   // Live bindings: handle to its long-lived connection (mcp or adapter).
   private readonly presence = new Map<string, ConnState>();
+  // Calls attributed by guess (no transcript named them), per session id.
+  private readonly guessedCalls = new Map<number, number>();
   private readonly conns = new Set<ConnState>();
   // Recipient to pending notification payloads, one flush timer per recipient.
   private readonly notifyQueue = new Map<string, NotifyEntry>();
@@ -358,6 +372,9 @@ export class Broker {
       live: false,
       listening: false,
       pendingHost: null,
+      host: null,
+      callSessionId: null,
+      shadows: new Map<number, ConnState>(),
       pendingBytes: 0,
       waiters: new Set<Waiter>(),
       chain: Promise.resolve(),
@@ -407,6 +424,10 @@ export class Broker {
   }
 
   private onSocketClose(conn: ConnState): void {
+    for (const shadow of conn.shadows.values()) {
+      this.onSocketClose(shadow);
+    }
+    conn.shadows.clear();
     this.conns.delete(conn);
     const unresolved = conn.waiters.size > 0;
     for (const waiter of [...conn.waiters]) {
@@ -449,7 +470,7 @@ export class Broker {
       return;
     }
     try {
-      await this.handleMessage(conn, rec, id);
+      await this.handleMessage(await this.speakingConn(conn, rec), rec, id);
     } catch (err) {
       if (err instanceof MurmurError) {
         this.replyErr(conn.socket, id, err.code, err.message);
@@ -457,6 +478,46 @@ export class Broker {
         this.replyErr(conn.socket, id, 'internal', err instanceof Error ? err.message : String(err));
       }
     }
+  }
+
+  // The connection a request runs on. An MCP server whose host process runs
+  // several sessions serves them all on one connection; a call carrying its
+  // tool-use id is attributed to the session whose transcript names it, on a
+  // derived connection bound to that session. One session per host (the
+  // usual case) never derives anything.
+  private async speakingConn(conn: ConnState, rec: Record<string, unknown>): Promise<ConnState> {
+    const toolUseId = rec.toolUseId;
+    if (conn.host === null || typeof toolUseId !== 'string' || conn.callSessionId !== null) {
+      return conn;
+    }
+    let found = this.core.sessionForToolUse(conn.host, toolUseId);
+    for (let attempt = 0; found !== null && 'ambiguous' in found && attempt < CALL_RETRIES; attempt += 1) {
+      // The transcript may not be flushed yet.
+      await new Promise((resolve) => setTimeout(resolve, CALL_RETRY_MS));
+      found = this.core.sessionForToolUse(conn.host, toolUseId);
+    }
+    // A close during the retry already ran onSocketClose: bind nothing now.
+    if (found === null || conn.socket.destroyed) {
+      return conn;
+    }
+    let session: SessionRow;
+    if ('row' in found) {
+      session = found.row;
+    } else {
+      session = this.core.guessSession(found.ambiguous);
+      this.guessedCalls.set(session.id, (this.guessedCalls.get(session.id) ?? 0) + 1);
+    }
+    if (session.handle === conn.handle) {
+      return conn;
+    }
+    let shadow = conn.shadows.get(session.id);
+    if (shadow === undefined) {
+      shadow = { ...conn, waiters: new Set<Waiter>(), shadows: new Map<number, ConnState>(), pendingHost: null, via: null, callSessionId: session.id };
+      conn.shadows.set(session.id, shadow);
+      this.conns.add(shadow);
+      this.bind(shadow, session.handle, conn.live);
+    }
+    return shadow;
   }
 
   private handleAuthLine(conn: ConnState, rec: Record<string, unknown>, id: number): void {
@@ -581,7 +642,8 @@ export class Broker {
         conn.via = this.core.sessionForAncestors(ancestors)?.handle ?? null;
       }
     } else if (host !== undefined) {
-      const session = this.core.sessionForHost(host);
+      conn.host = host;
+      const session = conn.callSessionId === null ? this.core.sessionForHost(host) : this.store.sessionById(conn.callSessionId);
       if (session === null) {
         if (handle !== undefined) {
           throw badRequest('this session has not announced itself yet (no hook has run); name it after its first prompt');
@@ -647,13 +709,15 @@ export class Broker {
       native = { socketPath: reqString(nat, 'socketPath'), token: reqString(nat, 'token') };
     }
     // A title can rename the session, so find the name it had before.
-    const before = (cliSessionId === null ? null : this.store.sessionByCliId(client, cliSessionId)) ?? this.store.sessionByHost(host.hostPid, host.hostStart);
+    const source = optString(rec, 'source');
+    const before = this.core.findSession({ event, client, cliSessionId, host, ...(source !== undefined ? { source } : {}) });
     const session = this.core.sessionEvent({
       event,
       client,
       cliSessionId,
       host,
       ...(transcriptPath !== undefined ? { transcriptPath } : {}),
+      ...(source !== undefined ? { source } : {}),
       ...(cwd !== undefined ? { cwd } : {}),
       ...(title !== undefined ? { title } : {}),
       ...(handle !== undefined ? { handle } : {}),
@@ -855,7 +919,15 @@ export class Broker {
   }
 
   private handleStatus(): StatusResult {
-    return this.core.status((handle) => ({ online: this.presence.has(handle) }));
+    const status = this.core.status((handle) => ({ online: this.presence.has(handle) }));
+    for (const peer of status.peers) {
+      const live = this.liveSessionOf(peer.handle);
+      const guessed = live === null ? undefined : this.guessedCalls.get(live.id);
+      if (guessed !== undefined) {
+        peer.guessedCalls = guessed;
+      }
+    }
+    return status;
   }
 
   // Every handle with a connection, so a peer someone is talking through is

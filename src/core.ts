@@ -1,3 +1,4 @@
+import { closeSync, fstatSync, openSync, readdirSync, readSync } from 'node:fs';
 import { basename } from 'node:path';
 import { isAlive, liveTable } from './proc.js';
 import type { ProcTable } from './proc.js';
@@ -67,11 +68,47 @@ export interface SessionEventArg {
   cliSessionId: string | null;
   host: HostRef;
   transcriptPath?: string;
+  // Why a session-start fired; see SessionMessage.
+  source?: string;
   // The name the user gave the session in its CLI.
   title?: string;
   cwd?: string;
   handle?: string;
   native?: { socketPath: string; token: string };
+}
+
+// Claude Code appends a call's tool_use to the session transcript, so the id
+// is in the tail; a Task subagent's calls go to <transcript minus .jsonl>/
+// subagents/*.jsonl instead. An unreadable file reads as no.
+const TRANSCRIPT_TAIL_BYTES = 256 * 1024;
+
+function transcriptHas(path: string, needle: string): boolean {
+  if (fileTailHas(path, needle)) {
+    return true;
+  }
+  const dir = path.replace(/\.jsonl$/, '') + '/subagents';
+  try {
+    return readdirSync(dir).some((name) => name.endsWith('.jsonl') && fileTailHas(dir + '/' + name, needle));
+  } catch {
+    return false;
+  }
+}
+
+function fileTailHas(path: string, needle: string): boolean {
+  try {
+    const fd = openSync(path, 'r');
+    try {
+      const size = fstatSync(fd).size;
+      const start = Math.max(0, size - TRANSCRIPT_TAIL_BYTES);
+      const buf = Buffer.alloc(size - start);
+      readSync(fd, buf, 0, buf.length, start);
+      return buf.toString('utf8').includes(needle);
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
 }
 
 export { HANDLE_RE };
@@ -635,6 +672,13 @@ export class MurmurCore {
       [...byHandle.values()].flat().filter((row) => row.state !== 'ended').map((row) => row.hostPid),
     );
     const peers: PeerStatus[] = [];
+    const perHost = new Map<string, number>();
+    for (const row of byHandle.values()) {
+      for (const r of row.filter((x) => x.state !== 'ended')) {
+        const key = String(r.hostPid) + ':' + r.hostStart;
+        perHost.set(key, (perHost.get(key) ?? 0) + 1);
+      }
+    }
     for (const peer of this.store.listPeers()) {
       const override = this.hookOverrides.get(peer.handle);
       const hookState = override !== undefined ? override.state : normalizeHookState(peer.hookState);
@@ -664,8 +708,10 @@ export class MurmurCore {
         presence = 'presumed-offline';
       }
       const lastActivity = freshestOf(freshestOf(peer.lastSeenAt, hookAt), sessions[0]?.updatedAt ?? null);
+      const shares = session !== undefined && (perHost.get(String(session.hostPid) + ':' + session.hostStart) as number) > 1;
       peers.push({
         handle: peer.handle,
+        ...(shares ? { sharesHost: true as const } : {}),
         display: peer.display,
         role: peer.role,
         isOwner: peer.isOwner,
@@ -754,14 +800,38 @@ export class MurmurCore {
     return members;
   }
 
+  // The session a lifecycle event belongs to, or null for a new one: by the
+  // CLI session id, else by the host process (clear mints a new id in the
+  // same process and keeps the session). For Claude, which runs several
+  // sessions in one process in the desktop app, a new id next to a live
+  // session with another id is a second session: a start whose source is not
+  // clear, or any later event of a session whose start was missed. Other CLIs
+  // keep one session per process.
+  findSession(arg: Pick<SessionEventArg, 'event' | 'client' | 'cliSessionId' | 'host' | 'source'>): SessionRow | null {
+    const byId = arg.cliSessionId === null ? null : this.store.sessionByCliId(arg.client, arg.cliSessionId);
+    if (byId !== null) {
+      return byId;
+    }
+    const onHost = this.store.sessionByHost(arg.host.hostPid, arg.host.hostStart);
+    const newSession = arg.event === 'session-start' ? arg.source !== undefined && arg.source !== 'clear' : true;
+    const second =
+      onHost !== null &&
+      arg.client === 'claude' &&
+      arg.cliSessionId !== null &&
+      newSession &&
+      onHost.state !== 'ended' &&
+      onHost.cliSessionId !== null &&
+      onHost.cliSessionId !== arg.cliSessionId;
+    return second ? null : onHost;
+  }
+
   // A lifecycle event from a hook or an adapter. Finds the session by the
   // CLI's own session id (so resume keeps the handle), else by the host
   // process (so clear, which mints a new id in the same process, keeps it
   // too), else creates it. Returns the session and its handle.
   sessionEvent(arg: SessionEventArg): SessionRow {
     const ts = this.nowMs();
-    let row = arg.cliSessionId === null ? null : this.store.sessionByCliId(arg.client, arg.cliSessionId);
-    row ??= this.store.sessionByHost(arg.host.hostPid, arg.host.hostStart);
+    let row = this.findSession(arg);
     if (row === null) {
       const explicit = arg.handle !== undefined && this.claimable(arg.handle, null);
       const slug = arg.title === undefined ? '' : slugify(arg.title);
@@ -837,6 +907,26 @@ export class MurmurCore {
       return row;
     }
     return this.sessionEvent({ event: 'session-start', client: create.client, cliSessionId: null, host, ...(create.cwd !== undefined ? { cwd: create.cwd } : {}) });
+  }
+
+  // The session behind one MCP tool call. One live session on the host is
+  // the answer. With several, the one whose transcript records the call's
+  // tool-use id; ambiguous (the candidates) when none does yet, so the caller
+  // may retry before guessing.
+  sessionForToolUse(host: HostRef, toolUseId: string): { row: SessionRow } | { ambiguous: SessionRow[] } | null {
+    const live = this.store.sessionsByHost(host.hostPid, host.hostStart).filter((row) => row.state !== 'ended');
+    if (live.length <= 1) {
+      return live[0] === undefined ? null : { row: live[0] };
+    }
+    const named = live.filter((row) => row.transcriptPath !== null && transcriptHas(row.transcriptPath, toolUseId));
+    return named.length === 1 ? { row: named[0] as SessionRow } : { ambiguous: live };
+  }
+
+  // Best effort when no transcript names the call: the session working now,
+  // else the one active last.
+  guessSession(candidates: SessionRow[]): SessionRow {
+    const rank = (row: SessionRow): number => (row.state === 'busy' ? 1e15 : 0) + row.updatedAt;
+    return [...candidates].sort((a, b) => rank(b) - rank(a))[0] as SessionRow;
   }
 
   // The nearest live session whose host is one of these ancestors (nearest

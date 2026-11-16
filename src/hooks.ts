@@ -34,6 +34,7 @@ interface HookInput {
   sessionId: string | null;
   transcriptPath: string | null;
   cwd: string | null;
+  source: string | null;
 }
 
 // Entry point used by every client's hook config. It must never block or
@@ -103,6 +104,9 @@ function sessionMessage(
   }
   if (input.cwd !== null) {
     msg.cwd = input.cwd;
+  }
+  if (input.source !== null && event === 'session-start') {
+    msg.source = input.source;
   }
   if (client === 'claude' && input.transcriptPath !== null) {
     const title = readClaudeTitle(input.transcriptPath);
@@ -192,6 +196,7 @@ function parseInput(stdinText: string): HookInput {
     sessionId: stringField(rec, 'session_id'),
     transcriptPath: stringField(rec, 'transcript_path'),
     cwd: stringField(rec, 'cwd'),
+    source: stringField(rec, 'source'),
   };
 }
 
