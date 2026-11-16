@@ -232,11 +232,13 @@ export class MurmurCore {
   }
 
   // The machine a host reference names as stored (its boot id): null for this
-  // broker's own machine, for a client that sends none, and for every client
-  // while this broker has no boot id of its own. Two names are one machine when
-  // their boot ids are; the host name is never compared.
+  // broker's own machine and for a client that sends none (an old client, or one
+  // that cannot read a boot id). A broker with no boot id of its own takes every
+  // client that sends one for another machine, so handles are never shared.
+  // Two names are one machine when their boot ids are; the host name is never
+  // compared.
   machineKey(host: { machine?: string }): string | null {
-    return host.machine === undefined || this.machine === '' || host.machine === this.machine ? null : host.machine;
+    return host.machine === undefined || host.machine === this.machine ? null : host.machine;
   }
 
   // The machine and label to store on an event of a known session. An event
@@ -915,7 +917,9 @@ export class MurmurCore {
     // from that by the clock of the new boot: its sessions of the old boot were
     // last heard from before the machine booted. Without an uptime, or while
     // the old session's host is connected, nothing says so and the lease applies.
-    if (host.machineUptime === undefined) {
+    // While the broker has just started, connections are still coming back and
+    // nothing can be told from their absence.
+    if (host.machineUptime === undefined || ts - this.startedAt <= STARTUP_GRACE_MS) {
       return;
     }
     const bootedAt = ts - host.machineUptime * 1000;

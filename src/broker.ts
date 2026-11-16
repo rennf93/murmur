@@ -2,7 +2,7 @@ import { chmodSync, existsSync, unlinkSync } from 'node:fs';
 import { Server, Socket, createConnection, createServer } from 'node:net';
 import { StringDecoder } from 'node:string_decoder';
 import { readToken } from './config.js';
-import { validField, validUptime } from './machine.js';
+import { validBootId, validField, validUptime } from './machine.js';
 import type { MurmurPaths } from './config.js';
 import { fullOf } from './core.js';
 import type { MurmurCore, PushTarget } from './core.js';
@@ -226,8 +226,9 @@ function reqHost(value: unknown): HostRef {
     throw badRequest('host must be an object');
   }
   const rec = value as Record<string, unknown>;
-  // A machine field that is not 1 to 255 printable characters reads as absent.
-  const machine = validField(rec.machine);
+  // A machine that is not a uuid, or a label that is not 1 to 255 printable
+  // characters, reads as absent.
+  const machine = validBootId(rec.machine);
   const machineName = machine === undefined ? undefined : validField(rec.machineName);
   const machineUptime = machine === undefined ? undefined : validUptime(rec.machineUptime);
   return {
@@ -587,7 +588,7 @@ export class Broker {
     const role = optString(rec, 'role');
     const host = rec.host === undefined ? undefined : reqHost(rec.host);
     const ancestors = optNumberArray(rec, 'ancestors');
-    const machine = validField(rec.machine);
+    const machine = validBootId(rec.machine);
     const client = optEnum<CliName>(rec, 'client', CLI_NAMES) ?? 'other';
     const cwd = optString(rec, 'cwd');
     const owner = optBool(rec, 'owner') === true;

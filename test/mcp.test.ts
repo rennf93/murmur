@@ -749,7 +749,7 @@ describe('a rename of one session sharing a handle', () => {
     const stack = await buildStack();
     const twin: HostInfo = { hostPid: HOST.hostPid, hostStart: HOST.hostStart, ancestors: [HOST.hostPid] };
     const ref = (host: HostInfo, machine?: string) => ({ ...hostRef(host), ...(machine !== undefined ? { machine } : {}) });
-    const first = stack.core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'twin', host: ref(twin, 'mac#boot-9'), cwd: '/w/guard', source: 'startup' });
+    const first = stack.core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'twin', host: ref(twin, '00000000-0000-4000-8000-000000000009'), cwd: '/w/guard', source: 'startup' });
     const second = stack.core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'local', host: ref(HOST), cwd: '/w/guard', source: 'startup' });
     expect(first.id).not.toBe(second.id);
     // Both machines' sessions hold one handle (an older row), and both are alive.
@@ -759,7 +759,7 @@ describe('a rename of one session sharing a handle', () => {
       await req<RegisterResult>(made.murmur, { type: 'register', clientKind: 'mcp', host: ref(host, machine), client: 'claude', cwd: '/w/guard' });
       return made;
     };
-    const stayer = await connect(twin, 'mac#boot-9');
+    const stayer = await connect(twin, '00000000-0000-4000-8000-000000000009');
     const mover = await connect(HOST);
     stack.core.register({ handle: 'target' });
     const hook = await connectRaw(stack, 'hookish');
@@ -785,7 +785,7 @@ describe('a rename of one session sharing a handle', () => {
 
 // Machines at the broker: what a connection and a rename see.
 describe('sessions of two machines at one broker', () => {
-  const MAC = 'mac-boot';
+  const MAC = '00000000-0000-4000-8000-000000000009';
   const ref = (host: HostInfo, machine?: string) => ({ hostPid: host.hostPid, hostStart: host.hostStart, ...(machine !== undefined ? { machine } : {}) });
   const connect = async (stack: Stack, host: HostInfo, machine?: string): Promise<Pair> => {
     const made = await pair(stack, identityFor(host, { CLAUDECODE: '1' }, '/w/guard'));
@@ -804,14 +804,21 @@ describe('sessions of two machines at one broker', () => {
     await req(hook.client, { type: 'session', event: 'session-start', client: 'claude', cliSessionId: 'huge', host: { hostPid: HOST.hostPid, hostStart: HOST.hostStart, machine: 'x'.repeat(1_000_000), machineName: 'mac' }, cwd: '/w/huge' });
     await startAs('lines', 1002, { machine: 'a\nb', machineName: 'mac' });
     await startAs('typed', 1003, { machine: 12, machineName: 'mac' });
-    await startAs('good', 1004, { machine: 'mac-boot', machineName: 'mac' });
-    await startAs('badlabel', 1005, { machine: 'mac-boot', machineName: 'x'.repeat(300) });
+    await startAs('good', 1004, { machine: '00000000-0000-4000-8000-000000000009', machineName: 'mac' });
+    await startAs('badlabel', 1005, { machine: '00000000-0000-4000-8000-000000000009', machineName: 'x'.repeat(300) });
+    await startAs('upper', 1006, { machine: 'AAAAAAAA-0000-4000-8000-00000000000A', machineName: 'mac' });
+    await startAs('lower', 1007, { machine: 'aaaaaaaa-0000-4000-8000-00000000000a', machineName: 'mac' });
+    await startAs('notuuid', 1008, { machine: 'mac-boot', machineName: 'mac' });
     const row = (cli: string) => stack.store.sessionByCliId('claude', cli);
     for (const cli of ['huge', 'lines', 'typed']) {
       expect(row(cli)).toMatchObject({ hostMachine: null, hostLabel: null });
     }
-    expect(row('good')).toMatchObject({ hostMachine: 'mac-boot', hostLabel: 'mac' });
-    expect(row('badlabel')).toMatchObject({ hostMachine: 'mac-boot', hostLabel: null });
+    // Upper and lower case are one machine, and something that is not a uuid is no machine.
+    expect(row('upper')?.hostMachine).toBe('aaaaaaaa-0000-4000-8000-00000000000a');
+    expect(row('lower')?.hostMachine).toBe('aaaaaaaa-0000-4000-8000-00000000000a');
+    expect(row('notuuid')).toMatchObject({ hostMachine: null, hostLabel: null });
+    expect(row('good')).toMatchObject({ hostMachine: '00000000-0000-4000-8000-000000000009', hostLabel: 'mac' });
+    expect(row('badlabel')).toMatchObject({ hostMachine: '00000000-0000-4000-8000-000000000009', hostLabel: null });
     // A register that names ancestors with a bad machine is a client of the broker's own machine.
     const cli = await connectRaw(stack, 'shell');
     const registered = await req<RegisterResult>(cli.client, { type: 'register', clientKind: 'cli', ancestors: [HOST.hostPid], machine: 'x'.repeat(1_000_000) });
@@ -870,7 +877,7 @@ describe('sessions of two machines at one broker', () => {
     const stack = await buildStack(() => clock);
     const row = start(stack, 'mac', HOST, MAC);
     clock += 13 * 60 * 60 * 1000;
-    const wrong = await connect(stack, HOST, 'another-machine');
+    const wrong = await connect(stack, HOST, '00000000-0000-4000-8000-000000000008');
     expect(stack.core.claimable(row.handle, null)).toBe(true);
     const right = await connect(stack, HOST, MAC);
     expect(stack.core.claimable(row.handle, null)).toBe(false);

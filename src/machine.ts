@@ -12,6 +12,7 @@ import { hostname } from 'node:os';
 // is judged as one of the broker's own machine, as before this existed.
 
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+const UUID_FULL = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // What a machine field may hold where it enters the broker.
 const FIELD = /^[^\u0000-\u001f\u007f]{1,255}$/;
 
@@ -112,6 +113,12 @@ export function machineOf(ref: MachineRef): string {
 // This machine's boot id, or '' when it has none.
 export function thisMachine(): string {
   return machineOf(thisMachineRef());
+}
+
+// A boot id from the wire: a uuid, lower case; undefined for anything else, so
+// one machine is one value however a client writes it.
+export function validBootId(value: unknown): string | undefined {
+  return typeof value === 'string' && UUID_FULL.test(value) ? value.toLowerCase() : undefined;
 }
 
 // A machine field from the wire: undefined unless it is 1 to 255 printable

@@ -253,11 +253,17 @@ describe('one machine under two host names, and clients without a boot id', () =
     expect(core.claimable('claude-guard', null)).toBe(true);
   });
 
-  it('reads every client as its own machine while the broker has no boot id', () => {
+  it('while the broker has no boot id takes a client that sends one for another machine, and one that sends none for its own', () => {
     const noBoot = new MurmurCore(store, { onAppend: () => {}, onStateChange: () => {} }, () => now, () => procs, '');
-    const row = noBoot.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'x', host: remote(), cwd: '/w/guard', source: 'startup' });
-    expect(row).toMatchObject({ hostMachine: null, hostLabel: null });
-    expect(noBoot.claimable('claude-guard', null)).toBe(true);
+    const sees = (cli: string, host: Host, cwd: string) => noBoot.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: cli, host, cwd, source: 'startup' });
+    const withId = sees('with-id', remote(), '/w/guard');
+    expect(withId).toMatchObject({ hostMachine: MAC, hostLabel: 'mac', handle: 'claude-guard' });
+    expect(noBoot.claimable('claude-guard', null)).toBe(false);
+    // The same folder on another machine, or on this one: never the same handle.
+    expect(sees('other', remote(77, OMEN, 'omen'), '/w/guard').handle).toBe('claude-guard-2');
+    const old = sees('old', { hostPid: 7001, hostStart: 'S7001' }, '/w/guard');
+    expect(old).toMatchObject({ hostMachine: null, hostLabel: null, handle: 'claude-guard-3' });
+    expect(noBoot.claimable('claude-guard-3', null)).toBe(true);
   });
 });
 
@@ -355,6 +361,7 @@ describe('a machine that reboots', () => {
   });
 
   it('reads a session heard from at the very moment the new boot began as not before it', () => {
+    now += 61 * 1000;
     const old = open('old', remote(51234, 'mac-boot-1', 'mac'), '/Users/renzof/work/guard');
     open('fresh', remote(777, 'mac-boot-2', 'mac', 0), '/Users/renzof/work/other');
     expect(store.sessionById(old.id)?.state).not.toBe('ended');
@@ -429,5 +436,71 @@ describe('a client that gains a machine id', () => {
     open('gone', host, '/w/b');
     core.sessionEvent({ event: 'session-end', client: 'claude', cliSessionId: 'gone', host });
     expect(core.sessionForHost({ ...host, machine: MAC, machineName: 'mac' })).toBeNull();
+  });
+});
+
+describe('two machines that share a host name, with and without a connection', () => {
+  const settle = (): void => {
+    now += 61 * 1000;
+  };
+
+  it('keeps a connected session of one machine and gives the other machine the next handle, over ten alternating events', () => {
+    settle();
+    const hostA = remote(100, 'boot-a', 'Mac', 5 * 86400);
+    const hostB = remote(200, 'boot-b', 'Mac', 2 * 86400);
+    const a = open('a', hostA, '/Users/a/work/guard');
+    core.hostConnected = (h) => h.hostPid === 100;
+    const b = open('b', hostB, '/Users/b/work/guard');
+    expect([a.handle, b.handle]).toEqual(['claude-guard', 'claude-guard-2']);
+    for (let n = 0; n < 5; n += 1) {
+      now += 45 * 1000;
+      core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'a', host: { ...hostA, machineUptime: 5 * 86400 + n } });
+      now += 45 * 1000;
+      core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'b', host: { ...hostB, machineUptime: 2 * 86400 + n } });
+    }
+    expect(store.listSessions().map((r) => [r.cliSessionId, r.handle, r.state]).sort()).toEqual([['a', 'claude-guard', 'busy'], ['b', 'claude-guard-2', 'busy']]);
+  });
+
+  it('does not end a connected session for a hostile claim of its label with a new boot id and a tiny uptime', () => {
+    settle();
+    const a = open('a', remote(100, 'boot-a', 'Mac', 86400), '/Users/a/work/guard');
+    core.hostConnected = (h) => h.hostPid === 100;
+    now += 10 * 60 * 1000;
+    open('hostile', remote(666, 'boot-hostile', 'Mac', 0), '/Users/x/work/guard');
+    expect(store.sessionById(a.id)?.state).not.toBe('ended');
+  });
+
+  it('does end a session that has no connection for the same claim: the trust boundary of the machine field', () => {
+    settle();
+    const a = open('a', remote(100, 'boot-a', 'Mac', 86400), '/Users/a/work/guard');
+    now += 10 * 60 * 1000;
+    open('hostile', remote(666, 'boot-hostile', 'Mac', 0), '/Users/x/work/guard');
+    expect(store.sessionById(a.id)?.state).toBe('ended');
+  });
+
+  it('ends nothing on a reboot event inside the startup grace of a broker, and ends the old sessions after it', () => {
+    settle();
+    const hostOld = remote(100, 'boot-old', 'Mac', 86400);
+    const old = open('old', hostOld, '/Users/a/work/guard');
+    now += 10 * 60 * 1000;
+    const restarted = new MurmurCore(store, { onAppend: () => {}, onStateChange: () => {} }, () => now, () => procs, OMEN);
+    now += 30 * 1000;
+    restarted.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'new-1', host: remote(300, 'boot-new', 'Mac', 0), cwd: '/Users/a/work/other', source: 'startup' });
+    expect(store.sessionById(old.id)?.state).not.toBe('ended');
+    now += 31 * 1000;
+    restarted.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'new-2', host: remote(301, 'boot-new', 'Mac', 0), cwd: '/Users/a/work/third', source: 'startup' });
+    expect(store.sessionById(old.id)?.state).toBe('ended');
+  });
+
+  it('a real reboot: the old sessions hold no connection, so they end and the handle and groups are back', () => {
+    settle();
+    const old = open('old', remote(100, 'boot-old', 'Mac', 86400), '/Users/a/work/guard');
+    store.createGroup('crew', now);
+    store.addMember('crew', old.handle, now);
+    now += 10 * 60 * 1000;
+    const back = open('back', remote(300, 'boot-new', 'Mac', 120), '/Users/a/work/guard');
+    expect(store.sessionById(old.id)?.state).toBe('ended');
+    expect(back.handle).toBe(old.handle);
+    expect(store.listGroups().find((g) => g.name === 'crew')?.members).toEqual([old.handle]);
   });
 });

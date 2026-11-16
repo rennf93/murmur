@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SYSCTL_OPTIONS, machineId, machineOf, machineRef, parseBootId, readBootId, readUptime, thisMachine, thisMachineRef, validField, validUptime } from '../src/machine.js';
+import { SYSCTL_OPTIONS, machineId, validBootId, machineOf, machineRef, parseBootId, readBootId, readUptime, thisMachine, thisMachineRef, validField, validUptime } from '../src/machine.js';
 
 const SAMPLE = '8E3A9F1B-1C2D-4E5F-8A9B-0C1D2E3F4A5B';
 
@@ -109,5 +109,15 @@ describe('the sysctl call', () => {
   it('is bounded to one second and never writes to the terminal', () => {
     expect(SYSCTL_OPTIONS.timeout).toBe(1000);
     expect(SYSCTL_OPTIONS.stdio).toEqual(['ignore', 'pipe', 'ignore']);
+  });
+});
+
+describe('validBootId', () => {
+  it('takes a uuid in either case as one lower case value, and nothing else', () => {
+    expect(validBootId('BBBBBBBB-1C2D-4E5F-8A9B-0C1D2E3F4A5B')).toBe('bbbbbbbb-1c2d-4e5f-8a9b-0c1d2e3f4a5b');
+    expect(validBootId('bbbbbbbb-1c2d-4e5f-8a9b-0c1d2e3f4a5b')).toBe('bbbbbbbb-1c2d-4e5f-8a9b-0c1d2e3f4a5b');
+    for (const bad of ['', 'mac-boot', 'omen', 'bbbbbbbb-1c2d-4e5f-8a9b', 'x bbbbbbbb-1c2d-4e5f-8a9b-0c1d2e3f4a5b', 'bbbbbbbb-1c2d-4e5f-8a9b-0c1d2e3f4a5b\n', 12, null, undefined]) {
+      expect(validBootId(bad)).toBeUndefined();
+    }
   });
 });
