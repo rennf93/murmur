@@ -607,7 +607,7 @@ export class Broker {
         return { handle: '', owner: false };
       }
       resolved = handle === undefined ? session.handle : this.core.renameSession(session, handle);
-      this.rebind(session.handle, resolved);
+      this.rebind(session.handle, resolved, session);
     } else if (ancestors !== undefined && handle === undefined) {
       resolved = this.core.sessionForAncestors(ancestors)?.handle ?? this.ownerHandle();
     } else if (handle !== undefined) {
@@ -679,7 +679,7 @@ export class Broker {
       ...(native !== undefined ? { native } : {}),
     });
     if (before !== null) {
-      this.rebind(before.handle, session.handle);
+      this.rebind(before.handle, session.handle, session);
     }
     conn.listening = listen;
     conn.host = host;
@@ -1301,12 +1301,15 @@ export class Broker {
   // A session's name changed: connections still bound to the old one (its MCP
   // server, an adapter) follow it, unless another live session still holds
   // it. Ended sessions left on the old name do not count.
-  private rebind(from: string, to: string): void {
-    if (from === to || !this.core.claimable(from, null)) {
+  // While another session still holds the old name, only the connections of
+  // the renamed session's own process follow.
+  private rebind(from: string, to: string, moved: HostRef): void {
+    const shared = this.core.holdsHandle(from);
+    if (from === to || (!shared && !this.core.claimable(from, null))) {
       return;
     }
     for (const conn of this.conns) {
-      if (conn.handle === from) {
+      if (conn.handle === from && (!shared || (conn.host?.hostPid === moved.hostPid && conn.host.hostStart === moved.hostStart))) {
         this.bind(conn, to, conn.live);
       }
     }

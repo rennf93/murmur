@@ -737,11 +737,15 @@ export class Store {
 
   // Points one session at another, existing handle and moves its native
   // transport along.
-  reassignSession(id: number, fromHandle: string, toHandle: string): void {
+  // The target's old transport is stale once the session takes the handle; the
+  // session's own transport follows unless the old handle keeps another session.
+  reassignSession(id: number, fromHandle: string, toHandle: string, moveTransport = true): void {
     const move = this.db.transaction(() => {
       this.stmt('UPDATE sessions SET handle = ? WHERE id = ?').run(toHandle, id);
       this.stmt('DELETE FROM native_transports WHERE owner = ?').run(toHandle);
-      this.stmt('UPDATE native_transports SET owner = ? WHERE owner = ?').run(toHandle, fromHandle);
+      if (moveTransport) {
+        this.stmt('UPDATE native_transports SET owner = ? WHERE owner = ?').run(toHandle, fromHandle);
+      }
     });
     move();
   }

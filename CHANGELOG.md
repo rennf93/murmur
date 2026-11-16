@@ -4,6 +4,12 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+### Fixed
+
+- Naming a session no longer carries other sessions along. The broker judges a session alive from its own process table, so a session of another machine looks dead and its handle reads free: a second live session was given the same handle, and when one of them took its title (or was renamed with `murmur_name`) the whole identity was renamed: every session on the old handle moved, their earlier messages changed sender, and the MCP connections of the others followed. While another session that has not ended holds the old handle, only the renamed session moves, the others keep their handle, history, groups and native transport, and only the renamed session's own MCP connection follows. A lone session renaming itself still carries its history, groups and transport, and so does an ended sibling that held the same handle.
+
+  The consequence, plainly: after a rename away from a shared handle the renamed session starts with no history, no group memberships, no role and an empty inbox. Everything recorded under the old handle (messages, queued deliveries, groups, the role, the native transport) stays with the session that keeps it, because nothing records which session wrote an old message; replies to a message the renamed session sent before the split go to the session that stayed. A connection that names no host (a CLI or adapter connection bound by handle) also stays with the old handle. Known limit: nothing tells a session that crashed without a SessionEnd from a live session of another machine, so a crashed session's row counts as a sibling until it ends; restarting in the same folder and then naming the new session leaves the groups and history on the crashed session's handle.
+
 ## [0.2.10] - 2026-11-05
 
 ### Added
