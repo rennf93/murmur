@@ -500,6 +500,11 @@ describe('Store', () => {
     expect(store.sessionByHost(10, 'T', null)?.id).toBe(b);
     expect(store.sessionByHost(10, 'other', null)).toBeNull();
     expect(store.sessionByHost(10, 'T', 'mac#1')).toBeNull();
+    // Any machine: the newest row of that pid and start, or all of them newest first.
+    expect(store.sessionOfHost(10, 'T')?.id).toBe(b);
+    expect(store.sessionOfHost(10, 'other')).toBeNull();
+    expect(store.sessionsOfHost(10, 'T').map((r) => r.id)).toEqual([b, a]);
+    expect(store.sessionsOfHost(10, 'other')).toEqual([]);
     expect(store.sessionsForHandle('h').map((r) => r.id)).toEqual([b, a]);
     expect(store.sessionsForHandle('nobody')).toEqual([]);
     expect(store.listSessions().map((r) => r.id)).toEqual([b, a]);

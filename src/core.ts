@@ -304,14 +304,19 @@ export class MurmurCore {
     if (row !== null) {
       return row;
     }
-    const other = key === null ? this.store.sessionOfHost(host.hostPid, host.hostStart) : this.store.sessionByHost(host.hostPid, host.hostStart, null);
-    if (
-      other === null ||
-      other.state === 'ended' ||
-      (cliSessionId !== null && other.cliSessionId !== null && other.cliSessionId !== cliSessionId) ||
-      (cwd !== undefined && other.cwd !== null && other.cwd !== cwd) ||
-      isAlive(this.safeProcTable([other.hostPid]), other.hostPid, other.hostStart)
-    ) {
+    // The rows of this pid and start that could be this session: rows of one
+    // machine only, since the host of an event without a machine could be any.
+    const rows = this.store.sessionsOfHost(host.hostPid, host.hostStart).filter((r) => key === null || r.hostMachine === null);
+    const table = rows.length === 0 ? new Map() : this.safeProcTable([host.hostPid]);
+    const found = rows.filter(
+      (r) =>
+        r.state !== 'ended' &&
+        !(cliSessionId !== null && r.cliSessionId !== null && r.cliSessionId !== cliSessionId) &&
+        !(cwd !== undefined && r.cwd !== null && r.cwd !== cwd) &&
+        !isAlive(table, r.hostPid, r.hostStart),
+    );
+    const other = found[0];
+    if (other === undefined || found.some((r) => r.hostMachine !== other.hostMachine)) {
       return null;
     }
     if (key !== null) {
@@ -991,9 +996,11 @@ export class MurmurCore {
 
   // The session running under this exact host process, if one announced
   // itself. With create, a missing session is made on the spot (an MCP
-  // server whose hooks never ran still gets an identity).
-  sessionForHost(host: HostRef, create?: { client: CliName; cwd?: string }): SessionRow | null {
-    const row = this.rowAt(host);
+  // server whose hooks never ran still gets an identity). With match, the CLI
+  // id and the folder of the event it is a lookup for, so that a lookup adopts
+  // no row that the event itself would not.
+  sessionForHost(host: HostRef, create?: { client: CliName; cwd?: string }, match?: { cliSessionId: string | null; cwd?: string }): SessionRow | null {
+    const row = this.rowAt(host, match?.cliSessionId ?? null, match?.cwd);
     if (row !== null || create === undefined) {
       return row;
     }

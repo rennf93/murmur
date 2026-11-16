@@ -684,7 +684,7 @@ export class Broker {
       native = { socketPath: reqString(nat, 'socketPath'), token: reqString(nat, 'token') };
     }
     // A title can rename the session, so find the name it had before.
-    const before = (cliSessionId === null ? null : this.store.sessionByCliId(client, cliSessionId)) ?? this.core.sessionForHost(host);
+    const before = (cliSessionId === null ? null : this.store.sessionByCliId(client, cliSessionId)) ?? this.core.sessionForHost(host, undefined, { cliSessionId, ...(cwd !== undefined ? { cwd } : {}) });
     const session = this.core.sessionEvent({
       event,
       client,

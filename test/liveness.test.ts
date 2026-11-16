@@ -13,6 +13,7 @@ import { Store } from '../src/store.js';
 // The broker validates machine ids as uuids (src/machine.ts validBootId); the core takes any string.
 const OMEN = '0e000000-0000-4000-8000-000000000001';
 const MAC = '0a000000-0000-4000-8000-000000000009';
+const PI = '0b000000-0000-4000-8000-000000000007';
 const HOUR = 60 * 60 * 1000;
 const LEASE = 12 * HOUR;
 
@@ -569,6 +570,27 @@ describe('a session that comes back after another took its handle', () => {
     expect(backNoCwd.handle).toBe('claude-2');
   });
 
+  it('keeps the native transport and the peer of the holder, and does not move a session on a late SessionEnd', () => {
+    now += 61 * 1000;
+    const hostA = remote(100, 'boot-a', 'Mac', 5 * 86400);
+    const hostB = remote(200, 'boot-b', 'Mac', 0, FP_A);
+    const a = open('a', hostA, '/Users/a/work/guard');
+    now += 10 * 60 * 1000;
+    const b = open('b', hostB, '/Users/b/work/guard');
+    expect(store.sessionById(a.id)?.state).toBe('ended');
+    core.registerNative({ handle: b.handle, socketPath: '/tmp/b.sock', token: 'tb' });
+    // The ended session says goodbye late: it stays where it was and takes nothing from B.
+    core.sessionEvent({ event: 'session-end', client: 'claude', cliSessionId: 'a', host: { ...hostA, machineUptime: 5 * 86400 + 610 } });
+    expect(store.sessionById(a.id)).toMatchObject({ handle: 'claude-guard', state: 'ended' });
+    expect(store.getNativeTransport('claude-guard')?.socketPath).toBe('/tmp/b.sock');
+    // It comes back: next free handle, a peer of its own, and B's transport is not moved along.
+    const back = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'a', host: { ...hostA, machineUptime: 5 * 86400 + 620 } });
+    expect(back.handle).toBe('claude-guard-2');
+    expect(store.getPeer('claude-guard-2')).not.toBeNull();
+    expect(store.getNativeTransport('claude-guard')?.socketPath).toBe('/tmp/b.sock');
+    expect(store.getNativeTransport('claude-guard-2')).toBeNull();
+  });
+
   it('leaves a session that comes back to a free handle where it was', () => {
     const host = remote();
     const first = open('mac', host, '/Users/renzof/work/guard');
@@ -620,6 +642,49 @@ describe('adopting the row of the same process', () => {
     const first = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: null, host: hasCwd, cwd: '/Users/renzof/work/fourth' });
     const sparse = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: null, host: { ...hasCwd, machine: MAC, machineName: 'mac' } });
     expect(sparse.id).toBe(first.id);
+  });
+
+  it('does not guess between machines: a sparse event whose pid and start match rows of two machines is no one of them', () => {
+    const at = (machine: string, name: string) => ({ hostPid: 777, hostStart: 'T777', machine, machineName: name });
+    const mac = open('mac', at(MAC, 'mac'), '/Users/a/work/guard');
+    const pi = open('pi', at(PI, 'pi'), '/home/pi/work/other');
+    const sparse = { hostPid: 777, hostStart: 'T777' };
+    expect(core.sessionForHost(sparse)).toBeNull();
+    const made = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: null, host: sparse, cwd: '/w/third' });
+    expect([mac.id, pi.id]).not.toContain(made.id);
+    expect(store.sessionById(mac.id)).toMatchObject({ hostMachine: MAC, handle: 'claude-guard' });
+    expect(store.sessionById(pi.id)).toMatchObject({ hostMachine: PI, handle: 'claude-other' });
+  });
+
+  it('does not take the row of another machine for an event that names its own: a keyed event adopts only a row without a machine', () => {
+    const mac = open('mac', { hostPid: 777, hostStart: 'T777', machine: MAC, machineName: 'mac' }, '/Users/a/work/guard');
+    const pi = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: null, host: { hostPid: 777, hostStart: 'T777', machine: PI, machineName: 'pi' }, cwd: '/Users/a/work/guard' });
+    expect(pi.id).not.toBe(mac.id);
+    expect(store.sessionById(mac.id)).toMatchObject({ hostMachine: MAC, hostLabel: 'mac' });
+    expect(core.sessionForHost({ hostPid: 777, hostStart: 'T777', machine: PI, machineName: 'pi' })?.id).toBe(pi.id);
+  });
+
+  it('takes the newest of the rows of one machine for a pid and start', () => {
+    const row = (handle: string, at: number) => store.insertSession({ client: 'claude', cliSessionId: handle, handle, hostPid: 777, hostStart: 'T777', hostMachine: MAC, hostLabel: 'mac', hostFingerprint: null, transcriptPath: null, cwd: null, now: at });
+    row('older', now - 5000);
+    const newer = row('newer', now - 1000);
+    expect(core.sessionForHost({ hostPid: 777, hostStart: 'T777' })?.id).toBe(newer);
+  });
+
+  it('takes the one candidate left when the other machine has ended, or when the folder or the CLI id tells them apart', () => {
+    const at = (machine: string, name: string) => ({ hostPid: 777, hostStart: 'T777', machine, machineName: name });
+    const mac = open('mac', at(MAC, 'mac'), '/Users/a/work/guard');
+    const pi = open('pi', at(PI, 'pi'), '/home/pi/work/other');
+    const sparse = { hostPid: 777, hostStart: 'T777' };
+    const lookup = (cliSessionId: string | null, cwd?: string) => core.sessionForHost(sparse, undefined, { cliSessionId, ...(cwd !== undefined ? { cwd } : {}) })?.id;
+    expect(lookup(null)).toBeUndefined();
+    expect(lookup(null, '/Users/a/work/guard')).toBe(mac.id);
+    expect(lookup(null, '/home/pi/work/other')).toBe(pi.id);
+    expect(lookup('mac')).toBe(mac.id);
+    expect(lookup('pi')).toBe(pi.id);
+    expect(lookup('nobody', '/nowhere')).toBeUndefined();
+    core.sessionEvent({ event: 'session-end', client: 'claude', cliSessionId: 'pi', host: at(PI, 'pi') });
+    expect(core.sessionForHost(sparse)?.id).toBe(mac.id);
   });
 
   it('finds the row of a remote session for a sparse event without a CLI id, and leaves its machine alone', () => {
@@ -769,6 +834,26 @@ describe('what tells a reboot from a stranger with the same host name: the finge
     core.hostConnected = (h) => h.hostPid === 100;
     open('hostile-2', remote(667, 'boot-hostile-2', 'Mac', 0, FP_B), '/Users/x/work/other');
     expect(store.sessionById(a.id)?.state).not.toBe('ended');
+  });
+
+  it('does not end a sibling of the same machine for an event that claims a fresh uptime', () => {
+    settle();
+    const sibling = open('sibling', remote(100, 'boot-a', 'Mac', 86400, FP_A), '/Users/a/work/guard');
+    now += 10 * 60 * 1000;
+    open('same-boot', remote(200, 'boot-a', 'Mac', 0, FP_A), '/Users/a/work/other');
+    expect(store.sessionById(sibling.id)?.state).not.toBe('ended');
+  });
+
+  it('stores no fingerprint for the broker\'s own machine, and keeps the one an adopted row is sent', () => {
+    const own = open('own', { ...local(100), machineName: 'omen', machineFingerprint: FP_B }, '/w/guard');
+    expect(store.sessionById(own.id)).toMatchObject({ hostMachine: null, hostLabel: null, hostFingerprint: null });
+    const old = open('old', { hostPid: 500, hostStart: 'T500' }, '/Users/a/work/old');
+    core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: null, host: { hostPid: 500, hostStart: 'T500', machine: MAC, machineName: 'mac', machineFingerprint: FP_A }, cwd: '/Users/a/work/old' });
+    expect(store.sessionById(old.id)).toMatchObject({ hostMachine: MAC, hostLabel: 'mac', hostFingerprint: FP_A });
+    // The lookup of an MCP server adopts the row too, with no event to write its fingerprint.
+    const quiet = open('quiet', { hostPid: 600, hostStart: 'T600' }, '/Users/a/work/quiet');
+    expect(core.sessionForHost({ hostPid: 600, hostStart: 'T600', machine: MAC, machineName: 'mac', machineFingerprint: FP_A })?.id).toBe(quiet.id);
+    expect(store.sessionById(quiet.id)).toMatchObject({ hostMachine: MAC, hostLabel: 'mac', hostFingerprint: FP_A });
   });
 
   it('keeps the fingerprint of a session when an event carries none for the same machine, and replaces it for another', () => {

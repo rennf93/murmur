@@ -840,6 +840,39 @@ describe('sessions of two machines at one broker', () => {
     expect(registered.handle).toBe(row('huge')?.handle);
   });
 
+  it('reads a fingerprint that is not 32 lower case hex characters as absent, where it enters the broker', async () => {
+    hostState.host = HOST;
+    const stack = await buildStack();
+    const hook = await connectRaw(stack, 'hookish');
+    const startAs = (cli: string, pid: number, fingerprint: unknown) =>
+      req(hook.client, { type: 'session', event: 'session-start', client: 'claude', cliSessionId: cli, host: { hostPid: pid, hostStart: 'S' + String(pid), machine: MAC, machineName: 'mac', machineFingerprint: fingerprint }, cwd: '/w/' + cli });
+    await startAs('huge', 2001, 'f'.repeat(1_000_000));
+    await startAs('typed', 2002, 12);
+    await startAs('upper', 2003, 'F'.repeat(32));
+    await startAs('short', 2004, 'f'.repeat(31));
+    await startAs('good', 2005, 'f'.repeat(32));
+    const fingerprint = (cli: string) => stack.store.sessionByCliId('claude', cli)?.hostFingerprint;
+    expect(['huge', 'typed', 'upper', 'short'].map(fingerprint)).toEqual([null, null, null, null]);
+    expect(fingerprint('good')).toBe('f'.repeat(32));
+  });
+
+  it('does not let the lookup of a session by its host adopt the row of another session', async () => {
+    hostState.host = HOST;
+    const stack = await buildStack();
+    const hook = await connectRaw(stack, 'hookish');
+    const event = (cli: string, host: Record<string, unknown>, cwd: string) =>
+      req(hook.client, { type: 'session', event: 'session-start', client: 'claude', cliSessionId: cli, host: { hostPid: 3000, hostStart: 'S3000', ...host }, cwd });
+    // An old client without a machine, then another session with a machine from the same pid and start.
+    await event('old', {}, '/w/guard');
+    await event('new', { machine: MAC, machineName: 'mac' }, '/w/guard');
+    const rows = stack.store.listSessions().map((r) => [r.cliSessionId, r.hostMachine]).sort();
+    expect(rows).toEqual([['new', MAC], ['old', null]]);
+    // Nor one of another folder.
+    await event('nocli-old', { hostPid: 3001, hostStart: 'S3001' }, '/w/first');
+    const upgraded = await req<{ handle: string }>(hook.client, { type: 'session', event: 'prompt', client: 'claude', cliSessionId: null, host: { hostPid: 3001, hostStart: 'S3001', machine: MAC, machineName: 'mac' }, cwd: '/w/second' });
+    expect(upgraded.handle).not.toBe(stack.store.sessionByCliId('claude', 'nocli-old')?.handle);
+  });
+
   it('names the session of a shell on another machine by its ancestors and its machine', async () => {
     hostState.host = HOST;
     const stack = await buildStack();

@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { SYSCTL_OPTIONS, machineId, once, onceOk, parseWireMachine, readFingerprint, readPidNamespace, validFingerprint, validBootId, machineOf, machineRef, parseBootId, readBootId, readUptime, thisMachine, thisMachineRef, validField, validUptime } from '../src/machine.js';
 
@@ -57,9 +59,13 @@ describe('machineId', () => {
 
 describe('machineRef', () => {
   it('is the boot id with the host name as a label, and nothing at all without a boot id', () => {
-    expect(machineRef(SAMPLE.toLowerCase(), 'omen', '', null)).toEqual({ machine: SAMPLE.toLowerCase(), machineName: 'omen' });
+    expect(machineRef(SAMPLE.toLowerCase(), 'omen', '', () => null)).toEqual({ machine: SAMPLE.toLowerCase(), machineName: 'omen' });
     expect(machineRef(SAMPLE.toLowerCase(), 'omen-renamed', '').machine).toBe(SAMPLE.toLowerCase());
-    expect(machineRef('', 'omen', '4026531836', 'f'.repeat(32))).toEqual({});
+    expect(machineRef('', 'omen', '4026531836', () => 'f'.repeat(32))).toEqual({});
+    // Without a boot id the fingerprint is not even read: on macOS that is a process and a one second wait.
+    expect(machineRef('', 'omen', '', () => {
+      throw new Error('read the fingerprint without a boot id');
+    })).toEqual({});
     expect(thisMachineRef()).toEqual(thisMachineRef());
     expect(thisMachine()).toBe(machineOf(thisMachineRef()));
     expect(machineOf({})).toBe('');
@@ -115,7 +121,7 @@ describe('the sysctl call', () => {
 
 describe('the pid namespace in the machine', () => {
   it('names the process table: the boot id plus the namespace on Linux, the bare boot id when there is none to read', () => {
-    expect(machineRef(SAMPLE.toLowerCase(), 'omen', '4026531836', 'f'.repeat(32))).toEqual({ machine: SAMPLE.toLowerCase() + ':4026531836', machineName: 'omen', machineFingerprint: 'f'.repeat(32) });
+    expect(machineRef(SAMPLE.toLowerCase(), 'omen', '4026531836', () => 'f'.repeat(32))).toEqual({ machine: SAMPLE.toLowerCase() + ':4026531836', machineName: 'omen', machineFingerprint: 'f'.repeat(32) });
     expect(machineRef(SAMPLE.toLowerCase(), 'omen', '4026532999').machine).not.toBe(machineRef(SAMPLE.toLowerCase(), 'omen', '4026531836').machine);
     expect(readPidNamespace('linux', () => 'pid:[4026531836]')).toBe('4026531836');
     expect(readPidNamespace('linux', () => 'garbage')).toBe('');
@@ -198,6 +204,12 @@ describe('readFingerprint', () => {
     };
     expect(readFingerprint('linux', missing)).toBe('4b8ca916283f918e312b5785d4ad2041');
     expect(readFingerprint('linux', () => '  \n')).toBeUndefined();
+    // A placeholder or an id baked into an image is shared by machines that are not one: no fingerprint.
+    for (const bad of ['uninitialized', 'x', 'garbage', '0123456789ABCDEF0123456789ABCDEF', '0123456789abcdef0123456789abcde', '0123456789abcdef0123456789abcdef0']) {
+      expect(readFingerprint('linux', () => bad), bad).toBeUndefined();
+    }
+    // A placeholder in the first file leaves the second to answer.
+    expect(readFingerprint('linux', (path) => (path === '/etc/machine-id' ? 'uninitialized\n' : '0123456789abcdef0123456789abcdef\n'))).toBe('4b8ca916283f918e312b5785d4ad2041');
     expect(readFingerprint('linux', () => {
       throw new Error('no access');
     })).toBeUndefined();
@@ -218,6 +230,17 @@ describe('readFingerprint', () => {
     expect(readFingerprint('win32')).toBeUndefined();
     expect(readFingerprint()).toMatch(/^([0-9a-f]{32})?$/);
     expect(readFingerprint('darwin')).toBeUndefined();
+  });
+});
+
+describe('the copies of the fingerprint in the adapters', () => {
+  // The adapters run inside their host and cannot import src/: each carries its own copy, which must not drift.
+  it.each(['adapters/opencode/murmur.ts', 'adapters/hummin/murmur.ts'])('%s validates the system id and salts the hash like readFingerprint', (file) => {
+    const source = readFileSync(join(import.meta.dirname, '..', file), 'utf8');
+    expect(source).toContain('/^[0-9a-f]{32}$/');
+    expect(source).toContain('murmur-machine:');
+    expect(source).toContain('.slice(0, 32)');
+    expect(source).toContain('/usr/sbin/ioreg');
   });
 });
 

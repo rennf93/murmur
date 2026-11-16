@@ -201,7 +201,8 @@ function machineFingerprint(): string | undefined {
 	let raw = "";
 	if (process.platform === "linux") {
 		raw = attempt(() => readFileSync("/etc/machine-id", "utf8").trim());
-		raw = raw !== "" ? raw : attempt(() => readFileSync("/var/lib/dbus/machine-id", "utf8").trim());
+		raw = /^[0-9a-f]{32}$/.test(raw) ? raw : attempt(() => readFileSync("/var/lib/dbus/machine-id", "utf8").trim());
+		raw = /^[0-9a-f]{32}$/.test(raw) ? raw : "";
 	} else if (process.platform === "darwin") {
 		raw = attempt(() => /"IOPlatformUUID"\s*=\s*"([0-9a-f-]{36})"/i.exec(execFileSync("/usr/sbin/ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"], { encoding: "utf8", timeout: 1000 }))?.[1] ?? "");
 	}

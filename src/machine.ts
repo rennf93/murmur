@@ -109,6 +109,9 @@ export function readPidNamespace(
 // id never leaves the machine: the value is the first 32 hex characters of
 // sha256("murmur-machine:" + id). Unreadable or empty: undefined, and the
 // broker then never reads a boot id change as a reboot.
+// The id systemd keeps in /etc/machine-id: 32 lower case hex characters. A
+// placeholder (`uninitialized`) or one baked into an image names no machine.
+const SYSTEM_ID = /^[0-9a-f]{32}$/;
 const IOREG_UUID = /"IOPlatformUUID"\s*=\s*"([0-9a-f-]{36})"/i;
 
 export function readFingerprint(
@@ -126,7 +129,8 @@ export function readFingerprint(
   let raw = '';
   if (platform === 'linux') {
     raw = attempt(() => readFile('/etc/machine-id').trim());
-    raw = raw !== '' ? raw : attempt(() => readFile('/var/lib/dbus/machine-id').trim());
+    raw = SYSTEM_ID.test(raw) ? raw : attempt(() => readFile('/var/lib/dbus/machine-id').trim());
+    raw = SYSTEM_ID.test(raw) ? raw : '';
   } else if (platform === 'darwin') {
     raw = attempt(() => IOREG_UUID.exec(run('/usr/sbin/ioreg', ['-rd1', '-c', 'IOPlatformExpertDevice']))?.[1] ?? '');
   }
@@ -146,15 +150,17 @@ export function machineRef(
   bootId: string = readBootId(),
   name: string = hostname(),
   pidNamespace: string = readPidNamespace(),
-  fingerprint: string | null | undefined = readFingerprint(),
+  fingerprint: () => string | null | undefined = readFingerprint,
 ): MachineRef {
-  return bootId === ''
-    ? {}
-    : {
-        machine: pidNamespace === '' ? bootId : bootId + ':' + pidNamespace,
-        machineName: name,
-        ...(fingerprint != null ? { machineFingerprint: fingerprint } : {}),
-      };
+  if (bootId === '') {
+    return {};
+  }
+  const read = fingerprint();
+  return {
+    machine: pidNamespace === '' ? bootId : bootId + ':' + pidNamespace,
+    machineName: name,
+    ...(read != null ? { machineFingerprint: read } : {}),
+  };
 }
 
 // A read that happens once: a later failing read cannot change what a process
