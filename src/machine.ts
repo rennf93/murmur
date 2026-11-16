@@ -196,7 +196,11 @@ export function onceOk<T>(read: () => T, ok: (value: T) => boolean, retryMs: num
 
 // This machine's reference: read once it has worked, tried again every minute
 // while it has not.
-export const thisMachineRef: () => MachineRef = onceOk(() => machineRef(), (ref) => ref.machine !== undefined, 60_000);
+export function machineReader(read: () => MachineRef = machineRef, now: () => number = Date.now): () => MachineRef {
+  return onceOk(read, (ref) => ref.machine !== undefined, 60_000, now);
+}
+
+export const thisMachineRef: () => MachineRef = machineReader();
 
 // The machine of a reference (boot id, with the pid namespace on Linux), or ''
 // when it has none.

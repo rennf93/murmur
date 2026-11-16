@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { SYSCTL_OPTIONS, machineId, once, onceOk, parseWireMachine, readFingerprint, readPidNamespace, validFingerprint, validBootId, machineOf, machineRef, parseBootId, readBootId, readUptime, thisMachine, thisMachineRef, validField, validUptime } from '../src/machine.js';
+import { SYSCTL_OPTIONS, machineId, machineReader, once, onceOk, parseWireMachine, readFingerprint, readPidNamespace, validFingerprint, validBootId, machineOf, machineRef, parseBootId, readBootId, readUptime, thisMachine, thisMachineRef, validField, validUptime } from '../src/machine.js';
 
 const SAMPLE = '8E3A9F1B-1C2D-4E5F-8A9B-0C1D2E3F4A5B';
 
@@ -145,6 +145,26 @@ describe('once', () => {
     expect(read()).toEqual({ machine: SAMPLE.toLowerCase() });
     expect(reads).toBe(1);
     expect(thisMachineRef()).toBe(thisMachineRef());
+  });
+});
+
+describe('machineReader', () => {
+  it('tries a failed read of this machine again after a minute, and keeps one that worked', () => {
+    let clock = 5000;
+    let reads = 0;
+    const read = machineReader(() => (++reads < 3 ? {} : { machine: SAMPLE.toLowerCase() }), () => clock);
+    expect(read()).toEqual({});
+    clock += 59_999;
+    expect(read()).toEqual({});
+    expect(reads).toBe(1);
+    clock += 1;
+    expect(read()).toEqual({});
+    expect(reads).toBe(2);
+    clock += 60_000;
+    expect(read()).toEqual({ machine: SAMPLE.toLowerCase() });
+    clock += 600_000;
+    expect(read()).toEqual({ machine: SAMPLE.toLowerCase() });
+    expect(reads).toBe(3);
   });
 });
 
