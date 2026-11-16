@@ -23,6 +23,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync, readlinkSync } from "node:fs";
 import { connect, type Socket } from "node:net";
 import { homedir, hostname } from "node:os";
@@ -41,7 +42,7 @@ const RECONNECT_MS = 5000;
 const REQUEST_TIMEOUT_MS = 30_000;
 
 type Json = Record<string, unknown>;
-interface Host { hostPid: number; hostStart: string; machine?: string; machineName?: string; readonly machineUptime?: number }
+interface Host { hostPid: number; hostStart: string; machine?: string; machineName?: string; machineFingerprint?: string; readonly machineUptime?: number }
 
 // ---------------------------------------------------------------------------
 // socket client (request/reply by id, events to a callback)
@@ -187,7 +188,27 @@ function machineUptime(): number | undefined {
 // What the broker keeps with a host (src/machine.ts): the boot id, and the host
 // name as a label; neither when there is no boot id, so the broker reads this
 // as an old client of its own machine.
-function machineRef(): { machine?: string; machineName?: string } {
+// A hash that names the machine across reboots (src/machine.ts readFingerprint):
+// the raw system id never leaves the machine.
+function machineFingerprint(): string | undefined {
+	const attempt = (read: () => string): string => {
+		try {
+			return read();
+		} catch {
+			return "";
+		}
+	};
+	let raw = "";
+	if (process.platform === "linux") {
+		raw = attempt(() => readFileSync("/etc/machine-id", "utf8").trim());
+		raw = raw !== "" ? raw : attempt(() => readFileSync("/var/lib/dbus/machine-id", "utf8").trim());
+	} else if (process.platform === "darwin") {
+		raw = attempt(() => /"IOPlatformUUID"\s*=\s*"([0-9a-f-]{36})"/i.exec(execFileSync("/usr/sbin/ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"], { encoding: "utf8", timeout: 1000 }))?.[1] ?? "");
+	}
+	return raw === "" ? undefined : createHash("sha256").update("murmur-machine:" + raw).digest("hex").slice(0, 32);
+}
+
+function machineRef(): { machine?: string; machineName?: string; machineFingerprint?: string } {
 	try {
 		const raw =
 			process.platform === "linux"
@@ -204,7 +225,8 @@ function machineRef(): { machine?: string; machineName?: string } {
 			} catch {
 				// no namespace to read
 			}
-			return { machine: uuid[0].toLowerCase() + (namespace === "" ? "" : ":" + namespace), machineName: hostname() };
+			const fingerprint = machineFingerprint();
+			return { machine: uuid[0].toLowerCase() + (namespace === "" ? "" : ":" + namespace), machineName: hostname(), ...(fingerprint !== undefined ? { machineFingerprint: fingerprint } : {}) };
 		}
 	} catch {
 		// no boot id

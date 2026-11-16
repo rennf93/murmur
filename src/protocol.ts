@@ -258,6 +258,8 @@ export interface HostRef {
   // Seconds since that machine booted, at the time of the event (hooks and
   // adapters send it with a session event).
   machineUptime?: number;
+  // A hash that names the machine across reboots (src/machine.ts readFingerprint).
+  machineFingerprint?: string;
 }
 
 // Identity, three ways. handle alone: that exact handle (scripts, --as,

@@ -241,16 +241,27 @@ export class MurmurCore {
     return host.machine === undefined || host.machine === (this.fixedMachine ?? thisMachine()) ? null : host.machine;
   }
 
-  // The machine and label to store on an event of a known session. An event
-  // that carries no machine at all (a client whose boot id read failed) leaves
-  // what the session had; one that carries a machine sets it, and keeps the
-  // label when it carries none for the same machine.
-  private machineFields(row: SessionRow, host: HostRef): { hostMachine: string | null; hostLabel: string | null } | Record<string, never> {
+  // The machine, label and fingerprint to store on an event of a known session.
+  // An event that carries no machine at all (a client whose boot id read
+  // failed) leaves what the session had; one that carries a machine sets it, and
+  // keeps the label and the fingerprint when it carries none for the same
+  // machine.
+  private machineFields(row: SessionRow, host: HostRef): { hostMachine: string | null; hostLabel: string | null; hostFingerprint: string | null } | Record<string, never> {
     if (host.machine === undefined && row.hostMachine !== null) {
       return {};
     }
     const key = this.machineKey(host);
-    return { hostMachine: key, hostLabel: this.labelOf(host) ?? (key === row.hostMachine ? row.hostLabel : null) };
+    const same = key === row.hostMachine;
+    return {
+      hostMachine: key,
+      hostLabel: this.labelOf(host) ?? (same ? row.hostLabel : null),
+      hostFingerprint: this.fingerprintOf(host) ?? (same ? row.hostFingerprint : null),
+    };
+  }
+
+  // The fingerprint stored with a machine other than this broker's.
+  private fingerprintOf(host: HostRef): string | null {
+    return this.machineKey(host) === null ? null : (host.machineFingerprint ?? null);
   }
 
   // The host name label stored with a machine other than this broker's.
@@ -281,7 +292,7 @@ export class MurmurCore {
       return null;
     }
     if (key !== null) {
-      this.store.updateSession(other.id, { hostMachine: key, hostLabel: this.labelOf(host) });
+      this.store.updateSession(other.id, { hostMachine: key, hostLabel: this.labelOf(host), hostFingerprint: this.fingerprintOf(host) });
     }
     return this.store.sessionById(other.id);
   }
@@ -856,6 +867,7 @@ export class MurmurCore {
         hostStart: arg.host.hostStart,
         hostMachine: this.machineKey(arg.host),
         hostLabel: this.labelOf(arg.host),
+        hostFingerprint: this.fingerprintOf(arg.host),
         transcriptPath: arg.transcriptPath ?? null,
         cwd: arg.cwd ?? null,
         now: ts,
@@ -920,27 +932,29 @@ export class MurmurCore {
   }
 
   // An event that carries a boot id other than the one stored for sessions of
-  // the same host name means that machine rebooted, which ended every process
-  // on it: those sessions end at once. When the host name changed too, nothing
-  // says it is the same machine, and the lease applies.
+  // the same machine means that machine rebooted, which ended every process on
+  // it: those sessions end at once. The same machine is the same fingerprint
+  // (a hash of the id the system keeps for itself) and the same host name label:
+  // a host name alone is no evidence, two machines can share one (raspberrypi,
+  // localhost) and then each one's events would look like a reboot of the other.
+  // Without a fingerprint on the event or on the row, or with a changed host
+  // name, nothing says it is the same machine and the lease applies. The old
+  // sessions must also have been last heard from before the new boot (the
+  // uptime), and none of their hosts may be connected. While the broker has just
+  // started, connections are still coming back and nothing can be told from
+  // their absence.
   private endRebootedSessions(id: number, host: HostRef, ts: number): void {
     const key = this.machineKey(host);
     const label = this.labelOf(host);
-    if (key === null || label === null) {
+    const fingerprint = this.fingerprintOf(host);
+    if (key === null || label === null || fingerprint === null) {
       return;
     }
-    // Two different machines can share a host name (raspberrypi, localhost), and
-    // then each one's events look like a reboot of the other. A reboot is told
-    // from that by the clock of the new boot: its sessions of the old boot were
-    // last heard from before the machine booted. Without an uptime, or while
-    // the old session's host is connected, nothing says so and the lease applies.
-    // While the broker has just started, connections are still coming back and
-    // nothing can be told from their absence.
     if (host.machineUptime === undefined || ts - this.startedAt <= STARTUP_GRACE_MS) {
       return;
     }
     const bootedAt = ts - host.machineUptime * 1000;
-    for (const old of this.store.rebootedSessions(label, key, id)) {
+    for (const old of this.store.rebootedSessions(fingerprint, label, key, id)) {
       if (this.hostConnected(old) || old.updatedAt >= bootedAt) {
         continue;
       }

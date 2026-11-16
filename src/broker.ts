@@ -2,7 +2,7 @@ import { chmodSync, existsSync, unlinkSync } from 'node:fs';
 import { Server, Socket, createConnection, createServer } from 'node:net';
 import { StringDecoder } from 'node:string_decoder';
 import { readToken } from './config.js';
-import { validBootId, validField, validUptime } from './machine.js';
+import { parseWireMachine, validBootId } from './machine.js';
 import type { MurmurPaths } from './config.js';
 import { fullOf } from './core.js';
 import type { MurmurCore, PushTarget } from './core.js';
@@ -226,18 +226,12 @@ function reqHost(value: unknown): HostRef {
     throw badRequest('host must be an object');
   }
   const rec = value as Record<string, unknown>;
-  // A machine that is not a uuid, or a label that is not 1 to 255 printable
-  // characters, reads as absent.
-  const machine = validBootId(rec.machine);
-  // The label and the uptime mean something only next to a machine; the core reads them that way.
-  const machineName = validField(rec.machineName);
-  const machineUptime = validUptime(rec.machineUptime);
+  // A machine that is not a boot id in shape reads as absent, and the label, the
+  // uptime and the fingerprint mean something only next to one.
   return {
     hostPid: reqNumber(rec, 'hostPid'),
     hostStart: reqString(rec, 'hostStart'),
-    ...(machine !== undefined ? { machine } : {}),
-    ...(machineName !== undefined ? { machineName } : {}),
-    ...(machineUptime !== undefined ? { machineUptime } : {}),
+    ...parseWireMachine(rec),
   };
 }
 

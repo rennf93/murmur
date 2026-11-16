@@ -134,8 +134,8 @@ describe('session events', () => {
     const stack = await buildStack();
     await runHook('session-start', JSON.stringify({ session_id: 'here', cwd: '/work/here' }), envFor(stack), CLIENT_OPT('claude'));
     expect(stack.store.sessionByCliId('claude', 'here')?.hostMachine).toBeNull();
-    await runHook('session-start', JSON.stringify({ session_id: 'there', cwd: '/work/there' }), envFor(stack), { host: { ...HOST, hostPid: HOST.hostPid + 1 }, machine: { machine: '00000000-0000-4000-8000-000000000009', machineName: 'mac' } });
-    expect(stack.store.sessionByCliId('claude', 'there')).toMatchObject({ hostMachine: '00000000-0000-4000-8000-000000000009', hostLabel: 'mac' });
+    await runHook('session-start', JSON.stringify({ session_id: 'there', cwd: '/work/there' }), envFor(stack), { host: { ...HOST, hostPid: HOST.hostPid + 1 }, machine: { machine: '00000000-0000-4000-8000-000000000009', machineName: 'mac', machineFingerprint: 'c'.repeat(32) } });
+    expect(stack.store.sessionByCliId('claude', 'there')).toMatchObject({ hostMachine: '00000000-0000-4000-8000-000000000009', hostLabel: 'mac', hostFingerprint: 'c'.repeat(32) });
   });
 
   it('sends no machine and no uptime when it has no boot id, and is read as a client of the broker machine', async () => {
@@ -149,7 +149,7 @@ describe('session events', () => {
     const stack = await buildStack(() => clock);
     const remote = (pid: number, boot: string, uptime?: number | string) => ({
       host: { ...HOST, hostPid: pid },
-      machine: { machine: boot, machineName: 'mac' },
+      machine: { machine: boot, machineName: 'mac', machineFingerprint: 'd'.repeat(32) },
       ...(uptime !== undefined ? { uptime: uptime as number } : {}),
     });
     const start = (cli: string, opts: ReturnType<typeof remote>) =>

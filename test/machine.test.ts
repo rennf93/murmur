@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SYSCTL_OPTIONS, machineId, once, onceOk, readPidNamespace, validBootId, machineOf, machineRef, parseBootId, readBootId, readUptime, thisMachine, thisMachineRef, validField, validUptime } from '../src/machine.js';
+import { SYSCTL_OPTIONS, machineId, once, onceOk, parseWireMachine, readFingerprint, readPidNamespace, validFingerprint, validBootId, machineOf, machineRef, parseBootId, readBootId, readUptime, thisMachine, thisMachineRef, validField, validUptime } from '../src/machine.js';
 
 const SAMPLE = '8E3A9F1B-1C2D-4E5F-8A9B-0C1D2E3F4A5B';
 
@@ -57,9 +57,9 @@ describe('machineId', () => {
 
 describe('machineRef', () => {
   it('is the boot id with the host name as a label, and nothing at all without a boot id', () => {
-    expect(machineRef(SAMPLE.toLowerCase(), 'omen', '')).toEqual({ machine: SAMPLE.toLowerCase(), machineName: 'omen' });
+    expect(machineRef(SAMPLE.toLowerCase(), 'omen', '', null)).toEqual({ machine: SAMPLE.toLowerCase(), machineName: 'omen' });
     expect(machineRef(SAMPLE.toLowerCase(), 'omen-renamed', '').machine).toBe(SAMPLE.toLowerCase());
-    expect(machineRef('', 'omen', '4026531836')).toEqual({});
+    expect(machineRef('', 'omen', '4026531836', 'f'.repeat(32))).toEqual({});
     expect(thisMachineRef()).toEqual(thisMachineRef());
     expect(thisMachine()).toBe(machineOf(thisMachineRef()));
     expect(machineOf({})).toBe('');
@@ -115,7 +115,7 @@ describe('the sysctl call', () => {
 
 describe('the pid namespace in the machine', () => {
   it('names the process table: the boot id plus the namespace on Linux, the bare boot id when there is none to read', () => {
-    expect(machineRef(SAMPLE.toLowerCase(), 'omen', '4026531836')).toEqual({ machine: SAMPLE.toLowerCase() + ':4026531836', machineName: 'omen' });
+    expect(machineRef(SAMPLE.toLowerCase(), 'omen', '4026531836', 'f'.repeat(32))).toEqual({ machine: SAMPLE.toLowerCase() + ':4026531836', machineName: 'omen', machineFingerprint: 'f'.repeat(32) });
     expect(machineRef(SAMPLE.toLowerCase(), 'omen', '4026532999').machine).not.toBe(machineRef(SAMPLE.toLowerCase(), 'omen', '4026531836').machine);
     expect(readPidNamespace('linux', () => 'pid:[4026531836]')).toBe('4026531836');
     expect(readPidNamespace('linux', () => 'garbage')).toBe('');
@@ -171,5 +171,74 @@ describe('onceOk', () => {
     clock += 600_000;
     expect(read()).toEqual({ machine: 'x' });
     expect(reads).toBe(3);
+  });
+});
+
+describe('readFingerprint', () => {
+  const IOREG = [
+    '+-o Root  <class IORegistryEntry, id 0x100000100, retain 25>',
+    '  +-o MacBookPro18,3  <class IOPlatformExpertDevice, id 0x10000020f, registered, matched, active, busy 0 (143 ms), retain 40>',
+    '    {',
+    '      "IOPlatformSerialNumber" = "C02XXXXXXXXX"',
+    '      "IOPlatformUUID" = "8E3A9F1B-1C2D-4E5F-8A9B-0C1D2E3F4A5B"',
+    '      "manufacturer" = <"Apple Inc.">',
+    '    }',
+    '',
+  ].join('\n');
+
+  it('hashes the machine id on Linux, with the dbus copy as a fallback, and never carries the raw id', () => {
+    const fp = readFingerprint('linux', (path) => (path === '/etc/machine-id' ? '0123456789abcdef0123456789abcdef\n' : ''));
+    expect(fp).toBe('4b8ca916283f918e312b5785d4ad2041');
+    expect(fp).not.toContain('0123456789abcdef');
+    const missing = (path: string): string => {
+      if (path === '/etc/machine-id') {
+        throw new Error('no such file');
+      }
+      return '0123456789abcdef0123456789abcdef';
+    };
+    expect(readFingerprint('linux', missing)).toBe('4b8ca916283f918e312b5785d4ad2041');
+    expect(readFingerprint('linux', () => '  \n')).toBeUndefined();
+    expect(readFingerprint('linux', () => {
+      throw new Error('no access');
+    })).toBeUndefined();
+  });
+
+  it('reads the IOPlatformUUID that ioreg prints on macOS, by absolute path', () => {
+    const calls: string[][] = [];
+    const fp = readFingerprint('darwin', () => '', (cmd, args) => {
+      calls.push([cmd, ...args]);
+      return IOREG;
+    });
+    expect(fp).toBe('0f01ad4d807908a30d19031969a1aa7c');
+    expect(calls).toEqual([['/usr/sbin/ioreg', '-rd1', '-c', 'IOPlatformExpertDevice']]);
+    expect(readFingerprint('darwin', () => '', () => 'no uuid here')).toBeUndefined();
+    expect(readFingerprint('darwin', () => '', () => {
+      throw new Error('timeout');
+    })).toBeUndefined();
+    expect(readFingerprint('win32')).toBeUndefined();
+    expect(readFingerprint()).toMatch(/^([0-9a-f]{32})?$/);
+    expect(readFingerprint('darwin')).toBeUndefined();
+  });
+});
+
+describe('the fingerprint on the wire', () => {
+  const FP = 'abcdef0123456789abcdef0123456789';
+  const BOOT = '8e3a9f1b-1c2d-4e5f-8a9b-0c1d2e3f4a5b';
+
+  it('is 32 lower case hex characters, and nothing else', () => {
+    expect(validFingerprint(FP)).toBe(FP);
+    for (const bad of [FP.toUpperCase(), FP.slice(1), FP + '0', 'g' + FP.slice(1), '', 12, null, undefined]) {
+      expect(validFingerprint(bad)).toBeUndefined();
+    }
+  });
+
+  it('is taken only next to a machine, together with the label and the uptime', () => {
+    expect(parseWireMachine({ machine: BOOT.toUpperCase(), machineName: 'mac', machineUptime: 90, machineFingerprint: FP })).toEqual({
+      machine: BOOT, machineName: 'mac', machineUptime: 90, machineFingerprint: FP,
+    });
+    expect(parseWireMachine({ machineName: 'mac', machineUptime: 90, machineFingerprint: FP })).toEqual({});
+    expect(parseWireMachine({ machine: 'not-a-uuid', machineFingerprint: FP })).toEqual({});
+    expect(parseWireMachine({ machine: BOOT, machineName: 'a\nb', machineUptime: -1, machineFingerprint: FP.toUpperCase() })).toEqual({ machine: BOOT });
+    expect(parseWireMachine({ machine: BOOT, machineFingerprint: FP + '0' })).toEqual({ machine: BOOT });
   });
 });

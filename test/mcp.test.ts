@@ -783,6 +783,13 @@ describe('a rename of one session sharing a handle', () => {
   });
 });
 
+// The status tool of an MCP server, as an agent sees it.
+async function sdkStatus(stack: Stack): Promise<unknown> {
+  const made = await pair(stack);
+  const result = (await made.sdk.callTool({ name: 'murmur_status', arguments: {} })) as CallToolResult;
+  return result.content;
+}
+
 // Machines at the broker: what a connection and a rename see.
 describe('sessions of two machines at one broker', () => {
   const MAC = '00000000-0000-4000-8000-000000000009';
@@ -867,6 +874,23 @@ describe('sessions of two machines at one broker', () => {
     const sent = await call<{ threadId: number }>(made.sdk, 'murmur_send', { to: ['target'], body: 'after the title', mode: 'silent' });
     expect(remote.handle).not.toBe('proveground-s4c-bait');
     expect(stack.store.threadMessages(sent.threadId, null)[0]?.sender).toBe('proveground-s4c-bait');
+  });
+
+  it('never shows a fingerprint: not in status, a thread, a reply to a send or the answer to a hook', async () => {
+    hostState.host = HOST;
+    const stack = await buildStack();
+    const FP = '1234567890abcdef1234567890abcdef';
+    const hook = await connectRaw(stack, 'hookish');
+    const replies: unknown[] = [];
+    replies.push(await req(hook.client, { type: 'session', event: 'session-start', client: 'claude', cliSessionId: 'mac', host: { hostPid: 5001, hostStart: 'T5001', machine: '00000000-0000-4000-8000-000000000009', machineName: 'mac', machineUptime: 90, machineFingerprint: FP }, cwd: '/w/mac' }));
+    const other = await connectRaw(stack, 'peer');
+    replies.push(await req(other.client, { type: 'status' }));
+    const sent = await req<{ threadId: number }>(other.client, { type: 'send', threadId: null, to: [stack.store.sessionByCliId('claude', 'mac')?.handle as string], body: 'hello', mode: 'silent' });
+    replies.push(sent, await req(other.client, { type: 'thread', threadId: sent.threadId, sinceSeq: null, full: true }), await req(other.client, { type: 'threads', limit: 10 }));
+    expect(stack.store.sessionByCliId('claude', 'mac')?.hostFingerprint).toBe(FP);
+    expect(JSON.stringify(replies)).not.toContain(FP);
+    expect(JSON.stringify(stack.core.status(() => ({ online: true })))).not.toContain(FP);
+    expect(JSON.stringify(await sdkStatus(stack))).not.toContain(FP);
   });
 
   it('does not bind a connection waiting for its session to a session of another machine with the same pid and start', async () => {

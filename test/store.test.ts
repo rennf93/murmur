@@ -485,13 +485,13 @@ describe('Store', () => {
 
   it('inserts, finds, lists and patches sessions', () => {
     const a = store.insertSession({
-      client: 'claude', cliSessionId: 'c1', handle: 'h', hostPid: 10, hostStart: 'T', hostMachine: null, hostLabel: null, transcriptPath: '/t', cwd: '/w', now: 5,
+      client: 'claude', cliSessionId: 'c1', handle: 'h', hostPid: 10, hostStart: 'T', hostMachine: null, hostLabel: null, hostFingerprint: null, transcriptPath: '/t', cwd: '/w', now: 5,
     });
     const b = store.insertSession({
-      client: 'codex', cliSessionId: null, handle: 'h', hostPid: 10, hostStart: 'T', hostMachine: null, hostLabel: null, transcriptPath: null, cwd: null, now: 9,
+      client: 'codex', cliSessionId: null, handle: 'h', hostPid: 10, hostStart: 'T', hostMachine: null, hostLabel: null, hostFingerprint: null, transcriptPath: null, cwd: null, now: 9,
     });
     expect(store.sessionById(a)).toEqual({
-      id: a, client: 'claude', cliSessionId: 'c1', handle: 'h', hostPid: 10, hostStart: 'T', hostMachine: null, hostLabel: null,
+      id: a, client: 'claude', cliSessionId: 'c1', handle: 'h', hostPid: 10, hostStart: 'T', hostMachine: null, hostLabel: null, hostFingerprint: null,
       transcriptPath: '/t', cwd: '/w', state: null, stateAt: null, pinned: false, startedAt: 5, updatedAt: 5,
     });
     expect(store.sessionById(999)).toBeNull();
@@ -506,11 +506,11 @@ describe('Store', () => {
     store.updateSession(a, {});
     expect(store.sessionById(a)?.client).toBe('claude');
     store.updateSession(a, {
-      client: 'gemini', cliSessionId: 'c2', hostPid: 11, hostStart: 'U', hostMachine: 'mac#1', hostLabel: 'mac', transcriptPath: null, cwd: null,
+      client: 'gemini', cliSessionId: 'c2', hostPid: 11, hostStart: 'U', hostMachine: 'mac#1', hostLabel: 'mac', hostFingerprint: 'f'.repeat(32), transcriptPath: null, cwd: null,
       state: 'busy', stateAt: 20, pinned: 1, updatedAt: 30,
     });
     expect(store.sessionById(a)).toEqual({
-      id: a, client: 'gemini', cliSessionId: 'c2', handle: 'h', hostPid: 11, hostStart: 'U', hostMachine: 'mac#1', hostLabel: 'mac',
+      id: a, client: 'gemini', cliSessionId: 'c2', handle: 'h', hostPid: 11, hostStart: 'U', hostMachine: 'mac#1', hostLabel: 'mac', hostFingerprint: 'f'.repeat(32),
       transcriptPath: null, cwd: null, state: 'busy', stateAt: 20, pinned: true, startedAt: 5, updatedAt: 30,
     });
   });

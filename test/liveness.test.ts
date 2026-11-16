@@ -39,8 +39,18 @@ const local = (pid: number) => {
   procs.set(pid, { ppid: 1, start: 'S' + String(pid), comm: 'claude' });
   return { hostPid: pid, hostStart: 'S' + String(pid), machine: OMEN };
 };
-const remote = (pid = 51234, boot = MAC, name = 'mac', uptime?: number) => ({ hostPid: pid, hostStart: 'T' + String(pid), machine: boot, machineName: name, ...(uptime !== undefined ? { machineUptime: uptime } : {}) });
-type Host = { hostPid: number; hostStart: string; machine?: string; machineName?: string; machineUptime?: number };
+// Two machines that are not the same machine have different fingerprints.
+const FP_A = 'a'.repeat(32);
+const FP_B = 'b'.repeat(32);
+const remote = (pid = 51234, boot = MAC, name = 'mac', uptime?: number, fingerprint: string | null = FP_A) => ({
+  hostPid: pid,
+  hostStart: 'T' + String(pid),
+  machine: boot,
+  machineName: name,
+  ...(uptime !== undefined ? { machineUptime: uptime } : {}),
+  ...(fingerprint !== null ? { machineFingerprint: fingerprint } : {}),
+});
+type Host = { hostPid: number; hostStart: string; machine?: string; machineName?: string; machineUptime?: number; machineFingerprint?: string };
 const open = (cli: string, host: Host, cwd: string, title?: string) =>
   core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: cli, host, cwd, source: 'startup', ...(title !== undefined ? { title } : {}) });
 
@@ -296,12 +306,12 @@ describe('two machines that share a host name', () => {
   it('do not end each other: the old sessions were heard from after the new machine booted', () => {
     const a = open('a', remote(100, 'boot-a', 'Mac', 3 * 86400), '/Users/a/work/guard');
     now += HOUR;
-    const b = open('b', remote(200, 'boot-b', 'Mac', 3 * 86400), '/Users/b/work/guard');
+    const b = open('b', remote(200, 'boot-b', 'Mac', 3 * 86400, FP_B), '/Users/b/work/guard');
     expect(store.sessionById(a.id)?.state).not.toBe('ended');
     core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'a', host: remote(100, 'boot-a', 'Mac', 3 * 86400 + 5) });
     expect(store.sessionById(b.id)?.state).not.toBe('ended');
     now += 40 * 1000;
-    core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'b', host: remote(200, 'boot-b', 'Mac', 3 * 86400 + 45) });
+    core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'b', host: remote(200, 'boot-b', 'Mac', 3 * 86400 + 45, FP_B) });
     core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'a', host: remote(100, 'boot-a', 'Mac', 3 * 86400 + 50) });
     expect(store.listSessions().map((r) => r.state)).toEqual(['busy', 'busy']);
   });
@@ -448,7 +458,7 @@ describe('two machines that share a host name, with and without a connection', (
   it('keeps a connected session of one machine and gives the other machine the next handle, over ten alternating events', () => {
     settle();
     const hostA = remote(100, 'boot-a', 'Mac', 5 * 86400);
-    const hostB = remote(200, 'boot-b', 'Mac', 2 * 86400);
+    const hostB = remote(200, 'boot-b', 'Mac', 2 * 86400, FP_B);
     const a = open('a', hostA, '/Users/a/work/guard');
     core.hostConnected = (h) => h.hostPid === 100;
     const b = open('b', hostB, '/Users/b/work/guard');
@@ -471,11 +481,11 @@ describe('two machines that share a host name, with and without a connection', (
     expect(store.sessionById(a.id)?.state).not.toBe('ended');
   });
 
-  it('does end a session that has no connection for the same claim: the trust boundary of the machine field', () => {
+  it('does end a connection-less session for the same claim when the claim carries that machine\'s fingerprint and host name: the trust boundary', () => {
     settle();
     const a = open('a', remote(100, 'boot-a', 'Mac', 86400), '/Users/a/work/guard');
     now += 10 * 60 * 1000;
-    open('hostile', remote(666, 'boot-hostile', 'Mac', 0), '/Users/x/work/guard');
+    open('hostile', remote(666, 'boot-hostile', 'Mac', 0, FP_A), '/Users/x/work/guard');
     expect(store.sessionById(a.id)?.state).toBe('ended');
   });
 
@@ -514,7 +524,7 @@ describe('a session that comes back after another took its handle', () => {
   it('never shares a handle: it takes the next free one, and ten alternating events end nobody', () => {
     settle();
     const hostA = remote(100, 'boot-a', 'Mac', 5 * 86400);
-    const hostB = remote(200, 'boot-b', 'Mac', 0);
+    const hostB = remote(200, 'boot-b', 'Mac', 0, FP_A);
     const a = open('a', hostA, '/Users/a/work/guard');
     now += 10 * 60 * 1000;
     // B claims the label with a fresh boot: the connection-less A is ended and B takes the handle.
@@ -547,7 +557,7 @@ describe('a session that comes back after another took its handle', () => {
     core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'nocwd', host: hostC });
     now += 10 * 60 * 1000;
     // A fresh boot claims the label and the first folder's handle, and ends both connection-less sessions.
-    open('b', remote(200, 'boot-b', 'Mac', 0), '/Users/b/work/guard');
+    open('b', remote(200, 'boot-b', 'Mac', 0, FP_A), '/Users/b/work/guard');
     expect(store.sessionByCliId('claude', 'a')?.state).toBe('ended');
     expect(store.sessionByCliId('claude', 'nocwd')?.state).toBe('ended');
     const backA = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'a', host: hostA });
@@ -653,5 +663,121 @@ describe('what the review of the uptime version found', () => {
     const sparse = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'nolabel', host: { hostPid: 61, hostStart: 'T61' } });
     expect(sparse.id).toBe(noLabel.id);
     expect(store.sessionById(noLabel.id)).toMatchObject({ hostMachine: MAC, hostLabel: null });
+  });
+});
+
+describe('what tells a reboot from a stranger with the same host name: the fingerprint', () => {
+  const settle = (): void => {
+    now += 61 * 1000;
+  };
+
+  it('does not end a quiet machine for another machine with the same host name and a fresh uptime', () => {
+    settle();
+    const a = open('a', remote(100, 'boot-a', 'Mac', 9 * 86400, FP_A), '/Users/a/work/guard');
+    store.createGroup('crew', now);
+    store.addMember('crew', a.handle, now);
+    core.registerNative({ handle: a.handle, socketPath: '/tmp/a.sock', token: 't' });
+    const mail = core.send('target-peer', { threadId: null, to: [a.handle], body: 'waiting for a' });
+    now += 2 * 3600 * 1000;
+    const b = open('b', remote(200, 'boot-b', 'Mac', 1800, FP_B), '/Users/b/work/guard');
+    expect(store.sessionById(a.id)?.state).not.toBe('ended');
+    expect(b.handle).toBe('claude-guard-2');
+    expect(store.sessionById(a.id)?.handle).toBe('claude-guard');
+    expect(store.listGroups().find((g) => g.name === 'crew')?.members).toEqual(['claude-guard']);
+    expect(store.getNativeTransport('claude-guard')?.socketPath).toBe('/tmp/a.sock');
+    expect(store.getDeliveries(mail.result.messageId).map((d) => [d.recipient, d.state])).toEqual([['claude-guard', 'queued']]);
+  });
+
+  it('ends the old sessions of the same machine at once when it comes back with a new boot id', () => {
+    settle();
+    const old = open('old', remote(100, 'boot-old', 'Mac', 86400, FP_A), '/Users/a/work/guard');
+    store.createGroup('crew', now);
+    store.addMember('crew', old.handle, now);
+    now += 10 * 60 * 1000;
+    const back = open('back', remote(300, 'boot-new', 'Mac', 120, FP_A), '/Users/a/work/guard');
+    expect(store.sessionById(old.id)?.state).toBe('ended');
+    expect(back.handle).toBe(old.handle);
+    expect(store.listGroups().find((g) => g.name === 'crew')?.members).toEqual([old.handle]);
+  });
+
+  it('ends nothing when the host name differs, or when the fingerprint is missing on the event, on the row, or on both', () => {
+    settle();
+    const cases: Array<[string, string | null, string, string | null, string]> = [
+      // [name of the case, row fingerprint, row label, event fingerprint, event label]
+      ['other host name', FP_A, 'Mac', FP_A, 'MacBook'],
+      ['no fingerprint on the event', FP_A, 'Mac', null, 'Mac'],
+      ['no fingerprint on the row', null, 'Mac', FP_A, 'Mac'],
+      ['no fingerprint on either', null, 'Mac', null, 'Mac'],
+    ];
+    cases.forEach(([name, rowFp, rowLabel, eventFp, eventLabel], n) => {
+      const old = open('old-' + name, remote(1000 + n, 'boot-old-' + String(n), rowLabel, 86400, rowFp), '/Users/a/work/old-' + String(n));
+      now += 10 * 60 * 1000;
+      open('new-' + name, remote(2000 + n, 'boot-new-' + String(n), eventLabel, 0, eventFp), '/Users/a/work/new-' + String(n));
+      expect(store.sessionById(old.id)?.state, name).not.toBe('ended');
+    });
+  });
+
+  it('treats two clones of one image as one machine: the connected one stays, the hook-only one ends', () => {
+    settle();
+    const connected = open('connected', remote(100, 'boot-1', 'image', 86400, FP_A), '/Users/a/work/guard');
+    const hookOnly = open('hook-only', remote(101, 'boot-1', 'image', 86400, FP_A), '/Users/a/work/other');
+    core.hostConnected = (h) => h.hostPid === 100;
+    now += 10 * 60 * 1000;
+    open('clone', remote(300, 'boot-2', 'image', 0, FP_A), '/Users/c/work/third');
+    expect(store.sessionById(connected.id)?.state).not.toBe('ended');
+    expect(store.sessionById(hookOnly.id)?.state).toBe('ended');
+  });
+
+  it('does not end anything for a hostile claim of a label with a fresh boot id and an uptime of zero but another fingerprint', () => {
+    settle();
+    const a = open('a', remote(100, 'boot-a', 'Mac', 86400, FP_A), '/Users/a/work/guard');
+    now += 10 * 60 * 1000;
+    open('hostile', remote(666, 'boot-hostile', 'Mac', 0, FP_B), '/Users/x/work/guard');
+    expect(store.sessionById(a.id)?.state).not.toBe('ended');
+    core.hostConnected = (h) => h.hostPid === 100;
+    open('hostile-2', remote(667, 'boot-hostile-2', 'Mac', 0, FP_B), '/Users/x/work/other');
+    expect(store.sessionById(a.id)?.state).not.toBe('ended');
+  });
+
+  it('keeps the fingerprint of a session when an event carries none for the same machine, and replaces it for another', () => {
+    const first = open('mac', remote(51234, MAC, 'mac', undefined, FP_A), '/Users/renzof/work/guard');
+    core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'mac', host: remote(51234, MAC, 'mac', undefined, null) });
+    expect(store.sessionById(first.id)?.hostFingerprint).toBe(FP_A);
+    core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'mac', host: { hostPid: 51234, hostStart: 'T51234' } });
+    expect(store.sessionById(first.id)).toMatchObject({ hostMachine: MAC, hostFingerprint: FP_A });
+    core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'mac', host: remote(51234, 'another-boot', 'mac', undefined, FP_B) });
+    expect(store.sessionById(first.id)).toMatchObject({ hostMachine: 'another-boot', hostFingerprint: FP_B });
+    core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'mac', host: remote(51234, 'third-boot', 'mac', undefined, null) });
+    expect(store.sessionById(first.id)).toMatchObject({ hostMachine: 'third-boot', hostFingerprint: null });
+    core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'mac', host: { hostPid: 51234, hostStart: 'T51234', machine: OMEN } });
+    expect(store.sessionById(first.id)).toMatchObject({ hostMachine: null, hostFingerprint: null });
+  });
+});
+
+describe('a database made by the code before host_fingerprint', () => {
+  it('gains the column, keeps its rows with no fingerprint, and ends nothing on a reboot claim until a fingerprint is known', () => {
+    const copy = join(dir, 'before.db');
+    copyFileSync(join(import.meta.dirname, 'fixtures', 'murmur-dfeeec7-schema.db'), copy);
+    const before = new Database(copy, { readonly: true });
+    const names = (before.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>).map((c) => c.name);
+    expect(names).toContain('host_label');
+    expect(names).not.toContain('host_fingerprint');
+    before.close();
+    const old = Store.open(copy);
+    const row = old.sessionByCliId('claude', 'remote-1');
+    expect(row).toMatchObject({ handle: 'claude-guard', hostMachine: '0a000000-0000-4000-8000-000000000009', hostLabel: 'Mac', hostFingerprint: null });
+    expect(old.threadMessages(1, null)).toHaveLength(1);
+    const migrated = new MurmurCore(old, { onAppend: () => {}, onStateChange: () => {} }, () => 1_700_000_000_000 + 2 * 3600 * 1000, () => procs, OMEN);
+    // The core started now, so wait out its grace; the old row has no fingerprint, so nothing ends.
+    const later = new MurmurCore(old, { onAppend: () => {}, onStateChange: () => {} }, (() => { let t = 1_700_000_000_000 + 2 * 3600 * 1000; return () => (t += 61_000); })(), () => procs, OMEN);
+    later.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'new', host: remote(300, 'boot-new', 'Mac', 0, FP_A), cwd: '/Users/b/work/other', source: 'startup' });
+    expect(old.sessionByCliId('claude', 'remote-1')?.state).not.toBe('ended');
+    // The same session speaks again with a fingerprint: it is stored.
+    migrated.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'remote-1', host: { hostPid: 4242, hostStart: 'Mon Nov  9 10:00:00 2026', machine: '0a000000-0000-4000-8000-000000000009', machineName: 'Mac', machineFingerprint: FP_A } });
+    expect(old.sessionByCliId('claude', 'remote-1')?.hostFingerprint).toBe(FP_A);
+    old.close();
+    const again = Store.open(copy);
+    expect(again.sessionByCliId('claude', 'remote-1')?.hostFingerprint).toBe(FP_A);
+    again.close();
   });
 });

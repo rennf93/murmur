@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync, readlinkSync } from 'node:fs';
 import { hostname } from 'node:os';
 
@@ -102,15 +103,58 @@ export function readPidNamespace(
   }
 }
 
+// What tells one machine from a lookalike across reboots: a hash of the id the
+// system keeps for itself (Linux `/etc/machine-id`, else
+// `/var/lib/dbus/machine-id`; macOS the IOPlatformUUID `ioreg` prints). The raw
+// id never leaves the machine: the value is the first 32 hex characters of
+// sha256("murmur-machine:" + id). Unreadable or empty: undefined, and the
+// broker then never reads a boot id change as a reboot.
+const IOREG_UUID = /"IOPlatformUUID"\s*=\s*"([0-9a-f-]{36})"/i;
+
+export function readFingerprint(
+  platform: string = process.platform,
+  readFile: (path: string) => string = defaultRead,
+  run: (cmd: string, args: string[]) => string = defaultRun,
+): string | undefined {
+  const attempt = (read: () => string): string => {
+    try {
+      return read();
+    } catch {
+      return '';
+    }
+  };
+  let raw = '';
+  if (platform === 'linux') {
+    raw = attempt(() => readFile('/etc/machine-id').trim());
+    raw = raw !== '' ? raw : attempt(() => readFile('/var/lib/dbus/machine-id').trim());
+  } else if (platform === 'darwin') {
+    raw = attempt(() => IOREG_UUID.exec(run('/usr/sbin/ioreg', ['-rd1', '-c', 'IOPlatformExpertDevice']))?.[1] ?? '');
+  }
+  return raw === '' ? undefined : createHash('sha256').update('murmur-machine:' + raw).digest('hex').slice(0, 32);
+}
+
 export interface MachineRef {
   machine?: string;
   machineName?: string;
+  // See readFingerprint; sent only together with a machine.
+  machineFingerprint?: string;
 }
 
 // What a client puts next to its host reference: the boot id and the host
 // name, or nothing when there is no boot id.
-export function machineRef(bootId: string = readBootId(), name: string = hostname(), pidNamespace: string = readPidNamespace()): MachineRef {
-  return bootId === '' ? {} : { machine: pidNamespace === '' ? bootId : bootId + ':' + pidNamespace, machineName: name };
+export function machineRef(
+  bootId: string = readBootId(),
+  name: string = hostname(),
+  pidNamespace: string = readPidNamespace(),
+  fingerprint: string | null | undefined = readFingerprint(),
+): MachineRef {
+  return bootId === ''
+    ? {}
+    : {
+        machine: pidNamespace === '' ? bootId : bootId + ':' + pidNamespace,
+        machineName: name,
+        ...(fingerprint != null ? { machineFingerprint: fingerprint } : {}),
+      };
 }
 
 // A read that happens once: a later failing read cannot change what a process
@@ -164,6 +208,30 @@ export function thisMachine(): string {
 // however a client writes it.
 export function validBootId(value: unknown): string | undefined {
   return typeof value === 'string' && MACHINE_FULL.test(value) ? value.toLowerCase() : undefined;
+}
+
+// A fingerprint from the wire: 32 lower case hex characters, else undefined.
+export function validFingerprint(value: unknown): string | undefined {
+  return typeof value === 'string' && /^[0-9a-f]{32}$/.test(value) ? value : undefined;
+}
+
+// What a session event may say about its machine, from the wire: the machine
+// (a boot id, lower case), and, next to it only, the host name as a label, the
+// uptime and the fingerprint. Anything that is not of its shape reads as absent.
+export function parseWireMachine(rec: Record<string, unknown>): { machine?: string; machineName?: string; machineUptime?: number; machineFingerprint?: string } {
+  const machine = validBootId(rec.machine);
+  if (machine === undefined) {
+    return {};
+  }
+  const machineName = validField(rec.machineName);
+  const machineUptime = validUptime(rec.machineUptime);
+  const machineFingerprint = validFingerprint(rec.machineFingerprint);
+  return {
+    machine,
+    ...(machineName !== undefined ? { machineName } : {}),
+    ...(machineUptime !== undefined ? { machineUptime } : {}),
+    ...(machineFingerprint !== undefined ? { machineFingerprint } : {}),
+  };
 }
 
 // A machine field from the wire: undefined unless it is 1 to 255 printable
