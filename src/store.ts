@@ -24,6 +24,9 @@ export interface SessionRow {
   handle: string;
   hostPid: number;
   hostStart: string;
+  // The machine of the host process, or null for the broker's own (and for a
+  // row written before machines existed).
+  hostMachine: string | null;
   transcriptPath: string | null;
   cwd: string | null;
   // busy, idle or ended; null until a lifecycle event says otherwise.
@@ -125,6 +128,7 @@ interface SessionRecord {
   handle: string;
   host_pid: number;
   host_start: string;
+  host_machine: string | null;
   transcript_path: string | null;
   cwd: string | null;
   state: string | null;
@@ -247,6 +251,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_host ON sessions (host_pid, host_start, 
 const ADDED_COLUMNS: Array<[table: string, column: string, ddl: string]> = [
   ['messages', 'via', 'TEXT'],
   ['sessions', 'pinned', 'INTEGER NOT NULL DEFAULT 0'],
+  ['sessions', 'host_machine', 'TEXT'],
 ];
 
 // Delivery states that still count as unread for inbox purposes.
@@ -273,6 +278,7 @@ function toSessionRow(r: SessionRecord): SessionRow {
     handle: r.handle,
     hostPid: r.host_pid,
     hostStart: r.host_start,
+    hostMachine: r.host_machine,
     transcriptPath: r.transcript_path,
     cwd: r.cwd,
     state: r.state,
@@ -728,10 +734,11 @@ export class Store {
     return rec === undefined ? null : toSessionRow(rec);
   }
 
-  // The newest session recorded for this exact host process.
-  sessionByHost(hostPid: number, hostStart: string): SessionRow | null {
-    const rec = this.stmt('SELECT * FROM sessions WHERE host_pid = ? AND host_start = ? ORDER BY updated_at DESC, id DESC LIMIT 1')
-      .get(hostPid, hostStart) as SessionRecord | undefined;
+  // The newest session recorded for this exact host process: pid, start and
+  // machine (null is the broker's own machine).
+  sessionByHost(hostPid: number, hostStart: string, hostMachine: string | null): SessionRow | null {
+    const rec = this.stmt('SELECT * FROM sessions WHERE host_pid = ? AND host_start = ? AND host_machine IS ? ORDER BY updated_at DESC, id DESC LIMIT 1')
+      .get(hostPid, hostStart, hostMachine) as SessionRecord | undefined;
     return rec === undefined ? null : toSessionRow(rec);
   }
 
@@ -791,14 +798,15 @@ export class Store {
     handle: string;
     hostPid: number;
     hostStart: string;
+    hostMachine: string | null;
     transcriptPath: string | null;
     cwd: string | null;
     now: number;
   }): number {
     const info = this.stmt(
-      `INSERT INTO sessions (client, cli_session_id, handle, host_pid, host_start, transcript_path, cwd, state, state_at, started_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
-    ).run(arg.client, arg.cliSessionId, arg.handle, arg.hostPid, arg.hostStart, arg.transcriptPath, arg.cwd, arg.now, arg.now);
+      `INSERT INTO sessions (client, cli_session_id, handle, host_pid, host_start, host_machine, transcript_path, cwd, state, state_at, started_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
+    ).run(arg.client, arg.cliSessionId, arg.handle, arg.hostPid, arg.hostStart, arg.hostMachine, arg.transcriptPath, arg.cwd, arg.now, arg.now);
     return Number(info.lastInsertRowid);
   }
 
@@ -810,6 +818,7 @@ export class Store {
       cliSessionId?: string | null;
       hostPid?: number;
       hostStart?: string;
+      hostMachine?: string | null;
       transcriptPath?: string | null;
       cwd?: string | null;
       state?: string;
@@ -823,6 +832,7 @@ export class Store {
       ['cliSessionId', 'cli_session_id'],
       ['hostPid', 'host_pid'],
       ['hostStart', 'host_start'],
+      ['hostMachine', 'host_machine'],
       ['transcriptPath', 'transcript_path'],
       ['cwd', 'cwd'],
       ['state', 'state'],

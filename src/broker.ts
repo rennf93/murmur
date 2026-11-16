@@ -225,7 +225,8 @@ function reqHost(value: unknown): HostRef {
     throw badRequest('host must be an object');
   }
   const rec = value as Record<string, unknown>;
-  return { hostPid: reqNumber(rec, 'hostPid'), hostStart: reqString(rec, 'hostStart') };
+  const machine = optString(rec, 'machine');
+  return { hostPid: reqNumber(rec, 'hostPid'), hostStart: reqString(rec, 'hostStart'), ...(machine !== undefined ? { machine } : {}) };
 }
 
 function reqEnum<T extends string>(rec: Record<string, unknown>, key: string, allowed: readonly T[]): T {
@@ -272,7 +273,7 @@ export class Broker {
     this.wakeFn = opts.wake ?? defaultWake;
     this.core.hasTools = (handle) => this.presence.has(handle);
     this.core.hostConnected = (host) =>
-      [...this.conns].some((c) => c.live && c.host?.hostPid === host.hostPid && c.host.hostStart === host.hostStart);
+      [...this.conns].some((c) => c.live && c.host !== null && this.atRow(c.host, host));
     this.proof = new ProofWatcher((messageId, recipient) => this.onProof(messageId, recipient), opts.proofPollMs);
   }
 
@@ -576,6 +577,7 @@ export class Broker {
     const role = optString(rec, 'role');
     const host = rec.host === undefined ? undefined : reqHost(rec.host);
     const ancestors = optNumberArray(rec, 'ancestors');
+    const machine = optString(rec, 'machine');
     const client = optEnum<CliName>(rec, 'client', CLI_NAMES) ?? 'other';
     const cwd = optString(rec, 'cwd');
     const owner = optBool(rec, 'owner') === true;
@@ -593,7 +595,7 @@ export class Broker {
     if (owner) {
       resolved = this.ownerHandle();
       if (ancestors !== undefined) {
-        conn.via = this.core.sessionForAncestors(ancestors)?.handle ?? null;
+        conn.via = this.core.sessionForAncestors(ancestors, machine)?.handle ?? null;
       }
     } else if (host !== undefined) {
       const session = this.core.sessionForHost(host);
@@ -609,7 +611,7 @@ export class Broker {
       resolved = handle === undefined ? session.handle : this.core.renameSession(session, handle);
       this.rebind(session.handle, resolved, session);
     } else if (ancestors !== undefined && handle === undefined) {
-      resolved = this.core.sessionForAncestors(ancestors)?.handle ?? this.ownerHandle();
+      resolved = this.core.sessionForAncestors(ancestors, machine)?.handle ?? this.ownerHandle();
     } else if (handle !== undefined) {
       resolved = this.core.register({ handle }).handle;
     } else {
@@ -647,6 +649,16 @@ export class Broker {
     return null;
   }
 
+  // A connection's host reference against a stored session host: pid, start
+  // and machine (null is this broker's own machine).
+  private atRow(ref: HostRef, row: { hostPid: number; hostStart: string; hostMachine: string | null }): boolean {
+    return ref.hostPid === row.hostPid && ref.hostStart === row.hostStart && this.core.machineKey(ref) === row.hostMachine;
+  }
+
+  private sameRef(a: HostRef, b: HostRef): boolean {
+    return a.hostPid === b.hostPid && a.hostStart === b.hostStart && this.core.machineKey(a) === this.core.machineKey(b);
+  }
+
   private async handleSession(conn: ConnState, rec: Record<string, unknown>): Promise<SessionResult> {
     const event = reqEnum<HookEvent>(rec, 'event', HOOK_EVENTS);
     const client = reqEnum<CliName>(rec, 'client', CLI_NAMES);
@@ -666,7 +678,7 @@ export class Broker {
       native = { socketPath: reqString(nat, 'socketPath'), token: reqString(nat, 'token') };
     }
     // A title can rename the session, so find the name it had before.
-    const before = (cliSessionId === null ? null : this.store.sessionByCliId(client, cliSessionId)) ?? this.store.sessionByHost(host.hostPid, host.hostStart);
+    const before = (cliSessionId === null ? null : this.store.sessionByCliId(client, cliSessionId)) ?? this.core.sessionForHost(host);
     const session = this.core.sessionEvent({
       event,
       client,
@@ -687,7 +699,7 @@ export class Broker {
     // MCP servers of this session that registered before it announced itself.
     for (const other of this.conns) {
       const pending = other.pendingHost;
-      if (pending !== null && pending.host.hostPid === host.hostPid && pending.host.hostStart === host.hostStart) {
+      if (pending !== null && this.sameRef(pending.host, host)) {
         this.bind(other, session.handle, other.live);
       }
     }
@@ -1303,13 +1315,13 @@ export class Broker {
   // it. Ended sessions left on the old name do not count.
   // While another session still holds the old name, only the connections of
   // the renamed session's own process follow.
-  private rebind(from: string, to: string, moved: HostRef): void {
+  private rebind(from: string, to: string, moved: { hostPid: number; hostStart: string; hostMachine: string | null }): void {
     const shared = this.core.holdsHandle(from);
     if (from === to || (!shared && !this.core.claimable(from, null))) {
       return;
     }
     for (const conn of this.conns) {
-      if (conn.handle === from && (!shared || (conn.host?.hostPid === moved.hostPid && conn.host.hostStart === moved.hostStart))) {
+      if (conn.handle === from && (!shared || (conn.host !== null && this.atRow(conn.host, moved)))) {
         this.bind(conn, to, conn.live);
       }
     }

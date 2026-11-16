@@ -25,7 +25,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { connect, type Socket } from "node:net";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -41,7 +41,7 @@ const RECONNECT_MS = 5000;
 const REQUEST_TIMEOUT_MS = 30_000;
 
 type Json = Record<string, unknown>;
-interface Host { hostPid: number; hostStart: string }
+interface Host { hostPid: number; hostStart: string; machine: string }
 
 // ---------------------------------------------------------------------------
 // socket client (request/reply by id, events to a callback)
@@ -150,7 +150,27 @@ function readHost(): Host {
 	} catch {
 		// broker will treat the host as unverifiable
 	}
-	return { hostPid: process.pid, hostStart };
+	return { hostPid: process.pid, hostStart, machine: machineId() };
+}
+
+// The machine id the broker keeps with a host (src/machine.ts): the boot id,
+// the host name when there is none.
+function machineId(): string {
+	try {
+		const raw =
+			process.platform === "linux"
+				? readFileSync("/proc/sys/kernel/random/boot_id", "utf8")
+				: process.platform === "darwin"
+					? execFileSync("sysctl", ["-n", "kern.bootsessionuuid"], { encoding: "utf8" })
+					: "";
+		const uuid = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.exec(raw);
+		if (uuid !== null) {
+			return uuid[0].toLowerCase();
+		}
+	} catch {
+		// fall back to the host name
+	}
+	return hostname();
 }
 
 function text(s: string, isError = false): { content: { type: "text"; text: string }[]; details: undefined; isError?: boolean } {

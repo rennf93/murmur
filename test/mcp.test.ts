@@ -118,12 +118,12 @@ function freshHome(): string {
   return home;
 }
 
-async function buildStack(): Promise<Stack> {
+async function buildStack(now?: () => number): Promise<Stack> {
   const home = freshHome();
   const paths = getPaths(home);
   ensureHome(paths);
   const store = Store.open(paths.dbPath);
-  const core = new MurmurCore(store, { onAppend: () => {}, onStateChange: () => {} }, undefined, () => FAKE_TABLE);
+  const core = new MurmurCore(store, { onAppend: () => {}, onStateChange: () => {} }, now, () => FAKE_TABLE);
   const broker = await Broker.start({ paths, store, core });
   const stack: Stack = { home, paths, token: readToken(paths), store, core, broker };
   stacks.push(stack);
@@ -282,8 +282,8 @@ describe('identity helpers', () => {
 
   it('identityFor is empty without a host and carries host, client and cwd with one', () => {
     expect(identityFor(null, { CLAUDECODE: '1' }, '/work')).toEqual({});
-    expect(identityFor(HOST, { GEMINI_CLI: '1' }, '/work')).toEqual({
-      host: { hostPid: 9001, hostStart: 'S1' },
+    expect(identityFor(HOST, { GEMINI_CLI: '1' }, '/work', 'omen#boot')).toEqual({
+      host: { hostPid: 9001, hostStart: 'S1', machine: 'omen#boot' },
       client: 'gemini',
       cwd: '/work',
     });
@@ -744,6 +744,32 @@ describe('a rename of one session sharing a handle', () => {
     expect(stack.store.threadMessages(fromMover.threadId, null)[0]?.sender).toBe('proveground-s4c-bait');
   });
 
+  it('matches the host by machine too: a twin with the same pid and start on another machine keeps its connection', async () => {
+    hostState.host = HOST;
+    const stack = await buildStack();
+    const twin: HostInfo = { hostPid: HOST.hostPid, hostStart: HOST.hostStart, ancestors: [HOST.hostPid] };
+    const ref = (host: HostInfo, machine?: string) => ({ ...hostRef(host), ...(machine !== undefined ? { machine } : {}) });
+    const first = stack.core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'twin', host: ref(twin, 'mac#boot-9'), cwd: '/w/guard', source: 'startup' });
+    const second = stack.core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'local', host: ref(HOST), cwd: '/w/guard', source: 'startup' });
+    expect(first.id).not.toBe(second.id);
+    // Both machines' sessions hold one handle (an older row), and both are alive.
+    stack.store.reassignSession(first.id, first.handle, second.handle, false);
+    const connect = async (host: HostInfo, machine?: string): Promise<Pair> => {
+      const made = await pair(stack, identityFor(host, { CLAUDECODE: '1' }, '/w/guard'));
+      await req<RegisterResult>(made.murmur, { type: 'register', clientKind: 'mcp', host: ref(host, machine), client: 'claude', cwd: '/w/guard' });
+      return made;
+    };
+    const stayer = await connect(twin, 'mac#boot-9');
+    const mover = await connect(HOST);
+    stack.core.register({ handle: 'target' });
+    const hook = await connectRaw(stack, 'hookish');
+    await req(hook.client, { type: 'session', event: 'prompt', client: 'claude', cliSessionId: 'local', host: ref(HOST), title: 'Proveground S4c: bait' });
+    const fromStayer = await call<{ threadId: number }>(stayer.sdk, 'murmur_send', { to: ['target'], body: 'same pid and start, another machine', mode: 'silent' });
+    const fromMover = await call<{ threadId: number }>(mover.sdk, 'murmur_send', { to: ['target'], body: 'the renamed one', mode: 'silent' });
+    expect(stack.store.threadMessages(fromStayer.threadId, null)[0]?.sender).toBe(second.handle);
+    expect(stack.store.threadMessages(fromMover.threadId, null)[0]?.sender).toBe('proveground-s4c-bait');
+  });
+
   it('leaves the other session on its handle when murmur_name renames one', async () => {
     const { stack, remote, local, shared } = await setup();
     const named = await call<RegisterResult>(local.sdk, 'murmur_name', { handle: 'chosen' });
@@ -754,5 +780,81 @@ describe('a rename of one session sharing a handle', () => {
     expect(stack.store.threadMessages(fromRemote.threadId, null)[0]?.sender).toBe(shared);
     expect(stack.store.sessionByCliId('claude', 'remote')?.handle).toBe(shared);
     expect(stack.store.sessionByCliId('claude', 'local')?.handle).toBe('chosen');
+  });
+});
+
+// Machines at the broker: what a connection and a rename see.
+describe('sessions of two machines at one broker', () => {
+  const MAC = 'mac-boot';
+  const ref = (host: HostInfo, machine?: string) => ({ hostPid: host.hostPid, hostStart: host.hostStart, ...(machine !== undefined ? { machine } : {}) });
+  const connect = async (stack: Stack, host: HostInfo, machine?: string): Promise<Pair> => {
+    const made = await pair(stack, identityFor(host, { CLAUDECODE: '1' }, '/w/guard'));
+    await req<RegisterResult>(made.murmur, { type: 'register', clientKind: 'mcp', host: ref(host, machine), client: 'claude', cwd: '/w/guard' });
+    return made;
+  };
+  const start = (stack: Stack, cli: string, host: HostInfo, machine?: string, title?: string) =>
+    stack.core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: cli, host: ref(host, machine), cwd: '/w/guard', source: 'startup', ...(title !== undefined ? { title } : {}) });
+
+  it('does not bind a connection waiting for its session to a session of another machine with the same pid and start', async () => {
+    hostState.host = HOST;
+    const stack = await buildStack();
+    const waiting = await connect(stack, HOST);
+    stack.core.register({ handle: 'target' });
+    const hook = await connectRaw(stack, 'hookish');
+    await req(hook.client, { type: 'session', event: 'session-start', client: 'claude', cliSessionId: 'mac', host: ref(HOST, MAC), cwd: '/w/mac' });
+    const sent = await call<{ threadId: number }>(waiting.sdk, 'murmur_send', { to: ['target'], body: 'from the local host', mode: 'silent' });
+    const sender = stack.store.threadMessages(sent.threadId, null)[0]?.sender;
+    expect(sender).not.toBe(stack.store.sessionByCliId('claude', 'mac')?.handle);
+    expect(stack.store.sessionByHost(HOST.hostPid, HOST.hostStart, null)?.handle).toBe(sender);
+  });
+
+  it('keeps a session of another machine alive past the lease only for a connection of its own machine', async () => {
+    hostState.host = HOST;
+    let clock = 1_000_000;
+    const stack = await buildStack(() => clock);
+    const row = start(stack, 'mac', HOST, MAC);
+    clock += 13 * 60 * 60 * 1000;
+    const wrong = await connect(stack, HOST, 'another-machine');
+    expect(stack.core.claimable(row.handle, null)).toBe(true);
+    const right = await connect(stack, HOST, MAC);
+    expect(stack.core.claimable(row.handle, null)).toBe(false);
+    right.murmur.close();
+    expect(wrong.sdk).toBeDefined();
+  });
+
+  it('moves the connections of the renamed session only, by machine as well as pid and start', async () => {
+    hostState.host = HOST;
+    const stack = await buildStack();
+    const twin: HostInfo = { hostPid: HOST.hostPid, hostStart: HOST.hostStart, ancestors: [HOST.hostPid] };
+    const remote = start(stack, 'twin', twin, MAC);
+    const local = start(stack, 'local', HOST);
+    expect(remote.handle).not.toBe(local.handle);
+    const stayer = await connect(stack, twin, MAC);
+    const mover = await connect(stack, HOST);
+    stack.core.register({ handle: 'target' });
+    const hook = await connectRaw(stack, 'hookish');
+    await req(hook.client, { type: 'session', event: 'prompt', client: 'claude', cliSessionId: 'local', host: ref(HOST), title: 'Proveground S4c: bait' });
+    const fromStayer = await call<{ threadId: number }>(stayer.sdk, 'murmur_send', { to: ['target'], body: 'the other machine', mode: 'silent' });
+    const fromMover = await call<{ threadId: number }>(mover.sdk, 'murmur_send', { to: ['target'], body: 'the renamed one', mode: 'silent' });
+    expect(stack.store.threadMessages(fromStayer.threadId, null)[0]?.sender).toBe(remote.handle);
+    expect(stack.store.threadMessages(fromMover.threadId, null)[0]?.sender).toBe('proveground-s4c-bait');
+  });
+
+  it('lets a connection that names no host follow a rename when the old handle keeps only a crashed session', async () => {
+    hostState.host = HOST;
+    const stack = await buildStack();
+    // The crashed session of this machine: no process, never ended; the new one takes its handle.
+    const crashed = start(stack, 'crashed', { hostPid: 7001, hostStart: 'S7001', ancestors: [7001] });
+    const local = start(stack, 'local', HOST);
+    expect(local.handle).toBe(crashed.handle);
+    // Naming it onto an existing peer reassigns the session and leaves the crashed row on the old handle.
+    stack.core.register({ handle: 'proveground-s4c-bait' });
+    const bystander = await connectRaw(stack, crashed.handle);
+    stack.core.register({ handle: 'target' });
+    const hook = await connectRaw(stack, 'hookish');
+    await req(hook.client, { type: 'session', event: 'prompt', client: 'claude', cliSessionId: 'local', host: ref(HOST), title: 'Proveground S4c: bait' });
+    expect(stack.store.sessionByCliId('claude', 'crashed')?.handle).toBe(crashed.handle);
+    const sent = await req<{ threadId: number }>(bystander.client, { type: 'send', threadId: null, to: ['target'], body: 'no live holder remains', mode: 'silent' });
+    expect(stack.store.threadMessages(sent.threadId, null)[0]?.sender).toBe('proveground-s4c-bait');
   });
 });

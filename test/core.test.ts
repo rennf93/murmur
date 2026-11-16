@@ -1440,6 +1440,17 @@ describe('renaming a session that shares its handle', () => {
   const MAC = { hostPid: 51234, hostStart: 'Mon Nov 16 09:30:00 2026' };
   const SIBLING = { hostPid: 51300, hostStart: 'Mon Nov 16 09:31:00 2026' };
   const base = 'claude-guard-core-ecosystem';
+  // The sessions of the other machine share the handle because the broker
+  // cannot see their pids; an open connection of their host then keeps them
+  // alive, which is what makes them a live sibling.
+  let linked = false;
+  const link = (): void => {
+    linked = true;
+  };
+  beforeEach(() => {
+    linked = false;
+    core.hostConnected = (h) => linked && (h.hostPid === MAC.hostPid || h.hostPid === SIBLING.hostPid);
+  });
 
   const open = (cli: string, host: { hostPid: number; hostStart: string }, cwd: string, title?: string) =>
     core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: cli, host, cwd, source: 'startup', ...(title !== undefined ? { title } : {}) });
@@ -1452,6 +1463,7 @@ describe('renaming a session that shares its handle', () => {
     expect([mac.handle, local.handle]).toEqual([base, base]);
     register('target');
     const sent = core.send(mac.handle, { threadId: null, to: ['target'], body: 'from the mac session' });
+    link();
     const titled = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'omen', host: omen, title: 'Proveground S4c: bait, canaries, browser' });
     expect(titled.handle).toBe('proveground-s4c-bait-canaries-browser');
     expect(handles()).toEqual(['mac=' + base, 'omen=proveground-s4c-bait-canaries-browser']);
@@ -1466,6 +1478,7 @@ describe('renaming a session that shares its handle', () => {
     expect([local.handle, mac.handle]).toEqual([base, base]);
     register('target');
     const sent = core.send(local.handle, { threadId: null, to: ['target'], body: 'from the local session' });
+    link();
     core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'mac', host: MAC, title: 'Ledger, Implementer, Companion - Claude 6' });
     expect(handles()).toEqual(['mac=ledger-implementer-companion-claude-6', 'omen=' + base]);
     expect(store.messageById(sent.result.messageId)?.sender).toBe(base);
@@ -1477,6 +1490,7 @@ describe('renaming a session that shares its handle', () => {
     open('mac-2', SIBLING, '/Users/renzof/Documents/guard-core-ecosystem');
     open('omen', omen, '/home/renzof/Documents/guard-core-ecosystem');
     expect(store.listSessions().map((r) => r.handle)).toEqual([base, base, base]);
+    link();
     core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'mac-2', host: SIBLING, title: 'Archify - Guard Core Ecosystem 4' });
     core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'omen', host: omen, title: 'Proveground S4c: bait' });
     expect(handles()).toEqual(['mac-1=' + base, 'mac-2=archify-guard-core-ecosystem-4', 'omen=proveground-s4c-bait']);
@@ -1486,6 +1500,7 @@ describe('renaming a session that shares its handle', () => {
     const omen = alive(3816473);
     const mac = open('mac', MAC, '/Users/renzof/Documents/guard-core-ecosystem');
     const local = open('omen', omen, '/home/renzof/Documents/guard-core-ecosystem');
+    link();
     expect(core.renameSession(local, 'chosen-name')).toBe('chosen-name');
     expect(handles()).toEqual(['mac=' + base, 'omen=chosen-name']);
     expect(store.sessionById(local.id)?.pinned).toBe(true);
@@ -1497,6 +1512,7 @@ describe('renaming a session that shares its handle', () => {
     const mac = open('mac', MAC, '/Users/renzof/Documents/guard-core-ecosystem');
     open('omen', omen, '/home/renzof/Documents/guard-core-ecosystem');
     core.registerNative({ handle: mac.handle, socketPath: '/tmp/shared.sock', token: 't' });
+    link();
     core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'omen', host: omen, title: 'Proveground S4c: bait' });
     expect(store.getNativeTransport(base)).not.toBeNull();
     expect(store.getNativeTransport('proveground-s4c-bait')).toBeNull();
@@ -1510,6 +1526,7 @@ describe('renaming a session that shares its handle', () => {
     store.addMember('crew', local.handle, now);
     core.registerNative({ handle: local.handle, socketPath: '/tmp/own.sock', token: 't' });
     const sent = core.send(local.handle, { threadId: null, to: ['target'], body: 'before the title' });
+    link();
     core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'omen', host: omen, title: 'Proveground S4c: bait' });
     expect(store.messageById(sent.result.messageId)?.sender).toBe('proveground-s4c-bait');
     expect(store.listGroups().find((g) => g.name === 'crew')?.members).toEqual(['proveground-s4c-bait']);
@@ -1526,6 +1543,7 @@ describe('renaming a session that shares its handle', () => {
     store.createGroup('crew', now);
     store.addMember('crew', base, now);
     const sent = core.send('target', { threadId: null, to: [base], body: 'waiting for whoever holds the handle' });
+    link();
     core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'omen', host: omen, title: 'Proveground S4c: bait' });
     expect(store.listGroups().find((g) => g.name === 'crew')?.members).toEqual([base]);
     expect(store.getPeer(base)?.role).toBe('ledger for the 5.0.0 work');
@@ -1542,6 +1560,7 @@ describe('renaming a session that shares its handle', () => {
     open('live', SIBLING, '/Users/renzof/Documents/guard-core-ecosystem');
     open('omen', omen, '/home/renzof/Documents/guard-core-ecosystem');
     core.sessionEvent({ event: 'session-end', client: 'claude', cliSessionId: 'gone', host: MAC });
+    link();
     core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'omen', host: omen, title: 'Proveground S4c: bait' });
     expect(handles()).toEqual(['gone=' + base, 'live=' + base, 'omen=proveground-s4c-bait']);
     expect(store.sessionById(ended.id)?.state).toBe('ended');
@@ -1555,6 +1574,7 @@ describe('renaming a session that shares its handle', () => {
     core.sessionEvent({ event: 'session-end', client: 'claude', cliSessionId: 'gone', host: MAC });
     const local = open('omen', omen, '/home/renzof/Documents/guard-core-ecosystem');
     expect(local.handle).toBe(base);
+    link();
     core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'omen', host: omen, title: 'Proveground S4c: bait' });
     expect(handles()).toEqual(['gone=proveground-s4c-bait', 'omen=proveground-s4c-bait']);
     expect(store.messageById(sent.result.messageId)?.sender).toBe('proveground-s4c-bait');
@@ -1567,6 +1587,7 @@ describe('renaming a session that shares its handle', () => {
     core.registerNative({ handle: mac.handle, socketPath: '/tmp/shared.sock', token: 't' });
     register('ghost');
     core.registerNative({ handle: 'ghost', socketPath: '/tmp/ghost.sock', token: 'g' });
+    link();
     expect(core.renameSession(local, 'ghost')).toBe('ghost');
     expect(store.getNativeTransport('ghost')).toBeNull();
     expect(store.getNativeTransport(base)).toMatchObject({ socketPath: '/tmp/shared.sock' });
@@ -1577,21 +1598,20 @@ describe('renaming a session that shares its handle', () => {
     const omen = alive(3816473);
     open('mac', MAC, '/Users/renzof/Documents/guard-core-ecosystem');
     const local = open('omen', omen, '/home/renzof/Documents/guard-core-ecosystem');
+    link();
     core.renameSession(local, 'fresh-name');
     expect(store.getPeer('fresh-name')).toMatchObject({ handle: 'fresh-name', display: null, role: null });
   });
 
-  it('counts a session that never sent SessionEnd as a sibling, so a restart in the same folder is not renamed with it', () => {
+  it('does not count a crashed session of this machine as a sibling: a restart in the same folder carries its groups', () => {
     const omen = alive(3816473);
-    // The first session crashed: its row never ended and its process is gone.
-    open('crashed', MAC, '/home/renzof/Documents/guard-core-ecosystem');
+    open('crashed', { hostPid: 7001, hostStart: 'S7001' }, '/home/renzof/Documents/guard-core-ecosystem');
     store.createGroup('crew', now);
     store.addMember('crew', base, now);
     const restarted = open('restarted', omen, '/home/renzof/Documents/guard-core-ecosystem');
     expect(restarted.handle).toBe(base);
     core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'restarted', host: omen, title: 'Proveground S4c: bait' });
-    // Known limit: nothing tells a crashed session from a live one of another machine.
-    expect(handles()).toEqual(['crashed=' + base, 'restarted=proveground-s4c-bait']);
-    expect(store.listGroups().find((g) => g.name === 'crew')?.members).toEqual([base]);
+    expect(handles()).toEqual(['crashed=proveground-s4c-bait', 'restarted=proveground-s4c-bait']);
+    expect(store.listGroups().find((g) => g.name === 'crew')?.members).toEqual(['proveground-s4c-bait']);
   });
 });

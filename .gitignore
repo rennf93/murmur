@@ -8,3 +8,4 @@ coverage/
 serve.log
 site/
 .DS_Store
+!test/fixtures/*.db

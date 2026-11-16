@@ -1,4 +1,5 @@
 import { basename } from 'node:path';
+import { thisMachine } from './machine.js';
 import { isAlive, liveTable } from './proc.js';
 import type { ProcTable } from './proc.js';
 import { Store } from './store.js';
@@ -83,6 +84,9 @@ const UNREAD_STATES: string[] = ['queued', 'sent', 'delivered'];
 // are never acked fill the cap and block every later reply to the asker.
 const BACKLOG_STATES: string[] = ['queued', 'sent'];
 const OFFLINE_AFTER_MS = 5 * 60 * 1000;
+// A session of another machine counts as alive this long after its last event
+// (its hooks only fire on a prompt or a stop, so an idle session is quiet).
+const REMOTE_LEASE_MS = 12 * 60 * 60 * 1000;
 
 // A session title as a handle: lowercase, runs of anything else become one
 // hyphen, trimmed, cut to the handle limit. Not necessarily a valid handle.
@@ -203,16 +207,30 @@ export class MurmurCore {
   // Set by the broker: is a live mcp or adapter connection open from this
   // host. A session on another machine has no process here to look up, so
   // that connection is its liveness.
-  hostConnected: (host: HostRef) => boolean = () => false;
+  hostConnected: (host: { hostPid: number; hostStart: string; hostMachine: string | null }) => boolean = () => false;
   // Process table source for session liveness, asked only for the pids that
   // matter; injectable for tests.
   private readonly procTable: (pids: number[]) => ProcTable;
+  // The machine this broker runs on: its host references are judged by the
+  // process table, every other machine's by a lease.
+  private readonly machine: string;
 
-  constructor(store: Store, events: CoreEvents, now?: () => number, procTable?: (pids: number[]) => ProcTable) {
+  constructor(store: Store, events: CoreEvents, now?: () => number, procTable?: (pids: number[]) => ProcTable, machine?: string) {
     this.store = store;
     this.events = events;
     this.nowFn = now ?? Date.now;
     this.procTable = procTable ?? ((pids) => liveTable(pids));
+    this.machine = machine ?? thisMachine();
+  }
+
+  // The machine a host reference names as stored: null for this broker's own
+  // machine and for a client that sends none.
+  machineKey(host: { machine?: string }): string | null {
+    return host.machine === undefined || host.machine === this.machine ? null : host.machine;
+  }
+
+  private rowAt(host: HostRef): SessionRow | null {
+    return this.store.sessionByHost(host.hostPid, host.hostStart, this.machineKey(host));
   }
 
   private nowMs(): number {
@@ -765,7 +783,7 @@ export class MurmurCore {
   sessionEvent(arg: SessionEventArg): SessionRow {
     const ts = this.nowMs();
     let row = arg.cliSessionId === null ? null : this.store.sessionByCliId(arg.client, arg.cliSessionId);
-    row ??= this.store.sessionByHost(arg.host.hostPid, arg.host.hostStart);
+    row ??= this.rowAt(arg.host);
     if (row === null) {
       const explicit = arg.handle !== undefined && this.claimable(arg.handle, null);
       const slug = arg.title === undefined ? '' : slugify(arg.title);
@@ -781,6 +799,7 @@ export class MurmurCore {
         handle,
         hostPid: arg.host.hostPid,
         hostStart: arg.host.hostStart,
+        hostMachine: this.machineKey(arg.host),
         transcriptPath: arg.transcriptPath ?? null,
         cwd: arg.cwd ?? null,
         now: ts,
@@ -794,6 +813,7 @@ export class MurmurCore {
         client: arg.client,
         hostPid: arg.host.hostPid,
         hostStart: arg.host.hostStart,
+        hostMachine: this.machineKey(arg.host),
         updatedAt: ts,
         ...(arg.cliSessionId !== null ? { cliSessionId: arg.cliSessionId } : {}),
         ...(arg.transcriptPath !== undefined ? { transcriptPath: arg.transcriptPath } : {}),
@@ -810,10 +830,14 @@ export class MurmurCore {
       fresh = this.followTitle(fresh, arg.title);
     }
     if (arg.native !== undefined) {
-      this.store.upsertNativeTransport(fresh.handle, arg.native.socketPath, arg.native.token, ts);
+      if (!this.sharesHandle(fresh)) {
+        this.store.upsertNativeTransport(fresh.handle, arg.native.socketPath, arg.native.token, ts);
+      }
     }
     if (arg.event === 'session-end') {
-      this.store.deleteNativeTransport(fresh.handle);
+      if (!this.sharesHandle(fresh)) {
+        this.store.deleteNativeTransport(fresh.handle);
+      }
     }
     return fresh;
   }
@@ -836,7 +860,7 @@ export class MurmurCore {
   // itself. With create, a missing session is made on the spot (an MCP
   // server whose hooks never ran still gets an identity).
   sessionForHost(host: HostRef, create?: { client: CliName; cwd?: string }): SessionRow | null {
-    const row = this.store.sessionByHost(host.hostPid, host.hostStart);
+    const row = this.rowAt(host);
     if (row !== null || create === undefined) {
       return row;
     }
@@ -845,10 +869,11 @@ export class MurmurCore {
 
   // The nearest live session whose host is one of these ancestors (nearest
   // first), or null: a shell command run by an agent speaks as its session.
-  sessionForAncestors(ancestors: number[]): SessionRow | null {
+  sessionForAncestors(ancestors: number[], machine?: string): SessionRow | null {
+    const at = this.machineKey({ ...(machine !== undefined ? { machine } : {}) });
     const candidates = this.store
       .listSessions()
-      .filter((row) => row.state !== 'ended' && ancestors.includes(row.hostPid));
+      .filter((row) => row.state !== 'ended' && row.hostMachine === at && ancestors.includes(row.hostPid));
     const table = this.safeProcTable(candidates.map((row) => row.hostPid));
     const live = candidates.filter((row) => this.alive(table, row));
     for (const pid of ancestors) {
@@ -881,13 +906,13 @@ export class MurmurCore {
     if (!this.claimable(handle, row.id)) {
       throw new MurmurError('bad_request', 'handle ' + handle + ' is taken by a live session or the owner');
     }
-    // A handle can be held by several sessions at once (a session of another
-    // machine looks dead to this broker, so its handle reads free). Renaming
-    // the identity would carry them all along and rewrite their history, so
-    // while another session that has not ended holds the old handle, only this
+    // A handle can still be held by several sessions at once (a client that
+    // sends no machine id looks dead to this broker when it runs elsewhere).
+    // Renaming the identity would carry them all along and rewrite their
+    // history, so while another live session holds the old handle, only this
     // session moves.
     const others = this.store.sessionsForHandle(row.handle).filter((r) => r.id !== row.id);
-    const shared = others.some((r) => r.state !== 'ended');
+    const shared = this.liveHolders(row.handle, row.id).length > 0;
     if (!shared && this.store.getPeer(handle) === null) {
       this.store.renamePeer(row.handle, handle);
       return handle;
@@ -922,7 +947,21 @@ export class MurmurCore {
   // True when a session that has not ended holds the handle, whether or not
   // this machine can see its process.
   holdsHandle(handle: string): boolean {
-    return this.store.sessionsForHandle(handle).some((row) => row.state !== 'ended');
+    return this.liveHolders(handle, null).length > 0;
+  }
+
+  // True while another live session holds this session's handle:
+  // the handle's one native transport is theirs too, so neither may replace
+  // or delete it.
+  private sharesHandle(row: SessionRow): boolean {
+    return this.liveHolders(row.handle, row.id).length > 0;
+  }
+
+  // The live sessions holding the handle, other than exceptId.
+  private liveHolders(handle: string, exceptId: number | null): SessionRow[] {
+    const rows = this.store.sessionsForHandle(handle).filter((r) => r.id !== exceptId && r.state !== 'ended');
+    const table = this.safeProcTable(rows.map((r) => r.hostPid));
+    return rows.filter((r) => this.alive(table, r));
   }
 
   // A handle can be claimed when it is valid, not the owner's, and no live
@@ -953,8 +992,15 @@ export class MurmurCore {
     return handle;
   }
 
+  // A session of this machine is alive while its process is, as the process
+  // table shows it. This broker cannot see the process of another machine's
+  // session, so that one is alive while a connection of its host is open or for
+  // a lease after its last event. Callers pass sessions that have not ended.
   private alive(table: ProcTable, row: SessionRow): boolean {
-    return isAlive(table, row.hostPid, row.hostStart) || this.hostConnected(row);
+    if (this.hostConnected(row)) {
+      return true;
+    }
+    return row.hostMachine === null ? isAlive(table, row.hostPid, row.hostStart) : this.nowMs() - row.updatedAt <= REMOTE_LEASE_MS;
   }
 
   private safeProcTable(pids: number[]): ProcTable {
