@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import type { Socket } from 'node:net';
@@ -130,16 +131,28 @@ describe('session events', () => {
     });
   });
 
-  it('keeps two sessions of one host process apart unless the start is a clear', async () => {
+  it('keeps two sessions of one host process apart, and a clear continues the one that just ended', async () => {
     const stack = await buildStack();
-    const start = (id: string, source: string, event: 'session-start' | 'prompt' = 'session-start'): Promise<unknown> =>
+    const hook = (event: 'session-start' | 'prompt' | 'session-end', id: string, source: string): Promise<unknown> =>
       runHook(event, JSON.stringify({ session_id: id, cwd: '/work/proj', source }), envFor(stack), { host: HOST });
-    await start('s1', 'startup');
-    await start('s2', 'startup');
-    expect(stack.store.sessionsByHost(HOST.hostPid, HOST.hostStart).map((r) => r.cliSessionId).sort()).toEqual(['s1', 's2']);
-    await start('s3', 'clear');
-    await start('s1', 'resume', 'prompt');
-    expect(stack.store.sessionsByHost(HOST.hostPid, HOST.hostStart)).toHaveLength(2);
+    const ids = (): Array<string | null> => stack.store.sessionsByHost(HOST.hostPid, HOST.hostStart).map((r) => r.cliSessionId).sort();
+    await hook('session-start', 's1', 'startup');
+    await hook('session-start', 's2', 'startup');
+    expect(ids()).toEqual(['s1', 's2']);
+    await hook('session-end', 's1', 'clear');
+    await hook('session-start', 's3', 'clear');
+    expect(ids()).toEqual(['s2', 's3']);
+    await hook('prompt', 's2', 'resume');
+    expect(ids()).toEqual(['s2', 's3']);
+  });
+
+  it('reads a FIFO named as the transcript without blocking and without a title', async () => {
+    const stack = await buildStack();
+    const fifo = join(mkdtempSync(join(tmpdir(), 'murmur-fifo-')), 'x.jsonl');
+    execFileSync('mkfifo', [fifo]);
+    const outcome = await runHook('session-start', JSON.stringify({ session_id: 'f1', transcript_path: fifo, cwd: '/work/proj' }), envFor(stack), { host: HOST });
+    expect(outcome).toEqual({ exitCode: 0, stdout: '' });
+    expect(stack.store.sessionByCliId('claude', 'f1')?.handle).toBe('claude-proj');
   });
 
   it('defaults the client to claude, and a bare session gets the plain client handle', async () => {

@@ -614,6 +614,26 @@ describe('send and push', () => {
 });
 
 describe('native transport sends', () => {
+  it('does not push through the native socket while two sessions share the process', async () => {
+    const fake = fakeNative();
+    const stack = await buildStack(fake.fn);
+    const host = { hostPid: 4242, hostStart: 'S4242' };
+    const open = (cli: string) =>
+      stack.core.sessionEvent({
+        event: 'session-start', client: 'claude', cliSessionId: cli, host, cwd: '/w/' + cli, source: 'startup',
+        native: { socketPath: '/tmp/shared.sock', token: 'shared-token' },
+      });
+    const a = open('a');
+    open('b');
+    const alice = await connectPeer(stack, { handle: 'alice' });
+    await req(alice.client, { type: 'send', threadId: null, to: [a.handle], body: 'one' });
+    expect(fake.calls).toHaveLength(0);
+    stack.core.sessionEvent({ event: 'session-end', client: 'claude', cliSessionId: 'b', host });
+    await req(alice.client, { type: 'send', threadId: null, to: [a.handle], body: 'two' });
+    expect(fake.calls).toHaveLength(1);
+    expect(fake.calls[0]?.text).toContain('two');
+  });
+
   it('uses the injected nativeSend on the ok path and marks sent, not delivered', async () => {
     const fake = fakeNative();
     const stack = await buildStack(fake.fn);

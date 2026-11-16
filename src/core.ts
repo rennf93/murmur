@@ -1,8 +1,8 @@
-import { closeSync, fstatSync, openSync, readdirSync, readSync } from 'node:fs';
 import { basename } from 'node:path';
 import { isAlive, liveTable } from './proc.js';
 import type { ProcTable } from './proc.js';
 import { Store } from './store.js';
+import { hasToolUse, newestWriteMs, usableTranscript } from './transcript.js';
 import type { DeliveryRow, MessageRow, PeerRow, SessionRow } from './store.js';
 import {
   DUP_WINDOW_MS,
@@ -77,39 +77,16 @@ export interface SessionEventArg {
   native?: { socketPath: string; token: string };
 }
 
-// Claude Code appends a call's tool_use to the session transcript, so the id
-// is in the tail; a Task subagent's calls go to <transcript minus .jsonl>/
-// subagents/*.jsonl instead. An unreadable file reads as no.
-const TRANSCRIPT_TAIL_BYTES = 256 * 1024;
+// SessionEnd of a clear and the SessionStart that follows it are back to
+// back; this is how long the ended session stays the one a clear continues.
+const CLEAR_WINDOW_MS = 60_000;
 
-function transcriptHas(path: string, needle: string): boolean {
-  if (fileTailHas(path, needle)) {
-    return true;
-  }
-  const dir = path.replace(/\.jsonl$/, '') + '/subagents';
-  try {
-    return readdirSync(dir).some((name) => name.endsWith('.jsonl') && fileTailHas(dir + '/' + name, needle));
-  } catch {
-    return false;
-  }
-}
-
-function fileTailHas(path: string, needle: string): boolean {
-  try {
-    const fd = openSync(path, 'r');
-    try {
-      const size = fstatSync(fd).size;
-      const start = Math.max(0, size - TRANSCRIPT_TAIL_BYTES);
-      const buf = Buffer.alloc(size - start);
-      readSync(fd, buf, 0, buf.length, start);
-      return buf.toString('utf8').includes(needle);
-    } finally {
-      closeSync(fd);
-    }
-  } catch {
-    return false;
-  }
-}
+// A live session whose transcript (and subagent transcripts) have not been
+// written for this long is not making tool calls: a call follows a write
+// within seconds, and the longest silent wait is one tool run (a murmur wait
+// is capped at 5 minutes). Sessions of a process whose SessionEnd never came
+// stop counting as candidates after it.
+const STALE_TRANSCRIPT_MS = 60 * 60 * 1000;
 
 export { HANDLE_RE };
 const GROUP_NAME_RE = /^@?[a-z0-9][a-z0-9-]{1,31}$/;
@@ -431,7 +408,7 @@ export class MurmurCore {
     if (mode !== 'push') {
       return 'queued';
     }
-    return this.store.getNativeTransport(recipient) !== null ? 'native' : 'connection';
+    return this.nativeTransport(recipient) !== null ? 'native' : 'connection';
   }
 
   // A reply is stored once in the thread; only the ones waiting for it are
@@ -802,27 +779,39 @@ export class MurmurCore {
 
   // The session a lifecycle event belongs to, or null for a new one: by the
   // CLI session id, else by the host process (clear mints a new id in the
-  // same process and keeps the session). For Claude, which runs several
-  // sessions in one process in the desktop app, a new id next to a live
-  // session with another id is a second session: a start whose source is not
-  // clear, or any later event of a session whose start was missed. Other CLIs
-  // keep one session per process.
+  // same process and keeps the session). Claude's desktop app runs several
+  // sessions in one process, so for Claude the host row is taken only when it
+  // cannot belong to another live session:
+  // - a clear continues the session that ended just before it (SessionEnd
+  //   comes first), else the only live one; never one of several live ones;
+  // - a start with a new id and a source other than clear is a new session
+  //   when another session of the process is live;
+  // - any other event of an unknown id is a new session when two are live, the
+  //   live one is busy, or it is a SessionEnd, so a host with one idle session keeps adopting as
+  //   before (a session whose start was never seen can still merge with an
+  //   idle one until their turns overlap).
+  // Other CLIs keep one session per process.
   findSession(arg: Pick<SessionEventArg, 'event' | 'client' | 'cliSessionId' | 'host' | 'source'>): SessionRow | null {
     const byId = arg.cliSessionId === null ? null : this.store.sessionByCliId(arg.client, arg.cliSessionId);
     if (byId !== null) {
       return byId;
     }
-    const onHost = this.store.sessionByHost(arg.host.hostPid, arg.host.hostStart);
-    const newSession = arg.event === 'session-start' ? arg.source !== undefined && arg.source !== 'clear' : true;
-    const second =
-      onHost !== null &&
-      arg.client === 'claude' &&
-      arg.cliSessionId !== null &&
-      newSession &&
-      onHost.state !== 'ended' &&
-      onHost.cliSessionId !== null &&
-      onHost.cliSessionId !== arg.cliSessionId;
-    return second ? null : onHost;
+    const rows = this.store.sessionsByHost(arg.host.hostPid, arg.host.hostStart);
+    const live = rows.filter((row) => row.state !== 'ended');
+    if (rows.length === 0 || arg.client !== 'claude' || arg.cliSessionId === null || live.length === 0) {
+      return rows[0] ?? null;
+    }
+    const isStart = arg.event === 'session-start';
+    if (isStart && arg.source === 'clear') {
+      const ended = rows.find((row) => row.state === 'ended' && this.nowMs() - row.updatedAt <= CLEAR_WINDOW_MS);
+      return ended ?? (live.length === 1 ? (live[0] as SessionRow) : null);
+    }
+    if (isStart) {
+      return arg.source !== undefined && live.some((row) => row.cliSessionId !== null) ? null : (rows[0] as SessionRow);
+    }
+    // A session that is working cannot be the one that sent this event, and
+    // the end of an unknown session must not end a live one.
+    return arg.event === 'session-end' || live.length >= 2 || live[0]?.state === 'busy' ? null : (rows[0] as SessionRow);
   }
 
   // A lifecycle event from a hook or an adapter. Finds the session by the
@@ -911,15 +900,46 @@ export class MurmurCore {
 
   // The session behind one MCP tool call. One live session on the host is
   // the answer. With several, the one whose transcript records the call's
-  // tool-use id; ambiguous (the candidates) when none does yet, so the caller
-  // may retry before guessing.
-  sessionForToolUse(host: HostRef, toolUseId: string): { row: SessionRow } | { ambiguous: SessionRow[] } | null {
+  // tool_use id, however long ago it last wrote. Ambiguous otherwise, with the
+  // candidates (sessions quiet for over an hour left out while another is
+  // active); wait says a transcript could still turn up (some candidate has a
+  // readable one), so the caller may look again before guessing.
+  sessionForToolUse(host: HostRef, toolUseId: string): { row: SessionRow } | { ambiguous: SessionRow[]; wait: boolean } | null {
     const live = this.store.sessionsByHost(host.hostPid, host.hostStart).filter((row) => row.state !== 'ended');
     if (live.length <= 1) {
       return live[0] === undefined ? null : { row: live[0] };
     }
-    const named = live.filter((row) => row.transcriptPath !== null && transcriptHas(row.transcriptPath, toolUseId));
-    return named.length === 1 ? { row: named[0] as SessionRow } : { ambiguous: live };
+    const named = live.filter((row) => row.transcriptPath !== null && hasToolUse(row.transcriptPath, toolUseId));
+    if (named.length === 1) {
+      return { row: named[0] as SessionRow };
+    }
+    if (named.length > 1) {
+      return { ambiguous: named, wait: false };
+    }
+    const active = live.filter((row) => row.transcriptPath === null || !this.quiet(row.transcriptPath));
+    const pool = active.length > 0 ? active : live;
+    if (pool.length === 1) {
+      return { row: pool[0] as SessionRow };
+    }
+    return { ambiguous: pool, wait: pool.some((row) => row.transcriptPath !== null && usableTranscript(row.transcriptPath)) };
+  }
+
+  private quiet(transcriptPath: string): boolean {
+    const last = newestWriteMs(transcriptPath);
+    return last !== null && Date.now() - last > STALE_TRANSCRIPT_MS;
+  }
+
+  // The native socket is one per process and names no session, so a push
+  // through it cannot reach one session of several: while another live session
+  // shares the process, a session takes its messages through the hooks.
+  nativeTransport(handle: string): { owner: string; socketPath: string; token: string } | null {
+    const transport = this.store.getNativeTransport(handle);
+    const session = this.store.sessionsForHandle(handle).find((row) => row.state !== 'ended');
+    if (transport === null || session === undefined) {
+      return transport;
+    }
+    const sharing = this.store.sessionsByHost(session.hostPid, session.hostStart).filter((row) => row.state !== 'ended');
+    return sharing.length > 1 ? null : transport;
   }
 
   // Best effort when no transcript names the call: the session working now,

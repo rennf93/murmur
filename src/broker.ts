@@ -105,6 +105,15 @@ interface ConnState {
   chain: Promise<void>;
 }
 
+// The connection a request runs on, and the handle it was attributed to by
+// guess when no transcript named the call.
+interface Speaking {
+  conn: ConnState;
+  // The session the call was attributed to, when one host process serves several.
+  session?: SessionRow;
+  guessedAs?: string;
+}
+
 interface Waiter {
   conn: ConnState;
   id: number;
@@ -264,6 +273,9 @@ export class Broker {
   private readonly presence = new Map<string, ConnState>();
   // Calls attributed by guess (no transcript named them), per session id.
   private readonly guessedCalls = new Map<number, number>();
+  // Request ids whose session was guessed, per socket: the reply carries
+  // guessedAs so the caller sees it.
+  private readonly guessedReplies = new WeakMap<Socket, Map<number, string>>();
   private readonly conns = new Set<ConnState>();
   // Recipient to pending notification payloads, one flush timer per recipient.
   private readonly notifyQueue = new Map<string, NotifyEntry>();
@@ -415,7 +427,8 @@ export class Broker {
     }
     const text = conn.decoder.write(chunk);
     for (const line of conn.reader.feed(text)) {
-      conn.chain = conn.chain.then(() => this.dispatchLine(conn, line));
+      const early = this.resolveEarly(conn, line);
+      conn.chain = conn.chain.then(() => this.dispatchLine(conn, line, early));
     }
   }
 
@@ -449,7 +462,7 @@ export class Broker {
     }
   }
 
-  private async dispatchLine(conn: ConnState, line: string): Promise<void> {
+  private async dispatchLine(conn: ConnState, line: string, early: Promise<Speaking> | null): Promise<void> {
     if (this.stopped || conn.socket.destroyed) {
       return;
     }
@@ -471,7 +484,17 @@ export class Broker {
       return;
     }
     try {
-      await this.handleMessage(await this.speakingConn(conn, rec), rec, id);
+      const speaking = await (early ?? this.speakingConn(conn, rec));
+      if (speaking.conn !== conn && conn.shadows.get(speaking.conn.callSessionId as number) !== speaking.conn) {
+        throw badRequest('the session that made this call has ended');
+      }
+      if (speaking.guessedAs !== undefined) {
+        if (rec.type === 'register' && rec.handle !== undefined) {
+          throw badRequest('cannot tell which session made this call, so it cannot be renamed; try again after your next prompt');
+        }
+        this.noteGuess(conn.socket, id, speaking.guessedAs);
+      }
+      await this.handleMessage(speaking.conn, rec, id, speaking.session);
     } catch (err) {
       if (err instanceof MurmurError) {
         this.replyErr(conn.socket, id, err.code, err.message);
@@ -485,31 +508,34 @@ export class Broker {
   // several sessions serves them all on one connection; a call carrying its
   // tool-use id is attributed to the session whose transcript names it, on a
   // derived connection bound to that session. One session per host (the
-  // usual case) never derives anything.
-  private async speakingConn(conn: ConnState, rec: Record<string, unknown>): Promise<ConnState> {
+  // usual case) never derives anything. guessedAs is set when no transcript
+  // named the call and the busiest session was taken instead.
+  private async speakingConn(conn: ConnState, rec: Record<string, unknown>): Promise<Speaking> {
     const toolUseId = rec.toolUseId;
     if (conn.host === null || typeof toolUseId !== 'string' || conn.callSessionId !== null) {
-      return conn;
+      return { conn };
     }
     let found = this.core.sessionForToolUse(conn.host, toolUseId);
-    for (let attempt = 0; found !== null && 'ambiguous' in found && attempt < CALL_RETRIES; attempt += 1) {
+    for (let attempt = 0; found !== null && 'ambiguous' in found && found.wait && attempt < CALL_RETRIES; attempt += 1) {
       // The transcript may not be flushed yet.
       await new Promise((resolve) => setTimeout(resolve, CALL_RETRY_MS));
       found = this.core.sessionForToolUse(conn.host, toolUseId);
     }
     // A close during the retry already ran onSocketClose: bind nothing now.
     if (found === null || conn.socket.destroyed) {
-      return conn;
+      return { conn };
     }
     let session: SessionRow;
+    let guessedAs: string | undefined;
     if ('row' in found) {
       session = found.row;
     } else {
       session = this.core.guessSession(found.ambiguous);
+      guessedAs = session.handle;
       this.guessedCalls.set(session.id, (this.guessedCalls.get(session.id) ?? 0) + 1);
     }
     if (session.handle === conn.handle) {
-      return conn;
+      return { conn, session, ...(guessedAs !== undefined ? { guessedAs } : {}) };
     }
     let shadow = conn.shadows.get(session.id);
     if (shadow === undefined) {
@@ -518,7 +544,70 @@ export class Broker {
       this.conns.add(shadow);
       this.bind(shadow, session.handle, conn.live);
     }
-    return shadow;
+    return { conn: shadow, session, ...(guessedAs !== undefined ? { guessedAs } : {}) };
+  }
+
+  // Starts resolving a call's session the moment its line arrives, so the
+  // wait for a transcript runs beside the waits of the other calls on this
+  // connection instead of after them. The handlers still run in order.
+  private resolveEarly(conn: ConnState, line: string): Promise<Speaking> | null {
+    if (conn.host === null || conn.callSessionId !== null || !line.includes('"toolUseId"')) {
+      return null;
+    }
+    let rec: unknown;
+    try {
+      rec = JSON.parse(line);
+    } catch {
+      return null;
+    }
+    if (typeof rec !== 'object' || rec === null || Array.isArray(rec)) {
+      return null;
+    }
+    // A failed lookup surfaces as the call's error when the call is
+    // dispatched; the empty catch only keeps it from being unhandled before.
+    const resolving = this.speakingConn(conn, rec as Record<string, unknown>);
+    resolving.catch(() => {});
+    return resolving;
+  }
+
+  // An ended session reads offline while its MCP server stays connected. The
+  // connection keeps its handle, so a clear or a restart that continues the
+  // session gets the presence back (restorePresence).
+  private dropPresence(handle: string): void {
+    if (this.presence.has(handle) && this.core.claimable(handle, null)) {
+      this.presence.delete(handle);
+    }
+  }
+
+  private restorePresence(handle: string): void {
+    if (this.presence.has(handle)) {
+      return;
+    }
+    const holder = [...this.conns].find((conn) => conn.live && conn.handle === handle && conn.callSessionId === null && !conn.socket.destroyed);
+    if (holder !== undefined) {
+      this.presence.set(handle, holder);
+    }
+  }
+
+  // A session ended: the derived connection that spoke for it goes too, with
+  // its presence and waiters.
+  private dropShadows(sessionId: number): void {
+    for (const conn of [...this.conns]) {
+      const shadow = conn.shadows.get(sessionId);
+      if (shadow === undefined) {
+        continue;
+      }
+      conn.shadows.delete(sessionId);
+      this.conns.delete(shadow);
+      // A wait still open ends as a timeout, so its tool call returns.
+      for (const waiter of [...shadow.waiters]) {
+        clearTimeout(waiter.timer);
+        this.resolveTimedOut(waiter);
+      }
+      if (this.presence.get(shadow.handle as string) === shadow) {
+        this.presence.delete(shadow.handle as string);
+      }
+    }
   }
 
   private handleAuthLine(conn: ConnState, rec: Record<string, unknown>, id: number): void {
@@ -550,13 +639,13 @@ export class Broker {
   // Dispatch by type. Every handler path is inside the caller's try, so an
   // unexpected throw lands in the wrap: MurmurError keeps its code, anything
   // else becomes internal.
-  private async handleMessage(conn: ConnState, rec: Record<string, unknown>, id: number): Promise<void> {
+  private async handleMessage(conn: ConnState, rec: Record<string, unknown>, id: number, calling?: SessionRow): Promise<void> {
     const type = typeof rec.type === 'string' ? rec.type : '';
     switch (type) {
       case 'auth':
         throw badRequest('connection is already authenticated');
       case 'register':
-        this.replyOk(conn.socket, id, this.handleRegister(conn, rec));
+        this.replyOk(conn.socket, id, this.handleRegister(conn, rec, calling));
         return;
       case 'hook':
         this.replyOk(conn.socket, id, this.handleHook(conn, rec));
@@ -624,7 +713,7 @@ export class Broker {
   // Handlers.
 
   // See RegisterMessage for the identity rules.
-  private handleRegister(conn: ConnState, rec: Record<string, unknown>): RegisterResult {
+  private handleRegister(conn: ConnState, rec: Record<string, unknown>, calling?: SessionRow): RegisterResult {
     const kind = reqEnum<ClientKind>(rec, 'clientKind', CLIENT_KINDS);
     const handle = optString(rec, 'handle');
     const display = optString(rec, 'display');
@@ -644,7 +733,7 @@ export class Broker {
       }
     } else if (host !== undefined) {
       conn.host = host;
-      const session = conn.callSessionId === null ? this.core.sessionForHost(host) : this.store.sessionById(conn.callSessionId);
+      const session = calling ?? this.core.sessionForHost(host);
       if (session === null) {
         if (handle !== undefined) {
           throw badRequest('this session has not announced itself yet (no hook has run); name it after its first prompt');
@@ -737,9 +826,12 @@ export class Broker {
       }
     }
     if (event === 'session-end') {
+      this.dropShadows(session.id);
+      this.dropPresence(session.handle);
       this.notifyPeerOffline(session.handle);
       return { handle: session.handle };
     }
+    this.restorePresence(session.handle);
     this.proof.recheck(session.handle);
     if (event === 'session-start' || listen) {
       // A session that comes (back) up gets what waited for it.
@@ -1034,7 +1126,7 @@ export class Broker {
     const transcript = session?.transcriptPath ?? null;
     const offset = transcript === null ? 0 : ProofWatcher.offsetOf(transcript);
     let accepted = false;
-    const transport = this.store.getNativeTransport(recipient);
+    const transport = this.core.nativeTransport(recipient);
     if (transport !== null) {
       try {
         accepted = (await this.nativeSendFn(transport.socketPath, transport.token, text)).ok;
@@ -1149,7 +1241,7 @@ export class Broker {
     }
     // No listening adapter: fall back to the native transport as plain text
     // when one exists, otherwise drop the batch (the data stays in the DB).
-    const transport = this.store.getNativeTransport(recipient);
+    const transport = this.core.nativeTransport(recipient);
     if (transport === null) {
       return;
     }
@@ -1391,11 +1483,26 @@ export class Broker {
     return conn.handle;
   }
 
+  private noteGuess(socket: Socket, id: number, handle: string): void {
+    let notes = this.guessedReplies.get(socket);
+    if (notes === undefined) {
+      notes = new Map<number, string>();
+      this.guessedReplies.set(socket, notes);
+    }
+    notes.set(id, handle);
+  }
+
   private replyOk(socket: Socket, id: number, result: unknown): void {
-    this.writeLine(socket, encodeLine({ v: PROTOCOL_VERSION, id, ok: true, result }));
+    const guessedAs = this.guessedReplies.get(socket)?.get(id);
+    if (guessedAs !== undefined) {
+      this.guessedReplies.get(socket)?.delete(id);
+    }
+    const shown = guessedAs !== undefined && typeof result === 'object' && result !== null && !Array.isArray(result) ? { ...result, guessedAs } : result;
+    this.writeLine(socket, encodeLine({ v: PROTOCOL_VERSION, id, ok: true, result: shown }));
   }
 
   private replyErr(socket: Socket, id: number, code: ErrorCode, message: string): void {
+    this.guessedReplies.get(socket)?.delete(id);
     this.writeLine(socket, encodeLine({ v: PROTOCOL_VERSION, id, ok: false, error: { code, message } }));
   }
 

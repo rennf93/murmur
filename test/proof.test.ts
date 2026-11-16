@@ -1,4 +1,5 @@
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { appendFileSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -7,11 +8,17 @@ import { ProofWatcher } from '../src/proof.js';
 
 // An open that fails after a successful stat; file modes cannot force it
 // when the suite runs as root (CI containers).
-const fsState = vi.hoisted(() => ({ failOpen: false }));
+const fsState = vi.hoisted(() => ({ failOpen: false, failRead: false }));
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
     ...actual,
+    readSync: (...args: Parameters<typeof actual.readSync>) => {
+      if (fsState.failRead) {
+        throw Object.assign(new Error('ESPIPE: invalid seek'), { code: 'ESPIPE' });
+      }
+      return actual.readSync(...args);
+    },
     openSync: (...args: Parameters<typeof actual.openSync>) => {
       if (fsState.failOpen) {
         throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
@@ -48,6 +55,30 @@ describe('ProofWatcher', () => {
   it('offsetOf is the file size, or 0 when missing', () => {
     expect(ProofWatcher.offsetOf(file)).toBe(12);
     expect(ProofWatcher.offsetOf(join(dir, 'none'))).toBe(0);
+  });
+
+  it('skips a scan whose read fails, and finds the tag once it works again', () => {
+    w.watch(8, 'bob', file, ProofWatcher.offsetOf(file));
+    appendFileSync(file, deliveryTag(8) + 't1\n');
+    fsState.failRead = true;
+    vi.advanceTimersByTime(10);
+    expect(hits).toEqual([]);
+    fsState.failRead = false;
+    vi.advanceTimersByTime(10);
+    expect(hits).toEqual([[8, 'bob']]);
+  });
+
+  it('reads a FIFO or a symlink as no transcript, without blocking', () => {
+    const fifo = join(dir, 'fifo');
+    execFileSync('mkfifo', [fifo]);
+    const link = join(dir, 'link.jsonl');
+    writeFileSync(join(dir, 'real.jsonl'), 'x ' + deliveryTag(7) + 't1\n');
+    symlinkSync(join(dir, 'real.jsonl'), link);
+    expect(ProofWatcher.offsetOf(fifo)).toBe(0);
+    w.watch(7, 'bob', fifo, 0);
+    w.watch(7, 'carol', link, 0);
+    vi.advanceTimersByTime(30);
+    expect(hits).toEqual([]);
   });
 
   it('finds the tag by polling, fires once and drops the watch', () => {

@@ -4,6 +4,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createConnection } from 'node:net';
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Broker } from '../src/broker.js';
@@ -565,7 +566,7 @@ describe('one host process serving several sessions', () => {
   async function asSession(sdk: Client, toolUseId: string, name: string, args: Record<string, unknown>): Promise<unknown> {
     const result = (await sdk.callTool({ name, arguments: args, _meta: { [USE]: toolUseId } })) as CallToolResult;
     expect(result.isError ?? false).toBe(false);
-    return JSON.parse((result.content[0] as { type: 'text'; text: string }).text);
+    return JSON.parse((result.content.at(-1) as { type: 'text'; text: string }).text);
   }
 
   async function setup(): Promise<{ stack: Stack; sdk: Client; murmur: MurmurClient; a: string; b: string }> {
@@ -630,6 +631,149 @@ describe('one host process serving several sessions', () => {
     const after = stack.store.listSessions().filter((r) => stack.core.hasTools(r.handle)).length;
     expect(after).toBeLessThanOrEqual(before);
     expect(after).toBe(0);
+  });
+
+  it('tells the caller when its session was guessed', async () => {
+    const { stack, sdk, a, b } = await setup();
+    for (const [cli, handle] of [['cli-b', b], ['cli-a', a]] as const) {
+      stack.core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: cli, host: HOST });
+      const raw = (await sdk.callTool({ name: 'murmur_send', arguments: { to: ['target'], body: 'guess me ' + cli, mode: 'silent' }, _meta: { [USE]: 'toolu_nobody' } })) as CallToolResult;
+      const texts = raw.content.map((c) => (c as { text: string }).text);
+      expect(texts).toHaveLength(2);
+      expect(texts[0]).toContain('ran as ' + handle);
+      expect(texts[0]).toContain('tell the sender');
+      expect(JSON.parse(texts[1] as string)).toMatchObject({ guessedAs: handle });
+    }
+    const named = (await sdk.callTool({ name: 'murmur_status', arguments: {}, _meta: { [USE]: 'toolu_a1' } })) as CallToolResult;
+    expect(named.content).toHaveLength(1);
+    expect(a).not.toBe(b);
+  });
+
+  it('resolves unnamed calls beside each other, not one after another', async () => {
+    const { sdk } = await setup();
+    const t0 = Date.now();
+    const done = await Promise.all(['toolu_u1', 'toolu_u2'].map(async (id) => {
+      await asSession(sdk, id, 'murmur_status', {});
+      return Date.now() - t0;
+    }));
+    expect(Math.max(...done)).toBeLessThan(1000);
+  });
+
+  it('does not wait for a transcript when no session has a readable one', async () => {
+    hostState.host = HOST;
+    const stack = await buildStack();
+    for (const cli of ['x', 'y']) {
+      stack.core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: cli, host: HOST, cwd: '/w/p', source: 'startup', transcriptPath: '/nonexistent/' + cli + '.jsonl' });
+    }
+    const { sdk, murmur } = await pair(stack, identityFor(HOST, { CLAUDECODE: '1' }, '/w/p'));
+    await req<RegisterResult>(murmur, { type: 'register', clientKind: 'mcp', host: { hostPid: HOST.hostPid, hostStart: HOST.hostStart }, client: 'claude', cwd: '/w/p' });
+    const t0 = Date.now();
+    await asSession(sdk, 'toolu_none', 'murmur_status', {});
+    expect(Date.now() - t0).toBeLessThan(300);
+  });
+
+  it('renames the calling session, not the newest row of the process', async () => {
+    const { stack, sdk, b } = await setup();
+    stack.core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'cli-a', host: HOST });
+    const named = (await asSession(sdk, 'toolu_b1', 'murmur_name', { handle: 'bravo' })) as RegisterResult;
+    expect(named.handle).toBe('bravo');
+    expect(stack.store.sessionByCliId('claude', 'cli-b')?.handle).toBe('bravo');
+    expect(stack.store.sessionByCliId('claude', 'cli-a')?.handle).not.toBe('bravo');
+    expect(b).not.toBe('bravo');
+  });
+
+  it('ends a wait of a session that ends, and survives odd lines that mention toolUseId', async () => {
+    const { stack, sdk, murmur, a } = await setup();
+    const second = await pair(stack, identityFor(HOST, { CLAUDECODE: '1' }, '/w/p'));
+    await req<RegisterResult>(second.murmur, { type: 'register', clientKind: 'mcp', host: { hostPid: HOST.hostPid, hostStart: HOST.hostStart }, client: 'claude', cwd: '/w/p' });
+    await asSession(sdk, 'toolu_a1', 'murmur_send', { to: ['target'], body: 'one', mode: 'silent' });
+    await asSession(second.sdk, 'toolu_a1', 'murmur_send', { to: ['target'], body: 'two', mode: 'silent' });
+    const waiting = asSession(sdk, 'toolu_a2', 'murmur_send', { to: ['target'], body: 'three', mode: 'silent', wait: 'all_replied', timeoutMs: 20000 });
+    await settle(() => stack.core.hasTools(a), 'presence of a');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const hook = await connectRaw(stack, 'hookish');
+    const ended = Date.now();
+    await req(hook.client, { type: 'session', event: 'session-end', client: 'claude', cliSessionId: 'cli-a', host: { hostPid: HOST.hostPid, hostStart: HOST.hostStart } });
+    expect(await waiting).toMatchObject({ wait: { timedOut: true } });
+    expect(Date.now() - ended).toBeLessThan(5000);
+    const socket = createConnection(stack.paths.socketPath);
+    const replies: string[] = [];
+    socket.on('data', (chunk) => replies.push(chunk.toString('utf8')));
+    socket.write(JSON.stringify({ v: 2, id: 1, type: 'auth', token: stack.token }) + '\n');
+    socket.write(JSON.stringify({ v: 2, id: 2, type: 'register', clientKind: 'mcp', host: { hostPid: HOST.hostPid, hostStart: HOST.hostStart }, client: 'claude' }) + '\n');
+    await settle(() => replies.join('').includes('"id":2'), 'register');
+    socket.write('{"toolUseId": broken\n["toolUseId"]\n');
+    socket.write(JSON.stringify({ v: 2, id: 3, type: 'status', toolUseId: 'toolu_b1' }) + '\n');
+    await settle(() => replies.join('').includes('"id":3'), 'status after odd lines');
+    socket.destroy();
+    expect(murmur).toBeDefined();
+  });
+
+  it('fails a call whose lookup throws, instead of running it as another session', async () => {
+    const { stack, sdk } = await setup();
+    vi.spyOn(stack.core, 'sessionForToolUse').mockImplementation(() => {
+      throw new Error('db gone');
+    });
+    const result = (await sdk.callTool({ name: 'murmur_status', arguments: {}, _meta: { [USE]: 'toolu_a1' } })) as CallToolResult;
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain('db gone');
+  });
+
+  it('refuses to rename a guessed session', async () => {
+    const { stack, sdk } = await setup();
+    const result = (await sdk.callTool({ name: 'murmur_name', arguments: { handle: 'nobody-knows' }, _meta: { [USE]: 'toolu_nobody' } })) as CallToolResult;
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain('cannot tell which session');
+    expect(stack.store.listSessions().map((r) => r.handle)).not.toContain('nobody-knows');
+  });
+
+  it('fails a call already resolved to a session that ends before the call runs', async () => {
+    const { stack, sdk } = await setup();
+    const hook = await connectRaw(stack, 'hookish');
+    await asSession(sdk, 'toolu_a1', 'murmur_status', {});
+    const slow = asSession(sdk, 'toolu_nobody', 'murmur_status', {});
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const racing = sdk.callTool({ name: 'murmur_send', arguments: { to: ['target'], body: 'too late', mode: 'silent' }, _meta: { [USE]: 'toolu_a1' } }) as Promise<CallToolResult>;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await req(hook.client, { type: 'session', event: 'session-end', client: 'claude', cliSessionId: 'cli-a', host: { hostPid: HOST.hostPid, hostStart: HOST.hostStart } });
+    const result = await racing;
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain('has ended');
+    await slow;
+  });
+
+  it('closes the derived connection of a session that ends', async () => {
+    const { stack, sdk, a, b } = await setup();
+    stack.core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'cli-a', host: HOST });
+    for (const id of ['toolu_a1', 'toolu_b1']) {
+      await asSession(sdk, id, 'murmur_send', { to: ['target'], body: 'hello ' + id, mode: 'silent' });
+    }
+    expect([a, b].filter((h) => stack.core.hasTools(h))).toHaveLength(2);
+    const hook = await connectRaw(stack, 'hookish');
+    const open = (stack.broker as unknown as { conns: Set<unknown> }).conns;
+    const before = open.size;
+    await req(hook.client, { type: 'session', event: 'session-end', client: 'claude', cliSessionId: 'cli-a', host: { hostPid: HOST.hostPid, hostStart: HOST.hostStart } });
+    expect(open.size).toBe(before - 1);
+    expect(stack.core.hasTools(a)).toBe(false);
+    expect(stack.core.hasTools(b)).toBe(true);
+    const status = (await asSession(sdk, 'toolu_b1', 'murmur_status', {})) as { peers: Array<{ handle: string; presence: string }> };
+    expect(['offline', 'presumed-offline']).toContain(status.peers.find((p) => p.handle === a)?.presence);
+  });
+
+  it('reads the session the connection is bound to as offline once it ends, and online again after a clear', async () => {
+    const { stack, sdk, a, b } = await setup();
+    await asSession(sdk, 'toolu_b1', 'murmur_send', { to: ['target'], body: 'bound', mode: 'silent' });
+    expect(stack.core.hasTools(b)).toBe(true);
+    const hook = await connectRaw(stack, 'hookish');
+    const host = { hostPid: HOST.hostPid, hostStart: HOST.hostStart };
+    await req(hook.client, { type: 'session', event: 'session-end', client: 'claude', cliSessionId: 'cli-b', host });
+    expect(stack.core.hasTools(b)).toBe(false);
+    const status = (await asSession(sdk, 'toolu_a1', 'murmur_status', {})) as { peers: Array<{ handle: string; presence: string }> };
+    expect(['offline', 'presumed-offline']).toContain(status.peers.find((p) => p.handle === b)?.presence);
+    expect(stack.core.hasTools(a)).toBe(true);
+    await req(hook.client, { type: 'session', event: 'session-start', client: 'claude', cliSessionId: 'cli-b2', host, source: 'clear' });
+    expect(stack.core.hasTools(b)).toBe(true);
+    expect(stack.store.sessionByCliId('claude', 'cli-b2')?.handle).toBe(b);
   });
 
   it('reuses the derived connection and renames only the calling session', async () => {

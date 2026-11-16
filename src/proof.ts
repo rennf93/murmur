@@ -1,4 +1,4 @@
-import { closeSync, openSync, readSync, statSync } from 'node:fs';
+import { closeSync, constants, lstatSync, openSync, readSync } from 'node:fs';
 import { PROOF_POLL_MS, deliveryTag } from './protocol.js';
 
 // Delivery proof from the receiver's side. After a push, the broker watches
@@ -37,7 +37,7 @@ export class ProofWatcher {
   // below anything the push can cause.
   static offsetOf(path: string): number {
     try {
-      return statSync(path).size;
+      return lstatSync(path).size;
     } catch {
       return 0;
     }
@@ -111,7 +111,11 @@ export class ProofWatcher {
     // Most scans find nothing new, so the size check comes before the open.
     let size: number;
     try {
-      size = statSync(watch.path).size;
+      const stat = lstatSync(watch.path);
+      if (!stat.isFile()) {
+        return;
+      }
+      size = stat.size;
     } catch {
       return;
     }
@@ -120,13 +124,18 @@ export class ProofWatcher {
     }
     let fd: number;
     try {
-      fd = openSync(watch.path, 'r');
+      fd = openSync(watch.path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
     } catch {
       return;
     }
     try {
       const buf = Buffer.alloc(size - watch.offset);
-      readSync(fd, buf, 0, buf.length, watch.offset);
+      // A path swapped for a pipe after the check cannot be read at an offset.
+      try {
+        readSync(fd, buf, 0, buf.length, watch.offset);
+      } catch {
+        return;
+      }
       if (buf.includes(watch.tag)) {
         this.drop(watch);
         this.onProof(watch.messageId, watch.recipient);

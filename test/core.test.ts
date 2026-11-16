@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -1117,11 +1118,16 @@ describe('sessionEvent', () => {
     expect(nullId).toMatchObject({ id: first.id, cliSessionId: 'c2' });
   });
 
-  it('opens a second session for Claude only: a prompt of an unknown id too, never for other CLIs', () => {
+  it('opens a second session for Claude only; a host with one session adopts a prompt of an unknown id', () => {
     const host = alive(100);
     const first = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'a', host, source: 'startup' });
-    const second = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'b', host });
+    const second = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'b', host, source: 'startup' });
     expect(second.id).not.toBe(first.id);
+    const lost = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'c', host });
+    expect(lost.id).not.toBe(second.id);
+    const lone = alive(300);
+    const solo = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'x', host: lone, source: 'startup' });
+    expect(core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'y', host: lone }).id).toBe(solo.id);
     const codexHost = alive(200);
     const one = core.sessionEvent({ event: 'session-start', client: 'codex', cliSessionId: 'x', host: codexHost, source: 'startup' });
     const two = core.sessionEvent({ event: 'session-start', client: 'codex', cliSessionId: 'y', host: codexHost, source: 'startup' });
@@ -1136,6 +1142,222 @@ describe('sessionEvent', () => {
     core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'b', host, source: 'startup' });
     const result = core.sessionForToolUse(host, 'toolu_x');
     expect(result).toMatchObject({ ambiguous: [expect.anything(), expect.anything()] });
+  });
+
+  describe('attribution by transcript', () => {
+    const useLine = (id: string): string => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: 'Bash', input: {} }] } });
+    const textLine = (text: string): string => JSON.stringify({ type: 'user', message: { content: [{ type: 'text', text }] } });
+    function file(name: string, lines: string[]): string {
+      const path = join(dir, name + '.jsonl');
+      writeFileSync(path, lines.join('\n') + '\n');
+      return path;
+    }
+    function start(cli: string, host: { hostPid: number; hostStart: string }, transcriptPath: string | undefined, source = 'startup'): string {
+      return core.sessionEvent({
+        event: 'session-start', client: 'claude', cliSessionId: cli, host, source, cwd: '/w/p', ...(transcriptPath !== undefined ? { transcriptPath } : {}),
+      }).handle;
+    }
+    const handleOf = (r: ReturnType<MurmurCore['sessionForToolUse']>): string | null => (r !== null && 'row' in r ? r.row.handle : null);
+
+    it('names the session whose transcript holds the tool_use (the hit)', () => {
+      const host = alive(100);
+      const a = start('a', host, file('a', [useLine('toolu_a')]));
+      const b = start('b', host, file('b', [useLine('toolu_b')]));
+      expect(handleOf(core.sessionForToolUse(host, 'toolu_a'))).toBe(a);
+      expect(handleOf(core.sessionForToolUse(host, 'toolu_b'))).toBe(b);
+    });
+
+    it('lets an exact tool_use match beat the quiet filter', () => {
+      const host = alive(100);
+      const old = file('old', [useLine('toolu_held')]);
+      const held = start('old', host, old);
+      start('new', host, file('new', [useLine('toolu_new')]));
+      const past = new Date(Date.now() - 2 * 3600 * 1000);
+      utimesSync(old, past, past);
+      expect(handleOf(core.sessionForToolUse(host, 'toolu_held'))).toBe(held);
+    });
+
+    it('takes the only active session when the others have been quiet for over an hour', () => {
+      const host = alive(100);
+      const a = file('a', [useLine('toolu_a')]);
+      const b = file('b', [useLine('toolu_b')]);
+      const c = file('c', [useLine('toolu_c')]);
+      start('a', host, a);
+      start('b', host, b);
+      const live = start('c', host, c);
+      const past = new Date(Date.now() - 2 * 3600 * 1000);
+      utimesSync(a, past, past);
+      utimesSync(b, past, past);
+      expect(handleOf(core.sessionForToolUse(host, 'toolu_x'))).toBe(live);
+    });
+
+    it('keeps every live session as a candidate when all of them have been quiet', () => {
+      const host = alive(100);
+      const past = new Date(Date.now() - 2 * 3600 * 1000);
+      for (const cli of ['a', 'b']) {
+        const path = file(cli, [useLine('toolu_' + cli)]);
+        start(cli, host, path);
+        utimesSync(path, past, past);
+      }
+      expect(core.sessionForToolUse(host, 'toolu_x')).toMatchObject({ ambiguous: [expect.anything(), expect.anything()], wait: true });
+    });
+
+    it('does not take an id quoted in one transcript for a tool_use, nor a longer id for a prefix of it', () => {
+      const host = alive(100);
+      const a = start('a', host, file('a', [textLine('see toolu_real and "id":"toolu_real"'), useLine('toolu_012')]));
+      const b = start('b', host, file('b', [useLine('toolu_real'), useLine('toolu_01')]));
+      expect(handleOf(core.sessionForToolUse(host, 'toolu_real'))).toBe(b);
+      expect(handleOf(core.sessionForToolUse(host, 'toolu_01'))).toBe(b);
+      expect(handleOf(core.sessionForToolUse(host, 'toolu_012'))).toBe(a);
+    });
+
+    it('leaves a call ambiguous, without waiting, when two transcripts hold its id', () => {
+      const host = alive(100);
+      start('a', host, file('a', [useLine('toolu_dup')]));
+      start('b', host, file('b', [useLine('toolu_dup')]));
+      start('c', host, file('c', [useLine('toolu_c')]));
+      const result = core.sessionForToolUse(host, 'toolu_dup');
+      expect(result).toMatchObject({ wait: false, ambiguous: [expect.anything(), expect.anything()] });
+    });
+
+    it('cuts the tail on a line boundary so a half line never matches', () => {
+      const host = alive(100);
+      const big = textLine('x'.repeat(300 * 1024));
+      const a = start('a', host, file('a', [useLine('toolu_cut'), big, useLine('toolu_late')]));
+      start('b', host, file('b', [useLine('toolu_b')]));
+      expect(handleOf(core.sessionForToolUse(host, 'toolu_late'))).toBe(a);
+      expect(handleOf(core.sessionForToolUse(host, 'toolu_cut'))).toBeNull();
+    });
+
+    it('reads a FIFO, a symlink and a non jsonl path as no transcript, without blocking', () => {
+      const host = alive(100);
+      const fifo = join(dir, 'fifo.jsonl');
+      execFileSync('mkfifo', [fifo]);
+      const target = file('target', [useLine('toolu_link')]);
+      const link = join(dir, 'link.jsonl');
+      symlinkSync(target, link);
+      const plain = join(dir, 'passwd.txt');
+      writeFileSync(plain, useLine('toolu_txt') + '\n');
+      start('a', host, fifo);
+      start('b', host, link);
+      start('c', host, plain);
+      for (const id of ['toolu_link', 'toolu_txt', 'toolu_none']) {
+        expect(core.sessionForToolUse(host, id)).toMatchObject({ ambiguous: expect.any(Array), wait: false });
+      }
+    });
+
+    it('waits for a transcript only when some candidate has a usable one', () => {
+      const host = alive(100);
+      start('a', host, file('a', [useLine('toolu_a')]));
+      start('b', host, '/nonexistent/b.jsonl');
+      expect(core.sessionForToolUse(host, 'toolu_nowhere')).toMatchObject({ wait: true });
+    });
+
+    it('skips a live row whose transcript and subagent files have been quiet for over an hour', () => {
+      const host = alive(100);
+      const old = file('old', [useLine('toolu_old')]);
+      const stale = start('old', host, old);
+      const fresh = start('new', host, file('new', [useLine('toolu_new')]));
+      const past = new Date(Date.now() - 2 * 3600 * 1000);
+      utimesSync(old, past, past);
+      expect(handleOf(core.sessionForToolUse(host, 'toolu_unseen'))).toBe(fresh);
+      mkdirSync(old.replace(/\.jsonl$/, '') + '/subagents', { recursive: true });
+      writeFileSync(old.replace(/\.jsonl$/, '') + '/subagents/agent-1.jsonl', useLine('toolu_sub') + '\n');
+      expect(handleOf(core.sessionForToolUse(host, 'toolu_sub'))).toBe(stale);
+    });
+  });
+
+  describe('a process that runs several sessions', () => {
+    const open = (cli: string, host: { hostPid: number; hostStart: string }, cwd: string, source = 'startup') =>
+      core.sessionEvent({
+        event: 'session-start', client: 'claude', cliSessionId: cli, host, cwd, source,
+        native: { socketPath: '/run/cc-socks/' + String(host.hostPid) + '.sock', token: 't' },
+      });
+
+    it('does not give a new session the row of one that closed', () => {
+      const host = alive(100);
+      const a = open('a', host, '/w/a');
+      const b = open('b', host, '/w/b');
+      core.sessionEvent({ event: 'session-end', client: 'claude', cliSessionId: 'b', host });
+      const c = open('c', host, '/w/c');
+      expect([a.id, b.id]).not.toContain(c.id);
+      expect(c.handle).not.toBe(b.handle);
+    });
+
+    it('hides native push while two sessions share the process and brings it back when one is left', () => {
+      const host = alive(100);
+      const a = open('a', host, '/w/a');
+      expect(core.nativeTransport(a.handle)).not.toBeNull();
+      const b = open('b', host, '/w/b');
+      expect(core.nativeTransport(a.handle)).toBeNull();
+      expect(core.nativeTransport(b.handle)).toBeNull();
+      core.sessionEvent({ event: 'session-end', client: 'claude', cliSessionId: 'b', host });
+      expect(core.nativeTransport(a.handle)).not.toBeNull();
+      expect(core.nativeTransport('nobody')).toBeNull();
+    });
+
+    it('does not end the one live session on the SessionEnd of an unknown id', () => {
+      const host = alive(100);
+      const a = open('a', host, '/w/a');
+      const ghost = core.sessionEvent({ event: 'session-end', client: 'claude', cliSessionId: 'zz', host });
+      expect(ghost.id).not.toBe(a.id);
+      expect(store.sessionById(a.id)).toMatchObject({ cliSessionId: 'a', state: 'idle' });
+    });
+
+    it('classifies a push to a session of a shared process as a connection push', () => {
+      const host = alive(100);
+      const a = open('a', host, '/w/a');
+      register('sender');
+      expect(core.send('sender', { threadId: null, to: [a.handle], body: 'alone' }).pushes[0]?.kind).toBe('native');
+      open('b', host, '/w/b');
+      expect(core.send('sender', { threadId: null, to: [a.handle], body: 'shared' }).pushes[0]?.kind).toBe('connection');
+    });
+
+    it('adopts an unknown id while the one live session is idle, and opens a session while it is busy', () => {
+      const host = alive(100);
+      const a = open('a', host, '/w/a');
+      const idle = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'z', host });
+      expect(idle.id).toBe(a.id);
+      core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'z', host });
+      const other = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'a', host });
+      expect(other.id).not.toBe(a.id);
+      expect(store.sessionsByHost(host.hostPid, host.hostStart)).toHaveLength(2);
+    });
+  });
+
+  describe('clear next to another live session of the process', () => {
+    const ev = (event: 'session-start' | 'session-end' | 'prompt', cli: string, host: { hostPid: number; hostStart: string }, source?: string) =>
+      core.sessionEvent({ event, client: 'claude', cliSessionId: cli, host, cwd: '/w/p', ...(source !== undefined ? { source } : {}) });
+
+    it('continues the session that just ended, and leaves the live one alone', () => {
+      const host = alive(100);
+      const a = ev('session-start', 'a', host, 'startup');
+      const b = ev('session-start', 'b', host, 'startup');
+      ev('session-end', 'a', host);
+      const a2 = ev('session-start', 'a2', host, 'clear');
+      expect(a2.id).toBe(a.id);
+      expect(store.sessionById(b.id)).toMatchObject({ cliSessionId: 'b', handle: b.handle });
+      expect(ev('prompt', 'b', host).id).toBe(b.id);
+      expect(store.sessionsByHost(host.hostPid, host.hostStart)).toHaveLength(2);
+    });
+
+    it('opens its own session when no session just ended and two are live', () => {
+      const host = alive(100);
+      const a = ev('session-start', 'a', host, 'startup');
+      const b = ev('session-start', 'b', host, 'startup');
+      const a2 = ev('session-start', 'a2', host, 'clear');
+      expect([a.id, b.id]).not.toContain(a2.id);
+      expect(store.sessionById(b.id)?.cliSessionId).toBe('b');
+    });
+
+    it('does not adopt a session that ended long ago', () => {
+      const host = alive(100);
+      const a = ev('session-start', 'a', host, 'startup');
+      ev('session-start', 'b', host, 'startup');
+      ev('session-end', 'a', host);
+      now += 10 * 60 * 1000;
+      expect(ev('session-start', 'a2', host, 'clear').id).not.toBe(a.id);
+    });
   });
 
   it('honors a claimable explicit handle on create and falls back when it is not claimable', () => {

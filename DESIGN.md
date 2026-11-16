@@ -2,7 +2,7 @@
 
 ## Architecture
 
-One broker process owns all state. Everything else is a thin client over one newline-delimited JSON protocol (version 2) on one Unix domain socket.
+One broker process owns all state. Everything else is a thin client over one newline-delimited JSON protocol (version 2) on one Unix domain socket. New fields are added to existing messages without a version bump: the broker never checks `v`, reads only the fields it knows, and a client that omits a field gets the old behavior (`source` and `toolUseId` on requests, `guessedAs` on a reply).
 
 ```
  Claude / Codex / Gemini / zcode session      opencode session        Hummin session

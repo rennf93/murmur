@@ -81,24 +81,43 @@ export function identityFor(host: HostInfo | null, env: NodeJS.ProcessEnv, cwd: 
 // Claude Code stamps every MCP tool call with the id of the tool_use that made
 // it. The desktop app runs several sessions in one process (one MCP server),
 // and the id is the only per-call mark: the broker finds the calling session
-// by the transcript that records it.
+// by the transcript that records it. When none does, the broker takes the
+// busiest session and says so in the reply (guessedAs); the tool text then
+// tells the agent.
 const TOOL_USE_KEY = 'claudecode/toolUseId';
-const calls = new AsyncLocalStorage<string | undefined>();
+
+interface CallState {
+  toolUseId: string | undefined;
+  guessedAs?: string;
+}
+
+const calls = new AsyncLocalStorage<CallState>();
+
+function guessNote(handle: string): string {
+  return 'murmur: no transcript named this call, so it ran as ' + handle + ' (best guess). If that is not you, tell the sender; murmur_name is refused until a call can be matched.';
+}
 
 export function buildMcpServer(rawClient: Pick<MurmurClient, 'request'>, identity: Identity = {}): McpServer {
   const client: Pick<MurmurClient, 'request'> = {
-    request: <T>(msg: Parameters<MurmurClient['request']>[0]) => {
-      const toolUseId = calls.getStore();
-      return rawClient.request<T>(toolUseId === undefined ? msg : { ...msg, toolUseId });
+    request: async <T>(msg: Parameters<MurmurClient['request']>[0]) => {
+      const call = calls.getStore();
+      const result = await rawClient.request<T>(call?.toolUseId === undefined ? msg : { ...msg, toolUseId: call.toolUseId });
+      const guessedAs = (result as { guessedAs?: unknown } | null)?.guessedAs;
+      if (call !== undefined && typeof guessedAs === 'string') {
+        call.guessedAs = guessedAs;
+      }
+      return result;
     },
   };
   const server = new McpServer({ name: 'murmur', version: VERSION }, { instructions: INSTRUCTIONS });
   const register = server.registerTool.bind(server) as (name: string, config: unknown, cb: (...a: unknown[]) => unknown) => unknown;
   server.registerTool = ((name: string, config: unknown, cb: (...a: unknown[]) => unknown) =>
     // The SDK passes (args, extra), or only (extra) for a tool without input.
-    register(name, config, (...a: unknown[]) => {
+    register(name, config, async (...a: unknown[]) => {
       const id = (a[a.length - 1] as { _meta?: Record<string, unknown> } | undefined)?._meta?.[TOOL_USE_KEY];
-      return calls.run(typeof id === 'string' ? id : undefined, () => cb(...a));
+      const call: CallState = { toolUseId: typeof id === 'string' ? id : undefined };
+      const result = (await calls.run(call, () => cb(...a))) as CallToolResult;
+      return call.guessedAs === undefined ? result : { ...result, content: [{ type: 'text' as const, text: guessNote(call.guessedAs) }, ...result.content] };
     })) as unknown as typeof server.registerTool;
 
   server.registerTool('murmur_name', {

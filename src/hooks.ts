@@ -1,7 +1,7 @@
-import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
 import { connectBroker } from './client.js';
 import { getPaths, readToken } from './config.js';
 import { currentHost } from './proc.js';
+import { tailLines } from './transcript.js';
 import type { HostInfo } from './proc.js';
 import type { FetchPushMessage, FetchPushResult, HookEvent, SessionMessage, SessionResult } from './protocol.js';
 
@@ -132,35 +132,22 @@ function sessionMessage(
 // last custom-title entry in the tail of its transcript. Anything unreadable
 // reads as no title; a hook never fails over it.
 function readClaudeTitle(path: string): string | undefined {
-  try {
-    const fd = openSync(path, 'r');
-    try {
-      const size = fstatSync(fd).size;
-      const start = Math.max(0, size - TITLE_TAIL_BYTES);
-      const buf = Buffer.alloc(size - start);
-      readSync(fd, buf, 0, buf.length, start);
-      let title: string | undefined;
-      for (const line of buf.toString('utf8').split('\n')) {
-        if (!line.includes('"custom-title"')) {
-          continue;
-        }
-        try {
-          const rec = JSON.parse(line) as Record<string, unknown>;
-          const name = stringField(rec, 'customTitle');
-          if (rec.type === 'custom-title' && name !== null) {
-            title = name;
-          }
-        } catch {
-          // A line cut by the tail window, or not JSON: skip it.
-        }
-      }
-      return title;
-    } finally {
-      closeSync(fd);
+  let title: string | undefined;
+  for (const line of tailLines(path, TITLE_TAIL_BYTES) ?? []) {
+    if (!line.includes('"custom-title"')) {
+      continue;
     }
-  } catch {
-    return undefined;
+    try {
+      const rec = JSON.parse(line) as Record<string, unknown>;
+      const name = stringField(rec, 'customTitle');
+      if (rec.type === 'custom-title' && name !== null) {
+        title = name;
+      }
+    } catch {
+      // Not JSON: skip it.
+    }
   }
+  return title;
 }
 
 function nonEmpty(value: string | undefined): value is string {
