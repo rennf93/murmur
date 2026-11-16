@@ -881,12 +881,19 @@ export class MurmurCore {
     if (!this.claimable(handle, row.id)) {
       throw new MurmurError('bad_request', 'handle ' + handle + ' is taken by a live session or the owner');
     }
-    if (this.store.getPeer(handle) === null) {
+    // A handle can be held by several sessions at once (a session of another
+    // machine looks dead to this broker, so its handle reads free). Renaming
+    // the identity would carry them all along and rewrite their history, so
+    // while another session that has not ended holds the old handle, only this
+    // session moves.
+    const others = this.store.sessionsForHandle(row.handle).filter((r) => r.id !== row.id);
+    const shared = others.some((r) => r.state !== 'ended');
+    if (!shared && this.store.getPeer(handle) === null) {
       this.store.renamePeer(row.handle, handle);
       return handle;
     }
-    const others = this.store.sessionsForHandle(row.handle).filter((r) => r.id !== row.id);
-    this.store.reassignSession(row.id, row.handle, handle);
+    this.ensurePeer(handle);
+    this.store.reassignSession(row.id, row.handle, handle, !shared);
     if (others.length === 0 && !this.store.peerHasHistory(row.handle)) {
       this.store.deletePeer(row.handle);
     }
@@ -910,6 +917,12 @@ export class MurmurCore {
       }
     }
     return removed;
+  }
+
+  // True when a session that has not ended holds the handle, whether or not
+  // this machine can see its process.
+  holdsHandle(handle: string): boolean {
+    return this.store.sessionsForHandle(handle).some((row) => row.state !== 'ended');
   }
 
   // A handle can be claimed when it is valid, not the owner's, and no live

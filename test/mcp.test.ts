@@ -651,3 +651,108 @@ describe('runMcpServer', () => {
     }
   });
 });
+
+// A session of another machine looks dead to the broker, so a second session
+// gets its handle. Naming one must not move the MCP connection of the other.
+describe('a rename of one session sharing a handle', () => {
+  const REMOTE: HostInfo = { hostPid: 9002, hostStart: 'S2', ancestors: [9002] };
+  const hostRef = (h: HostInfo) => ({ hostPid: h.hostPid, hostStart: h.hostStart });
+
+  async function setup(): Promise<{ stack: Stack; remote: Pair; local: Pair; shared: string }> {
+    hostState.host = HOST;
+    const stack = await buildStack();
+    const open = (cli: string, host: HostInfo) =>
+      stack.core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: cli, host: hostRef(host), cwd: '/w/guard', source: 'startup' });
+    const first = open('remote', REMOTE);
+    const second = open('local', HOST);
+    expect(second.handle).toBe(first.handle);
+    const connect = async (host: HostInfo): Promise<Pair> => {
+      const made = await pair(stack, identityFor(host, { CLAUDECODE: '1' }, '/w/guard'));
+      await req<RegisterResult>(made.murmur, { type: 'register', clientKind: 'mcp', host: hostRef(host), client: 'claude', cwd: '/w/guard' });
+      return made;
+    };
+    const remote = await connect(REMOTE);
+    const local = await connect(HOST);
+    stack.core.register({ handle: 'target' });
+    return { stack, remote, local, shared: first.handle };
+  }
+
+  it('leaves the other session sending under its own handle', async () => {
+    const { stack, remote, local, shared } = await setup();
+    const hook = await connectRaw(stack, 'hookish');
+    await req(hook.client, { type: 'session', event: 'prompt', client: 'claude', cliSessionId: 'local', host: hostRef(HOST), title: 'Proveground S4c: bait' });
+    const fromRemote = await call<{ threadId: number }>(remote.sdk, 'murmur_send', { to: ['target'], body: 'from the remote session', mode: 'silent' });
+    const fromLocal = await call<{ threadId: number }>(local.sdk, 'murmur_send', { to: ['target'], body: 'from the local session', mode: 'silent' });
+    expect(stack.store.threadMessages(fromRemote.threadId, null)[0]?.sender).toBe(shared);
+    expect(stack.store.threadMessages(fromLocal.threadId, null)[0]?.sender).toBe('proveground-s4c-bait');
+  });
+
+  it('leaves a connection that names no host with the session that keeps the handle', async () => {
+    const { stack, shared } = await setup();
+    const bystander = await connectRaw(stack, shared);
+    const hook = await connectRaw(stack, 'hookish');
+    await req(hook.client, { type: 'session', event: 'prompt', client: 'claude', cliSessionId: 'local', host: hostRef(HOST), title: 'Proveground S4c: bait' });
+    const sent = await req<{ threadId: number }>(bystander.client, { type: 'send', threadId: null, to: ['target'], body: 'from a connection with no host', mode: 'silent' });
+    expect(stack.store.threadMessages(sent.threadId, null)[0]?.sender).toBe(shared);
+  });
+
+  it('moves a connection that names no host with the rename when only an ended session shared the handle', async () => {
+    const { stack, shared } = await setup();
+    stack.core.sessionEvent({ event: 'session-end', client: 'claude', cliSessionId: 'remote', host: hostRef(REMOTE) });
+    const bystander = await connectRaw(stack, shared);
+    const hook = await connectRaw(stack, 'hookish');
+    await req(hook.client, { type: 'session', event: 'prompt', client: 'claude', cliSessionId: 'local', host: hostRef(HOST), title: 'Proveground S4c: bait' });
+    const sent = await req<{ threadId: number }>(bystander.client, { type: 'send', threadId: null, to: ['target'], body: 'follows the identity', mode: 'silent' });
+    expect(stack.store.threadMessages(sent.threadId, null)[0]?.sender).toBe('proveground-s4c-bait');
+  });
+
+  it('moves a connection that names no host when the old handle keeps only an ended session', async () => {
+    const { stack, shared } = await setup();
+    stack.core.sessionEvent({ event: 'session-end', client: 'claude', cliSessionId: 'remote', host: hostRef(REMOTE) });
+    // The new name is an existing peer, so the session is reassigned and the ended row stays on the old handle.
+    stack.core.register({ handle: 'proveground-s4c-bait' });
+    const bystander = await connectRaw(stack, shared);
+    const hook = await connectRaw(stack, 'hookish');
+    await req(hook.client, { type: 'session', event: 'prompt', client: 'claude', cliSessionId: 'local', host: hostRef(HOST), title: 'Proveground S4c: bait' });
+    expect(stack.store.sessionByCliId('claude', 'remote')?.handle).toBe(shared);
+    const sent = await req<{ threadId: number }>(bystander.client, { type: 'send', threadId: null, to: ['target'], body: 'no live sibling holds the old name', mode: 'silent' });
+    expect(stack.store.threadMessages(sent.threadId, null)[0]?.sender).toBe('proveground-s4c-bait');
+  });
+
+  it('matches the host by pid and start together when the sessions share a handle', async () => {
+    hostState.host = HOST;
+    const stack = await buildStack();
+    const twin: HostInfo = { hostPid: HOST.hostPid, hostStart: 'S-other-boot', ancestors: [HOST.hostPid] };
+    const open = (cli: string, host: HostInfo) =>
+      stack.core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: cli, host: hostRef(host), cwd: '/w/guard', source: 'startup' });
+    const first = open('twin', twin);
+    const second = open('local', HOST);
+    expect(second.handle).toBe(first.handle);
+    const connect = async (host: HostInfo): Promise<Pair> => {
+      const made = await pair(stack, identityFor(host, { CLAUDECODE: '1' }, '/w/guard'));
+      await req<RegisterResult>(made.murmur, { type: 'register', clientKind: 'mcp', host: hostRef(host), client: 'claude', cwd: '/w/guard' });
+      return made;
+    };
+    const stayer = await connect(twin);
+    const mover = await connect(HOST);
+    stack.core.register({ handle: 'target' });
+    const hook = await connectRaw(stack, 'hookish');
+    await req(hook.client, { type: 'session', event: 'prompt', client: 'claude', cliSessionId: 'local', host: hostRef(HOST), title: 'Proveground S4c: bait' });
+    const fromStayer = await call<{ threadId: number }>(stayer.sdk, 'murmur_send', { to: ['target'], body: 'same pid, another start', mode: 'silent' });
+    const fromMover = await call<{ threadId: number }>(mover.sdk, 'murmur_send', { to: ['target'], body: 'the renamed one', mode: 'silent' });
+    expect(stack.store.threadMessages(fromStayer.threadId, null)[0]?.sender).toBe(first.handle);
+    expect(stack.store.threadMessages(fromMover.threadId, null)[0]?.sender).toBe('proveground-s4c-bait');
+  });
+
+  it('leaves the other session on its handle when murmur_name renames one', async () => {
+    const { stack, remote, local, shared } = await setup();
+    const named = await call<RegisterResult>(local.sdk, 'murmur_name', { handle: 'chosen' });
+    expect(named.handle).toBe('chosen');
+    const fromLocal = await call<{ threadId: number }>(local.sdk, 'murmur_send', { to: ['target'], body: 'from the renamed session', mode: 'silent' });
+    expect(stack.store.threadMessages(fromLocal.threadId, null)[0]?.sender).toBe('chosen');
+    const fromRemote = await call<{ threadId: number }>(remote.sdk, 'murmur_send', { to: ['target'], body: 'still the remote one', mode: 'silent' });
+    expect(stack.store.threadMessages(fromRemote.threadId, null)[0]?.sender).toBe(shared);
+    expect(stack.store.sessionByCliId('claude', 'remote')?.handle).toBe(shared);
+    expect(stack.store.sessionByCliId('claude', 'local')?.handle).toBe('chosen');
+  });
+});
