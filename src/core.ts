@@ -219,7 +219,7 @@ export class MurmurCore {
   // The boot id of the machine this broker runs on ('' when unreadable): its
   // host references are judged by the process table, every other machine's by
   // a connection, a lease or the startup grace.
-  private readonly machine: string;
+  private readonly fixedMachine: string | undefined;
   private readonly startedAt: number;
 
   constructor(store: Store, events: CoreEvents, now?: () => number, procTable?: (pids: number[]) => ProcTable, machine?: string) {
@@ -227,7 +227,7 @@ export class MurmurCore {
     this.events = events;
     this.nowFn = now ?? Date.now;
     this.procTable = procTable ?? ((pids) => liveTable(pids));
-    this.machine = machine ?? thisMachine();
+    this.fixedMachine = machine;
     this.startedAt = this.nowMs();
   }
 
@@ -238,7 +238,7 @@ export class MurmurCore {
   // Two names are one machine when their boot ids are; the host name is never
   // compared.
   machineKey(host: { machine?: string }): string | null {
-    return host.machine === undefined || host.machine === this.machine ? null : host.machine;
+    return host.machine === undefined || host.machine === (this.fixedMachine ?? thisMachine()) ? null : host.machine;
   }
 
   // The machine and label to store on an event of a known session. An event
@@ -260,20 +260,30 @@ export class MurmurCore {
 
   // The session of this host process. A client that gains a machine id (an
   // upgrade) finds the row an old client of the same process wrote without one,
-  // when no live process of this machine has that pid and start; the row takes
-  // the machine from then on, so one session never becomes two.
-  private rowAt(host: HostRef): SessionRow | null {
+  // and a client that sends none (its boot id read failed this once) finds the
+  // row that carries one, in both cases only when no live process of this
+  // machine has that pid and start and the CLI ids do not conflict (an event and
+  // a row that both carry one and differ are two sessions). The row takes the
+  // machine of the event when it has one, so one session never becomes two.
+  private rowAt(host: HostRef, cliSessionId: string | null = null): SessionRow | null {
     const key = this.machineKey(host);
     const row = this.store.sessionByHost(host.hostPid, host.hostStart, key);
-    if (row !== null || key === null) {
+    if (row !== null) {
       return row;
     }
-    const old = this.store.sessionByHost(host.hostPid, host.hostStart, null);
-    if (old === null || old.state === 'ended' || this.alive(this.safeProcTable([old.hostPid]), old)) {
+    const other = key === null ? this.store.sessionOfHost(host.hostPid, host.hostStart) : this.store.sessionByHost(host.hostPid, host.hostStart, null);
+    if (
+      other === null ||
+      other.state === 'ended' ||
+      (cliSessionId !== null && other.cliSessionId !== null && other.cliSessionId !== cliSessionId) ||
+      isAlive(this.safeProcTable([other.hostPid]), other.hostPid, other.hostStart)
+    ) {
       return null;
     }
-    this.store.updateSession(old.id, { hostMachine: key, hostLabel: this.labelOf(host) });
-    return this.store.sessionById(old.id);
+    if (key !== null) {
+      this.store.updateSession(other.id, { hostMachine: key, hostLabel: this.labelOf(host) });
+    }
+    return this.store.sessionById(other.id);
   }
 
   private nowMs(): number {
@@ -826,7 +836,7 @@ export class MurmurCore {
   sessionEvent(arg: SessionEventArg): SessionRow {
     const ts = this.nowMs();
     let row = arg.cliSessionId === null ? null : this.store.sessionByCliId(arg.client, arg.cliSessionId);
-    row ??= this.rowAt(arg.host);
+    row ??= this.rowAt(arg.host, arg.cliSessionId);
     // Before a new row takes a handle, so it can have the handle of a session that a reboot ended.
     this.endRebootedSessions(row?.id ?? -1, arg.host, ts);
     if (row === null) {
@@ -855,6 +865,13 @@ export class MurmurCore {
         this.store.updateSession(id, { pinned: 1 });
       }
     } else {
+      // A session that comes back after another took its handle must not share it.
+      if (row.state === 'ended' && arg.event !== 'session-end' && this.liveHolders(row.handle, row.id).length > 0) {
+        const handle = this.allocateHandle(arg.client, arg.cwd ?? row.cwd ?? undefined);
+        this.ensurePeer(handle);
+        this.store.reassignSession(row.id, row.handle, handle, false);
+        row = this.store.sessionById(row.id) as SessionRow;
+      }
       this.store.updateSession(row.id, {
         client: arg.client,
         hostPid: arg.host.hostPid,

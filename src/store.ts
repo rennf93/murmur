@@ -747,6 +747,13 @@ export class Store {
     return rec === undefined ? null : toSessionRow(rec);
   }
 
+  // The newest session recorded for this pid and start on any machine.
+  sessionOfHost(hostPid: number, hostStart: string): SessionRow | null {
+    const rec = this.stmt('SELECT * FROM sessions WHERE host_pid = ? AND host_start = ? ORDER BY updated_at DESC, id DESC LIMIT 1')
+      .get(hostPid, hostStart) as SessionRecord | undefined;
+    return rec === undefined ? null : toSessionRow(rec);
+  }
+
   // The sessions that have not ended, of the machine named by this host name
   // label, recorded under a boot id other than `machine`: a reboot ended them.
   rebootedSessions(label: string, machine: string, exceptId: number): SessionRow[] {

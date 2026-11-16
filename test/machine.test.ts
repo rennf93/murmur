@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SYSCTL_OPTIONS, machineId, validBootId, machineOf, machineRef, parseBootId, readBootId, readUptime, thisMachine, thisMachineRef, validField, validUptime } from '../src/machine.js';
+import { SYSCTL_OPTIONS, machineId, once, onceOk, readPidNamespace, validBootId, machineOf, machineRef, parseBootId, readBootId, readUptime, thisMachine, thisMachineRef, validField, validUptime } from '../src/machine.js';
 
 const SAMPLE = '8E3A9F1B-1C2D-4E5F-8A9B-0C1D2E3F4A5B';
 
@@ -57,9 +57,9 @@ describe('machineId', () => {
 
 describe('machineRef', () => {
   it('is the boot id with the host name as a label, and nothing at all without a boot id', () => {
-    expect(machineRef(SAMPLE.toLowerCase(), 'omen')).toEqual({ machine: SAMPLE.toLowerCase(), machineName: 'omen' });
-    expect(machineRef(SAMPLE.toLowerCase(), 'omen-renamed').machine).toBe(SAMPLE.toLowerCase());
-    expect(machineRef('', 'omen')).toEqual({});
+    expect(machineRef(SAMPLE.toLowerCase(), 'omen', '')).toEqual({ machine: SAMPLE.toLowerCase(), machineName: 'omen' });
+    expect(machineRef(SAMPLE.toLowerCase(), 'omen-renamed', '').machine).toBe(SAMPLE.toLowerCase());
+    expect(machineRef('', 'omen', '4026531836')).toEqual({});
     expect(thisMachineRef()).toEqual(thisMachineRef());
     expect(thisMachine()).toBe(machineOf(thisMachineRef()));
     expect(machineOf({})).toBe('');
@@ -99,6 +99,7 @@ describe('readUptime', () => {
   it('is kept to finite seconds of at most ten years where it enters the broker', () => {
     expect(validUptime(0)).toBe(0);
     expect(validUptime(86400)).toBe(86400);
+    expect(validUptime(315_360_000)).toBe(315_360_000);
     for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY, 315_360_001, '5', null, undefined]) {
       expect(validUptime(bad)).toBeUndefined();
     }
@@ -112,12 +113,63 @@ describe('the sysctl call', () => {
   });
 });
 
+describe('the pid namespace in the machine', () => {
+  it('names the process table: the boot id plus the namespace on Linux, the bare boot id when there is none to read', () => {
+    expect(machineRef(SAMPLE.toLowerCase(), 'omen', '4026531836')).toEqual({ machine: SAMPLE.toLowerCase() + ':4026531836', machineName: 'omen' });
+    expect(machineRef(SAMPLE.toLowerCase(), 'omen', '4026532999').machine).not.toBe(machineRef(SAMPLE.toLowerCase(), 'omen', '4026531836').machine);
+    expect(readPidNamespace('linux', () => 'pid:[4026531836]')).toBe('4026531836');
+    expect(readPidNamespace('linux', () => 'garbage')).toBe('');
+    expect(readPidNamespace('darwin', () => 'pid:[4026531836]')).toBe('');
+    expect(readPidNamespace('linux', () => {
+      throw new Error('no access');
+    })).toBe('');
+    expect(readPidNamespace()).toMatch(/^\d*$/);
+    expect(machineRef().machine).toMatch(/^([0-9a-f-]{36}(:\d+)?)?$/);
+  });
+});
+
+describe('once', () => {
+  it('keeps the first read: a later failing read does not change what a process said before', () => {
+    let reads = 0;
+    const read = once(() => {
+      reads += 1;
+      return reads === 1 ? { machine: SAMPLE.toLowerCase() } : {};
+    });
+    expect(read()).toEqual({ machine: SAMPLE.toLowerCase() });
+    expect(read()).toEqual({ machine: SAMPLE.toLowerCase() });
+    expect(reads).toBe(1);
+    expect(thisMachineRef()).toBe(thisMachineRef());
+  });
+});
+
 describe('validBootId', () => {
   it('takes a uuid in either case as one lower case value, and nothing else', () => {
     expect(validBootId('BBBBBBBB-1C2D-4E5F-8A9B-0C1D2E3F4A5B')).toBe('bbbbbbbb-1c2d-4e5f-8a9b-0c1d2e3f4a5b');
     expect(validBootId('bbbbbbbb-1c2d-4e5f-8a9b-0c1d2e3f4a5b')).toBe('bbbbbbbb-1c2d-4e5f-8a9b-0c1d2e3f4a5b');
-    for (const bad of ['', 'mac-boot', 'omen', 'bbbbbbbb-1c2d-4e5f-8a9b', 'x bbbbbbbb-1c2d-4e5f-8a9b-0c1d2e3f4a5b', 'bbbbbbbb-1c2d-4e5f-8a9b-0c1d2e3f4a5b\n', 12, null, undefined]) {
+    expect(validBootId('BBBBBBBB-1C2D-4E5F-8A9B-0C1D2E3F4A5B:4026531836')).toBe('bbbbbbbb-1c2d-4e5f-8a9b-0c1d2e3f4a5b:4026531836');
+    expect(validBootId('bbbbbbbb-1c2d-4e5f-8a9b-0c1d2e3f4a5b:' + '9'.repeat(20))).toBe('bbbbbbbb-1c2d-4e5f-8a9b-0c1d2e3f4a5b:' + '9'.repeat(20));
+    for (const bad of ['bbbbbbbb-1c2d-4e5f-8a9b-0c1d2e3f4a5b:', 'bbbbbbbb-1c2d-4e5f-8a9b-0c1d2e3f4a5b:' + '9'.repeat(21), 'bbbbbbbb-1c2d-4e5f-8a9b-0c1d2e3f4a5b:12x', 'bbbbbbbb-1c2d-4e5f-8a9b-0c1d2e3f4a5b::1', '', 'mac-boot', 'omen', 'bbbbbbbb-1c2d-4e5f-8a9b', 'x bbbbbbbb-1c2d-4e5f-8a9b-0c1d2e3f4a5b', 'bbbbbbbb-1c2d-4e5f-8a9b-0c1d2e3f4a5b\n', 12, null, undefined]) {
       expect(validBootId(bad)).toBeUndefined();
     }
+  });
+});
+
+describe('onceOk', () => {
+  it('keeps a read once it has worked, and tries a failed read again at most once per interval', () => {
+    let clock = 1000;
+    let reads = 0;
+    const answers = [{}, {}, { machine: 'x' }, {}];
+    const read = onceOk(() => answers[Math.min(reads++, answers.length - 1)] as { machine?: string }, (v) => v.machine !== undefined, 60_000, () => clock);
+    expect(read()).toEqual({});
+    clock += 59_999;
+    expect(read()).toEqual({});
+    expect(reads).toBe(1);
+    clock += 1;
+    expect(read()).toEqual({});
+    clock += 60_000;
+    expect(read()).toEqual({ machine: 'x' });
+    clock += 600_000;
+    expect(read()).toEqual({ machine: 'x' });
+    expect(reads).toBe(3);
   });
 });

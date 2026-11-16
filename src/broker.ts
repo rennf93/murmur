@@ -229,8 +229,9 @@ function reqHost(value: unknown): HostRef {
   // A machine that is not a uuid, or a label that is not 1 to 255 printable
   // characters, reads as absent.
   const machine = validBootId(rec.machine);
-  const machineName = machine === undefined ? undefined : validField(rec.machineName);
-  const machineUptime = machine === undefined ? undefined : validUptime(rec.machineUptime);
+  // The label and the uptime mean something only next to a machine; the core reads them that way.
+  const machineName = validField(rec.machineName);
+  const machineUptime = validUptime(rec.machineUptime);
   return {
     hostPid: reqNumber(rec, 'hostPid'),
     hostStart: reqString(rec, 'hostStart'),

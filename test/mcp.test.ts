@@ -808,6 +808,13 @@ describe('sessions of two machines at one broker', () => {
     await startAs('badlabel', 1005, { machine: '00000000-0000-4000-8000-000000000009', machineName: 'x'.repeat(300) });
     await startAs('upper', 1006, { machine: 'AAAAAAAA-0000-4000-8000-00000000000A', machineName: 'mac' });
     await startAs('lower', 1007, { machine: 'aaaaaaaa-0000-4000-8000-00000000000a', machineName: 'mac' });
+    await startAs('spaced', 1009, { machine: 'AAAAAAAA-0000-4000-8000-00000000000A:4026531836', machineName: 'box' });
+    // A label and an uptime without a machine end nothing: they mean something only next to one.
+    await startAs('oldboot', 1010, { machine: '00000000-0000-4000-8000-0000000000b1', machineName: 'mac' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await startAs('nomachine', 1011, { machineName: 'mac', machineUptime: 0 });
+    expect(stack.store.sessionByCliId('claude', 'oldboot')?.state).not.toBe('ended');
+    expect(stack.store.sessionByCliId('claude', 'nomachine')).toMatchObject({ hostMachine: null, hostLabel: null });
     await startAs('notuuid', 1008, { machine: 'mac-boot', machineName: 'mac' });
     const row = (cli: string) => stack.store.sessionByCliId('claude', cli);
     for (const cli of ['huge', 'lines', 'typed']) {
@@ -816,6 +823,7 @@ describe('sessions of two machines at one broker', () => {
     // Upper and lower case are one machine, and something that is not a uuid is no machine.
     expect(row('upper')?.hostMachine).toBe('aaaaaaaa-0000-4000-8000-00000000000a');
     expect(row('lower')?.hostMachine).toBe('aaaaaaaa-0000-4000-8000-00000000000a');
+    expect(row('spaced')?.hostMachine).toBe('aaaaaaaa-0000-4000-8000-00000000000a:4026531836');
     expect(row('notuuid')).toMatchObject({ hostMachine: null, hostLabel: null });
     expect(row('good')).toMatchObject({ hostMachine: '00000000-0000-4000-8000-000000000009', hostLabel: 'mac' });
     expect(row('badlabel')).toMatchObject({ hostMachine: '00000000-0000-4000-8000-000000000009', hostLabel: null });
@@ -836,6 +844,9 @@ describe('sessions of two machines at one broker', () => {
     };
     // On its own machine the shell speaks as the session; without the machine it is the owner's.
     expect((await register({ ancestors: [4000, 1], machine: MAC })).result.handle).toBe(remote.handle);
+    // The broker reads the boot id as one lower case value however it is written.
+    expect((await register({ ancestors: [4000, 1], machine: MAC.toUpperCase() })).result.handle).toBe(remote.handle);
+    expect((await register({ ancestors: [4000, 1], machine: 'not-a-uuid' })).result.handle).toBe('renn');
     expect((await register({ ancestors: [4000, 1] })).result.handle).toBe('renn');
     // The owner typing in that shell is recorded as typing in that session.
     stack.core.register({ handle: 'target' });

@@ -10,8 +10,9 @@ import { Store } from '../src/store.js';
 // The broker runs on OMEN. A session of the Mac is a session of another
 // machine: the broker cannot see its pid, so it is alive for a lease after
 // its last event, or while one of its connections is open.
-const OMEN = 'omen-boot-1';
-const MAC = 'mac-boot-9';
+// The broker validates machine ids as uuids (src/machine.ts validBootId); the core takes any string.
+const OMEN = '0e000000-0000-4000-8000-000000000001';
+const MAC = '0a000000-0000-4000-8000-000000000009';
 const HOUR = 60 * 60 * 1000;
 const LEASE = 12 * HOUR;
 
@@ -502,5 +503,155 @@ describe('two machines that share a host name, with and without a connection', (
     expect(store.sessionById(old.id)?.state).toBe('ended');
     expect(back.handle).toBe(old.handle);
     expect(store.listGroups().find((g) => g.name === 'crew')?.members).toEqual([old.handle]);
+  });
+});
+
+describe('a session that comes back after another took its handle', () => {
+  const settle = (): void => {
+    now += 61 * 1000;
+  };
+
+  it('never shares a handle: it takes the next free one, and ten alternating events end nobody', () => {
+    settle();
+    const hostA = remote(100, 'boot-a', 'Mac', 5 * 86400);
+    const hostB = remote(200, 'boot-b', 'Mac', 0);
+    const a = open('a', hostA, '/Users/a/work/guard');
+    now += 10 * 60 * 1000;
+    // B claims the label with a fresh boot: the connection-less A is ended and B takes the handle.
+    const b = open('b', hostB, '/Users/b/work/guard');
+    expect(store.sessionById(a.id)?.state).toBe('ended');
+    expect(b.handle).toBe(a.handle);
+    store.createGroup('crew', now);
+    store.addMember('crew', b.handle, now);
+    // A speaks again: it comes back under the next free handle, and the handle's queue stays with B.
+    now += 10 * 1000;
+    const back = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'a', host: { ...hostA, machineUptime: 5 * 86400 + 610 }, cwd: '/Users/a/work/guard' });
+    expect(back.id).toBe(a.id);
+    expect(back).toMatchObject({ handle: 'claude-guard-2', state: 'busy' });
+    expect(store.sessionById(b.id)?.handle).toBe('claude-guard');
+    expect(store.listGroups().find((g) => g.name === 'crew')?.members).toEqual(['claude-guard']);
+    for (let n = 0; n < 5; n += 1) {
+      now += 45 * 1000;
+      core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'a', host: { ...hostA, machineUptime: 5 * 86400 + 700 + n * 90 } });
+      now += 45 * 1000;
+      core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'b', host: { ...hostB, machineUptime: 100 + n * 90 } });
+    }
+    expect(store.listSessions().map((r) => [r.cliSessionId, r.handle, r.state]).sort()).toEqual([['a', 'claude-guard-2', 'busy'], ['b', 'claude-guard', 'busy']]);
+  });
+
+  it('names the handle of the session that comes back from its stored folder, or without a folder at all', () => {
+    now += 61 * 1000;
+    const hostA = remote(100, 'boot-a', 'Mac', 5 * 86400);
+    const hostC = remote(300, 'boot-c', 'Mac', 5 * 86400);
+    open('a', hostA, '/Users/a/work/guard');
+    core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'nocwd', host: hostC });
+    now += 10 * 60 * 1000;
+    // A fresh boot claims the label and the first folder's handle, and ends both connection-less sessions.
+    open('b', remote(200, 'boot-b', 'Mac', 0), '/Users/b/work/guard');
+    expect(store.sessionByCliId('claude', 'a')?.state).toBe('ended');
+    expect(store.sessionByCliId('claude', 'nocwd')?.state).toBe('ended');
+    const backA = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'a', host: hostA });
+    expect(backA.handle).toBe('claude-guard-2');
+    // Another session without a folder takes the plain handle while it is ended.
+    const taker = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'taker', host: remote(400, 'boot-b', 'Mac', 100) });
+    expect(taker.handle).toBe('claude');
+    const backNoCwd = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'nocwd', host: hostC });
+    expect(backNoCwd.handle).toBe('claude-2');
+  });
+
+  it('leaves a session that comes back to a free handle where it was', () => {
+    const host = remote();
+    const first = open('mac', host, '/Users/renzof/work/guard');
+    core.sessionEvent({ event: 'session-end', client: 'claude', cliSessionId: 'mac', host });
+    const back = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'mac', host });
+    expect(back).toMatchObject({ id: first.id, handle: 'claude-guard', state: 'busy' });
+  });
+});
+
+describe('adopting the row of the same process', () => {
+  it('does not take the row of another session: the CLI ids differ', () => {
+    const host = { hostPid: 500, hostStart: 'T500' };
+    const other = open('other', host, '/Users/renzof/work/guard');
+    core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'other', host });
+    const mine = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'mine', host: { ...host, machine: MAC, machineName: 'mac' }, cwd: '/Users/renzof/work/guard' });
+    expect(mine.id).not.toBe(other.id);
+    expect(store.sessionById(other.id)).toMatchObject({ cliSessionId: 'other', hostMachine: null });
+    expect(store.listSessions()).toHaveLength(2);
+  });
+
+  it('still takes the row of the same session without a CLI id on either side', () => {
+    const host = { hostPid: 500, hostStart: 'T500' };
+    const noId = core.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: null, host, cwd: '/Users/renzof/work/guard' });
+    const upgraded = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: null, host: { ...host, machine: MAC, machineName: 'mac' } });
+    expect(upgraded.id).toBe(noId.id);
+    expect(store.sessionById(noId.id)).toMatchObject({ hostMachine: MAC, hostLabel: 'mac' });
+  });
+
+  it('finds the row of a remote session for a sparse event without a CLI id, and leaves its machine alone', () => {
+    const first = open('mac', remote(51234, MAC, 'mac'), '/Users/renzof/work/guard');
+    const sparse = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: null, host: { hostPid: 51234, hostStart: 'T51234' } });
+    expect(sparse.id).toBe(first.id);
+    expect(store.listSessions()).toHaveLength(1);
+    expect(store.sessionById(first.id)).toMatchObject({ hostMachine: MAC, hostLabel: 'mac' });
+    // Not when a live process of this machine has that pid and start.
+    const mine = local(900);
+    const remoteTwin = open('twin', { hostPid: 900, hostStart: 'S900', machine: MAC, machineName: 'mac' }, '/Users/renzof/work/other');
+    const here = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: null, host: { hostPid: mine.hostPid, hostStart: mine.hostStart }, cwd: '/w/here' });
+    expect(here.id).not.toBe(remoteTwin.id);
+  });
+});
+
+describe('a container on the host of the broker', () => {
+  const BOOT = '8e3a9f1b-1c2d-4e5f-8a9b-0c1d2e3f4a5b';
+  const HOSTNS = BOOT + ':4026531836';
+  const BOXNS = BOOT + ':4026532999';
+
+  it('is another machine: same boot id, another pid namespace, so a process table that does not hold its pids', () => {
+    const broker = new MurmurCore(store, { onAppend: () => {}, onStateChange: () => {} }, () => now, () => procs, HOSTNS);
+    procs.set(100, { ppid: 1, start: 'S100', comm: 'claude' });
+    const onHost = broker.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'host', host: { hostPid: 100, hostStart: 'S100', machine: HOSTNS, machineName: 'omen' }, cwd: '/w/g', source: 'startup' });
+    const inBox = broker.sessionEvent({ event: 'session-start', client: 'claude', cliSessionId: 'box', host: { hostPid: 7, hostStart: 'S7', machine: BOXNS, machineName: 'box' }, cwd: '/w/g', source: 'startup' });
+    expect(onHost).toMatchObject({ hostMachine: null, handle: 'claude-g' });
+    expect(inBox).toMatchObject({ hostMachine: BOXNS, handle: 'claude-g-2' });
+    // The process table of the host never holds pid 7, yet the box session stays alive (lease).
+    now += 5 * 1000;
+    expect(broker.claimable('claude-g-2', null)).toBe(false);
+    // Two processes of one namespace are one machine.
+    const sameBox = broker.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'box2', host: { hostPid: 8, hostStart: 'S8', machine: BOXNS, machineName: 'box' }, cwd: '/w/h' });
+    expect(sameBox.hostMachine).toBe(BOXNS);
+  });
+});
+
+describe('the grace of the reboot rule, to the millisecond', () => {
+  it('ends nothing at exactly 60 seconds after the broker started and ends the old sessions 1 ms later', () => {
+    const old = open('old', remote(100, 'boot-old', 'Mac', 86400), '/Users/a/work/guard');
+    const bornAt = now;
+    now = bornAt + 60 * 1000;
+    open('new-1', remote(300, 'boot-new', 'Mac', 0), '/Users/a/work/other');
+    expect(store.sessionById(old.id)?.state).not.toBe('ended');
+    now += 1;
+    open('new-2', remote(301, 'boot-new', 'Mac', 0), '/Users/a/work/third');
+    expect(store.sessionById(old.id)?.state).toBe('ended');
+  });
+});
+
+describe('what the review of the uptime version found', () => {
+  it('adopts the row of an old client of the same process while its MCP server is still connected', () => {
+    const host = { hostPid: 500, hostStart: 'T500' };
+    const old = open('old', host, '/Users/renzof/work/guard');
+    core.hostConnected = (h) => h.hostPid === 500 && h.hostMachine === null;
+    // No CLI id, so the row is found by its host (the adoption path), while the old connection is open.
+    const upgraded = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: null, host: { ...host, machine: MAC, machineName: 'mac' } });
+    expect(upgraded.id).toBe(old.id);
+    expect(store.sessionById(old.id)).toMatchObject({ hostMachine: MAC, hostLabel: 'mac' });
+    expect(store.listSessions()).toHaveLength(1);
+  });
+
+  it('keeps the label of a session on a machine without one when a sparse event arrives', () => {
+    const noLabel = open('nolabel', { hostPid: 61, hostStart: 'T61', machine: MAC }, '/w/a');
+    expect(noLabel.hostLabel).toBeNull();
+    const sparse = core.sessionEvent({ event: 'prompt', client: 'claude', cliSessionId: 'nolabel', host: { hostPid: 61, hostStart: 'T61' } });
+    expect(sparse.id).toBe(noLabel.id);
+    expect(store.sessionById(noLabel.id)).toMatchObject({ hostMachine: MAC, hostLabel: null });
   });
 });

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readlinkSync } from 'node:fs';
 import { hostname } from 'node:os';
 
 // A host reference is a pid and a start time, which only mean something on the
@@ -12,7 +12,9 @@ import { hostname } from 'node:os';
 // is judged as one of the broker's own machine, as before this existed.
 
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
-const UUID_FULL = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// A machine from the wire: a boot id, optionally followed by `:` and the number
+// of its pid namespace (Linux).
+const MACHINE_FULL = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(:[0-9]{1,20})?$/i;
 // What a machine field may hold where it enters the broker.
 const FIELD = /^[^\u0000-\u001f\u007f]{1,255}$/;
 
@@ -86,6 +88,20 @@ export function validUptime(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 315_360_000 ? value : undefined;
 }
 
+// The number inside `/proc/self/ns/pid` (`pid:[4026531836]`): the pid namespace
+// of this process, empty when there is none to read (not Linux, or no access).
+// A process table is only one machine's if its processes share this number.
+export function readPidNamespace(
+  platform: string = process.platform,
+  readLink: (path: string) => string = (path) => readlinkSync(path),
+): string {
+  try {
+    return platform === 'linux' ? (/\[(\d+)\]/.exec(readLink('/proc/self/ns/pid'))?.[1] ?? '') : '';
+  } catch {
+    return '';
+  }
+}
+
 export interface MachineRef {
   machine?: string;
   machineName?: string;
@@ -93,32 +109,61 @@ export interface MachineRef {
 
 // What a client puts next to its host reference: the boot id and the host
 // name, or nothing when there is no boot id.
-export function machineRef(bootId: string = readBootId(), name: string = hostname()): MachineRef {
-  return bootId === '' ? {} : { machine: bootId, machineName: name };
+export function machineRef(bootId: string = readBootId(), name: string = hostname(), pidNamespace: string = readPidNamespace()): MachineRef {
+  return bootId === '' ? {} : { machine: pidNamespace === '' ? bootId : bootId + ':' + pidNamespace, machineName: name };
 }
 
-let cached: MachineRef | undefined;
-
-// This machine's reference, read once.
-export function thisMachineRef(): MachineRef {
-  cached ??= machineRef();
-  return cached;
+// A read that happens once: a later failing read cannot change what a process
+// said before.
+export function once<T>(read: () => T): () => T {
+  let value: { v: T } | undefined;
+  return () => {
+    value ??= { v: read() };
+    return value.v;
+  };
 }
 
-// The boot id of a reference, or '' when it has none.
+// A read kept once it has worked: a failed read is tried again, at most once
+// per `retryMs`, so a boot id that could not be read at start (a sysctl that
+// timed out) is picked up later, while a good value is never replaced.
+export function onceOk<T>(read: () => T, ok: (value: T) => boolean, retryMs: number, now: () => number = Date.now): () => T {
+  let good: { v: T } | undefined;
+  let last: { v: T; at: number } | undefined;
+  return () => {
+    if (good !== undefined) {
+      return good.v;
+    }
+    if (last === undefined || now() - last.at >= retryMs) {
+      const v = read();
+      last = { v, at: now() };
+      if (ok(v)) {
+        good = { v };
+      }
+    }
+    return (last as { v: T }).v;
+  };
+}
+
+// This machine's reference: read once it has worked, tried again every minute
+// while it has not.
+export const thisMachineRef: () => MachineRef = onceOk(() => machineRef(), (ref) => ref.machine !== undefined, 60_000);
+
+// The machine of a reference (boot id, with the pid namespace on Linux), or ''
+// when it has none.
 export function machineOf(ref: MachineRef): string {
   return ref.machine ?? '';
 }
 
-// This machine's boot id, or '' when it has none.
+// This machine's id, or '' when it has none.
 export function thisMachine(): string {
   return machineOf(thisMachineRef());
 }
 
-// A boot id from the wire: a uuid, lower case; undefined for anything else, so
-// one machine is one value however a client writes it.
+// A machine from the wire: a uuid, lower case, optionally followed by `:` and
+// 1 to 20 digits; undefined for anything else, so one machine is one value
+// however a client writes it.
 export function validBootId(value: unknown): string | undefined {
-  return typeof value === 'string' && UUID_FULL.test(value) ? value.toLowerCase() : undefined;
+  return typeof value === 'string' && MACHINE_FULL.test(value) ? value.toLowerCase() : undefined;
 }
 
 // A machine field from the wire: undefined unless it is 1 to 255 printable

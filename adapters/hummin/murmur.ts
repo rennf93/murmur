@@ -23,7 +23,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, readlinkSync } from "node:fs";
 import { connect, type Socket } from "node:net";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
@@ -139,6 +139,8 @@ function openClient(onEvent: (f: Json) => void, onClose: () => void): Promise<Cl
 	});
 }
 
+let machineOnce: { machine?: string; machineName?: string } | undefined;
+
 function readHost(): Host {
 	// hostStart must match what the broker computes: ps lstart under LC_ALL=C
 	let hostStart = "";
@@ -150,7 +152,9 @@ function readHost(): Host {
 	} catch {
 		// broker will treat the host as unverifiable
 	}
-	const machine = machineRef();
+	// Read once per process: a later failing read must not change what this process said before.
+	machineOnce ??= machineRef();
+	const machine = machineOnce;
 	return {
 		hostPid: process.pid,
 		hostStart,
@@ -193,7 +197,14 @@ function machineRef(): { machine?: string; machineName?: string } {
 					: "";
 		const uuid = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.exec(raw);
 		if (uuid !== null) {
-			return { machine: uuid[0].toLowerCase(), machineName: hostname() };
+			// On Linux the pid namespace is part of the machine: a process table is one machine's.
+			let namespace = "";
+			try {
+				namespace = process.platform === "linux" ? (/\[(\d+)\]/.exec(readlinkSync("/proc/self/ns/pid"))?.[1] ?? "") : "";
+			} catch {
+				// no namespace to read
+			}
+			return { machine: uuid[0].toLowerCase() + (namespace === "" ? "" : ":" + namespace), machineName: hostname() };
 		}
 	} catch {
 		// no boot id

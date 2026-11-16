@@ -3,7 +3,7 @@
 // and the murmur_* tools talk over the calling session's connection.
 import { tool, type Plugin } from '@opencode-ai/plugin';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readlinkSync } from 'node:fs';
 import { connect, type Socket } from 'node:net';
 import { homedir, hostname } from 'node:os';
 import { join } from 'node:path';
@@ -33,7 +33,14 @@ function machineRef(): { machine?: string; machineName?: string } {
           : '';
     const uuid = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.exec(raw);
     if (uuid !== null) {
-      return { machine: uuid[0].toLowerCase(), machineName: hostname() };
+      // On Linux the pid namespace is part of the machine: a process table is one machine's.
+      let namespace = '';
+      try {
+        namespace = process.platform === 'linux' ? (/\[(\d+)\]/.exec(readlinkSync('/proc/self/ns/pid'))?.[1] ?? '') : '';
+      } catch {
+        // no namespace to read
+      }
+      return { machine: uuid[0].toLowerCase() + (namespace === '' ? '' : ':' + namespace), machineName: hostname() };
     }
   } catch {
     // no boot id
