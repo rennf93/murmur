@@ -4,6 +4,8 @@ import { describe, expect, it } from 'vitest';
 import { SYSCTL_OPTIONS, machineId, machineReader, once, onceOk, parseWireMachine, readFingerprint, readPidNamespace, validFingerprint, validBootId, machineOf, machineRef, parseBootId, readBootId, readUptime, thisMachine, thisMachineRef, validField, validUptime } from '../src/machine.js';
 
 const SAMPLE = '8E3A9F1B-1C2D-4E5F-8A9B-0C1D2E3F4A5B';
+const onMac = process.platform === 'darwin';
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 describe('parseBootId', () => {
   it('reads a boot uuid from the Linux file and from macOS sysctl output, lower case', () => {
@@ -43,8 +45,9 @@ describe('readBootId', () => {
   });
 
   it('asks the system, and reads a uuid or nothing', () => {
-    expect(readBootId()).toMatch(/^([0-9a-f-]{36})?$/);
-    expect(readBootId('darwin')).toMatch(/^([0-9a-f-]{36})?$/);
+    // The real readers depend on the host: Linux reads /proc, a Mac reads sysctl, and the other platform's path finds nothing.
+    expect(readBootId()).toMatch(onMac ? UUID : /^([0-9a-f-]{36})?$/);
+    expect(readBootId('darwin')).toMatch(onMac ? UUID : /^([0-9a-f-]{36})?$/);
   });
 });
 
@@ -99,7 +102,8 @@ describe('readUptime', () => {
     expect(readUptime('linux', boom)).toBeUndefined();
     expect(readUptime('darwin', () => '', boom)).toBeUndefined();
     expect(readUptime()).toEqual(expect.any(Number));
-    expect(readUptime('darwin')).toBeUndefined();
+    // The real macOS path: a number on a Mac, nothing where there is no /usr/sbin/sysctl to ask.
+    expect(readUptime('darwin')).toEqual(onMac ? expect.any(Number) : undefined);
   });
 
   it('is kept to finite seconds of at most ten years where it enters the broker', () => {
@@ -249,7 +253,27 @@ describe('readFingerprint', () => {
     })).toBeUndefined();
     expect(readFingerprint('win32')).toBeUndefined();
     expect(readFingerprint()).toMatch(/^([0-9a-f]{32})?$/);
-    expect(readFingerprint('darwin')).toBeUndefined();
+    // The real macOS path: the hash of the IOPlatformUUID on a Mac, nothing where there is no /usr/sbin/ioreg.
+    expect(readFingerprint('darwin')).toEqual(onMac ? expect.stringMatching(/^[0-9a-f]{32}$/) : undefined);
+  });
+});
+
+describe('the machine this test runs on', () => {
+  it.runIf(onMac)('on macOS: the bare boot uuid, no pid namespace, a fingerprint and an uptime', () => {
+    expect(readBootId()).toMatch(UUID);
+    expect(readPidNamespace()).toBe('');
+    expect(machineRef().machine).toBe(readBootId());
+    expect(thisMachine()).toBe(readBootId());
+    expect(readFingerprint()).toMatch(/^[0-9a-f]{32}$/);
+    expect(machineRef().machineFingerprint).toBe(readFingerprint());
+    expect(readUptime()).toEqual(expect.any(Number));
+    expect(readUptime() as number).toBeGreaterThanOrEqual(0);
+  });
+
+  it.runIf(process.platform === 'linux')('on Linux: the boot uuid, with the pid namespace when it can be read', () => {
+    expect(readBootId()).toMatch(UUID);
+    expect(machineRef().machine).toMatch(/^[0-9a-f-]{36}(:\d+)?$/);
+    expect(readUptime()).toEqual(expect.any(Number));
   });
 });
 
