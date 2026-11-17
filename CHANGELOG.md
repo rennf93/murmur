@@ -4,6 +4,8 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 
 ## [Unreleased]
 
+## [0.2.11] - 2026-11-17
+
 ### Fixed
 
 - A session of another machine no longer looks dead to the broker, and the sessions of a machine that rebooted no longer keep their handles.
@@ -225,7 +227,8 @@ All notable changes to murmur are documented here. The format follows [Keep a Ch
 - Limits: send rate, duplicate window, thread and inbox caps.
 - 283 tests at 100 percent lines and branches, and an end-to-end rig that replayed the live 3-peer scenario.
 
-[Unreleased]: https://github.com/rennf93/murmur/compare/v0.2.10...HEAD
+[Unreleased]: https://github.com/rennf93/murmur/compare/v0.2.11...HEAD
+[0.2.11]: https://github.com/rennf93/murmur/releases/tag/v0.2.11
 [0.2.10]: https://github.com/rennf93/murmur/releases/tag/v0.2.10
 [0.2.9]: https://github.com/rennf93/murmur/releases/tag/v0.2.9
 [0.2.8]: https://github.com/rennf93/murmur/releases/tag/v0.2.8
