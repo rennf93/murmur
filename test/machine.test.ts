@@ -258,6 +258,18 @@ describe('readFingerprint', () => {
   });
 });
 
+describe('the default readers, whatever the platform', () => {
+  it('runs the real file and link readers on a Mac too, where there is no /proc and they read nothing', () => {
+    const boot = readBootId('linux');
+    const namespace = readPidNamespace('linux');
+    const print = readFingerprint('linux');
+    expect(boot).toMatch(onMac ? /^$/ : /^([0-9a-f-]{36})?$/);
+    expect(namespace).toMatch(onMac ? /^$/ : /^\d*$/);
+    // readFingerprint answers undefined where it finds no id, which is what a Mac does with the Linux files.
+    expect(print ?? '').toMatch(onMac ? /^$/ : /^([0-9a-f]{32})?$/);
+  });
+});
+
 describe('the machine this test runs on', () => {
   it.runIf(onMac)('on macOS: the bare boot uuid, no pid namespace, a fingerprint and an uptime', () => {
     expect(readBootId()).toMatch(UUID);
