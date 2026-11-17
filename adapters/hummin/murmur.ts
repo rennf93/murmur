@@ -23,9 +23,10 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { readFileSync, readlinkSync } from "node:fs";
 import { connect, type Socket } from "node:net";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -41,7 +42,7 @@ const RECONNECT_MS = 5000;
 const REQUEST_TIMEOUT_MS = 30_000;
 
 type Json = Record<string, unknown>;
-interface Host { hostPid: number; hostStart: string }
+interface Host { hostPid: number; hostStart: string; machine?: string; machineName?: string; machineFingerprint?: string; readonly machineUptime?: number }
 
 // ---------------------------------------------------------------------------
 // socket client (request/reply by id, events to a callback)
@@ -139,6 +140,8 @@ function openClient(onEvent: (f: Json) => void, onClose: () => void): Promise<Cl
 	});
 }
 
+let machineOnce: { machine?: string; machineName?: string } | undefined;
+
 function readHost(): Host {
 	// hostStart must match what the broker computes: ps lstart under LC_ALL=C
 	let hostStart = "";
@@ -150,7 +153,86 @@ function readHost(): Host {
 	} catch {
 		// broker will treat the host as unverifiable
 	}
-	return { hostPid: process.pid, hostStart };
+	// Read once per process: a later failing read must not change what this process said before.
+	machineOnce ??= machineRef();
+	const machine = machineOnce;
+	return {
+		hostPid: process.pid,
+		hostStart,
+		...machine,
+		// Read when a message is serialized, so the broker sees the uptime of that moment.
+		get machineUptime(): number | undefined {
+			return machine.machine === undefined ? undefined : machineUptime();
+		},
+	};
+}
+
+// Seconds since this machine booted (src/machine.ts readUptime).
+function machineUptime(): number | undefined {
+	try {
+		if (process.platform === "linux") {
+			const seconds = Number.parseFloat(readFileSync("/proc/uptime", "utf8"));
+			return Number.isFinite(seconds) && seconds >= 0 ? Math.floor(seconds) : undefined;
+		}
+		if (process.platform === "darwin") {
+			const out = execFileSync("/usr/sbin/sysctl", ["-n", "kern.boottime"], { encoding: "utf8", timeout: 1000 });
+			const booted = /sec\s*=\s*(\d+)/.exec(out)?.[1];
+			return booted === undefined ? undefined : Math.max(0, Math.floor(Date.now() / 1000) - Number(booted));
+		}
+	} catch {
+		// no uptime
+	}
+	return undefined;
+}
+
+// What the broker keeps with a host (src/machine.ts): the boot id, and the host
+// name as a label; neither when there is no boot id, so the broker reads this
+// as an old client of its own machine.
+// A hash that names the machine across reboots (src/machine.ts readFingerprint):
+// the raw system id never leaves the machine.
+function machineFingerprint(): string | undefined {
+	const attempt = (read: () => string): string => {
+		try {
+			return read();
+		} catch {
+			return "";
+		}
+	};
+	let raw = "";
+	if (process.platform === "linux") {
+		raw = attempt(() => readFileSync("/etc/machine-id", "utf8").trim());
+		raw = /^[0-9a-f]{32}$/.test(raw) ? raw : attempt(() => readFileSync("/var/lib/dbus/machine-id", "utf8").trim());
+		raw = /^[0-9a-f]{32}$/.test(raw) ? raw : "";
+	} else if (process.platform === "darwin") {
+		raw = attempt(() => /"IOPlatformUUID"\s*=\s*"([0-9a-f-]{36})"/i.exec(execFileSync("/usr/sbin/ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"], { encoding: "utf8", timeout: 1000 }))?.[1] ?? "");
+	}
+	return raw === "" ? undefined : createHash("sha256").update("murmur-machine:" + raw).digest("hex").slice(0, 32);
+}
+
+function machineRef(): { machine?: string; machineName?: string; machineFingerprint?: string } {
+	try {
+		const raw =
+			process.platform === "linux"
+				? readFileSync("/proc/sys/kernel/random/boot_id", "utf8")
+				: process.platform === "darwin"
+					? execFileSync("/usr/sbin/sysctl", ["-n", "kern.bootsessionuuid"], { encoding: "utf8", timeout: 1000 })
+					: "";
+		const uuid = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.exec(raw);
+		if (uuid !== null) {
+			// On Linux the pid namespace is part of the machine: a process table is one machine's.
+			let namespace = "";
+			try {
+				namespace = process.platform === "linux" ? (/\[(\d+)\]/.exec(readlinkSync("/proc/self/ns/pid"))?.[1] ?? "") : "";
+			} catch {
+				// no namespace to read
+			}
+			const fingerprint = machineFingerprint();
+			return { machine: uuid[0].toLowerCase() + (namespace === "" ? "" : ":" + namespace), machineName: hostname(), ...(fingerprint !== undefined ? { machineFingerprint: fingerprint } : {}) };
+		}
+	} catch {
+		// no boot id
+	}
+	return {};
 }
 
 function text(s: string, isError = false): { content: { type: "text"; text: string }[]; details: undefined; isError?: boolean } {

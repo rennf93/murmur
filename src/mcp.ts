@@ -9,6 +9,8 @@ import { getPaths, isRemoteHome, readToken } from './config.js';
 import type { MurmurPaths } from './config.js';
 import { nativeSend } from './native.js';
 import type { NativeSendResult } from './native.js';
+import { thisMachineRef } from './machine.js';
+import type { MachineRef } from './machine.js';
 import { currentHost } from './proc.js';
 import type { HostInfo } from './proc.js';
 import { HANDLE_RE, MurmurError, WAIT_DEFAULT_MS, WAIT_MAX_MS, noticeText } from './protocol.js';
@@ -75,11 +77,11 @@ export function clientFromEnv(env: NodeJS.ProcessEnv): CliName {
   return 'other';
 }
 
-export function identityFor(host: HostInfo | null, env: NodeJS.ProcessEnv, cwd: string): Identity {
+export function identityFor(host: HostInfo | null, env: NodeJS.ProcessEnv, cwd: string, machine: MachineRef = thisMachineRef()): Identity {
   if (host === null) {
     return {};
   }
-  return { host: { hostPid: host.hostPid, hostStart: host.hostStart }, client: clientFromEnv(env), cwd };
+  return { host: { hostPid: host.hostPid, hostStart: host.hostStart, ...machine }, client: clientFromEnv(env), cwd };
 }
 
 export function buildMcpServer(client: Pick<MurmurClient, 'request'>, identity: Identity = {}): McpServer {

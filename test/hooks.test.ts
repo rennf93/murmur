@@ -55,12 +55,12 @@ function freshHome(): string {
   return home;
 }
 
-async function buildStack(): Promise<Stack> {
+async function buildStack(now?: () => number): Promise<Stack> {
   const home = freshHome();
   const paths = getPaths(home);
   ensureHome(paths);
   const store = Store.open(paths.dbPath);
-  const core = new MurmurCore(store, { onAppend: () => {}, onStateChange: () => {} });
+  const core = new MurmurCore(store, { onAppend: () => {}, onStateChange: () => {} }, now);
   // No real codex or Claude socket is ever contacted: both transports refuse.
   const broker = await Broker.start({ paths, store, core, nativeSend: () => Promise.resolve({ ok: false, error: 'no' }), wake: () => Promise.resolve(false) });
   const stack: Stack = { home, paths, token: readToken(paths), store, core, broker };
@@ -128,6 +128,40 @@ describe('session events', () => {
       cwd: '/work/My Proj',
       state: 'idle',
     });
+  });
+
+  it('sends the machine of the host: none for the broker machine, the id for another', async () => {
+    const stack = await buildStack();
+    await runHook('session-start', JSON.stringify({ session_id: 'here', cwd: '/work/here' }), envFor(stack), CLIENT_OPT('claude'));
+    expect(stack.store.sessionByCliId('claude', 'here')?.hostMachine).toBeNull();
+    await runHook('session-start', JSON.stringify({ session_id: 'there', cwd: '/work/there' }), envFor(stack), { host: { ...HOST, hostPid: HOST.hostPid + 1 }, machine: { machine: '00000000-0000-4000-8000-000000000009', machineName: 'mac', machineFingerprint: 'c'.repeat(32) } });
+    expect(stack.store.sessionByCliId('claude', 'there')).toMatchObject({ hostMachine: '00000000-0000-4000-8000-000000000009', hostLabel: 'mac', hostFingerprint: 'c'.repeat(32) });
+  });
+
+  it('sends no machine and no uptime when it has no boot id, and is read as a client of the broker machine', async () => {
+    const stack = await buildStack();
+    await runHook('session-start', JSON.stringify({ session_id: 'bare', cwd: '/work/bare' }), envFor(stack), { host: HOST, machine: {} });
+    expect(stack.store.sessionByCliId('claude', 'bare')).toMatchObject({ hostMachine: null, hostLabel: null });
+  });
+
+  it('sends the uptime of its machine so the broker can tell a reboot from a machine with the same host name', async () => {
+    let clock = 5_000_000;
+    const stack = await buildStack(() => clock);
+    const remote = (pid: number, boot: string, uptime?: number | string) => ({
+      host: { ...HOST, hostPid: pid },
+      machine: { machine: boot, machineName: 'mac', machineFingerprint: 'd'.repeat(32) },
+      ...(uptime !== undefined ? { uptime: uptime as number } : {}),
+    });
+    const start = (cli: string, opts: ReturnType<typeof remote>) =>
+      runHook('session-start', JSON.stringify({ session_id: cli, cwd: '/work/' + cli }), envFor(stack), opts);
+    await start('old', remote(5001, '00000000-0000-4000-8000-000000000001'));
+    // The broker has been up for a while by the time the machine comes back.
+    clock += 5 * 60 * 1000;
+    // A bogus uptime reads as none: the old session is left to its lease.
+    await start('bogus', remote(5002, '00000000-0000-4000-8000-000000000002', 'a day'));
+    expect(stack.store.sessionByCliId('claude', 'old')?.state).not.toBe('ended');
+    await start('fresh', remote(5003, '00000000-0000-4000-8000-000000000002', 0));
+    expect(stack.store.sessionByCliId('claude', 'old')?.state).toBe('ended');
   });
 
   it('defaults the client to claude, and a bare session gets the plain client handle', async () => {

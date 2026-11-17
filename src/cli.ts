@@ -8,6 +8,7 @@ import { HOOK_CLIENTS, runHook } from './hooks.js';
 import type { HookClient } from './hooks.js';
 import { INSTALL_CLIENTS, installClient } from './install.js';
 import type { InstallClient } from './install.js';
+import { OWNER_DISPLAY, identityMessage, nameMessage } from './cli-identity.js';
 import { currentHost } from './proc.js';
 import { HANDLE_RE, MurmurError } from './protocol.js';
 import type {
@@ -42,7 +43,6 @@ export interface CliIo {
 type Sink = (s: string) => void;
 
 const OWNER_HANDLE = 'renn';
-const OWNER_DISPLAY = 'renn (owner)';
 
 const SEND_USAGE =
   'usage: murmur send <targets> <body...> [--as <handle>] [--mode <mode>] [--refs <a,b>] [--thread <id>]';
@@ -266,21 +266,6 @@ function readAllStdin(): Promise<string> {
 // the session it was typed in (an ancestor host) rides along as the via.
 type Speaker = 'session' | 'owner';
 
-function identityMessage(asHandle: string | null, speaker: Speaker): Omit<RegisterMessage, 'v' | 'id'> {
-  if (asHandle !== null) {
-    return { type: 'register', handle: asHandle, clientKind: 'cli' };
-  }
-  if (speaker === 'owner') {
-    return {
-      type: 'register',
-      owner: true,
-      display: OWNER_DISPLAY,
-      clientKind: 'cli',
-      ancestors: currentHost()?.ancestors ?? [],
-    };
-  }
-  return { type: 'register', clientKind: 'cli', ancestors: currentHost()?.ancestors ?? [] };
-}
 
 interface ParsedFlags {
   values: Map<string, string>;
@@ -450,12 +435,7 @@ async function cmdName(args: string[], out: Sink, err: Sink): Promise<number> {
   }
   const client = await connectCli();
   try {
-    const msg: Omit<RegisterMessage, 'v' | 'id'> = {
-      type: 'register',
-      clientKind: 'cli',
-      handle,
-      host: { hostPid: host.hostPid, hostStart: host.hostStart },
-    };
+    const msg = nameMessage(handle, host);
     const result = await client.request<RegisterResult>(msg);
     out(result.handle + '\n');
     return 0;

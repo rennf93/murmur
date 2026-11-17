@@ -485,31 +485,37 @@ describe('Store', () => {
 
   it('inserts, finds, lists and patches sessions', () => {
     const a = store.insertSession({
-      client: 'claude', cliSessionId: 'c1', handle: 'h', hostPid: 10, hostStart: 'T', transcriptPath: '/t', cwd: '/w', now: 5,
+      client: 'claude', cliSessionId: 'c1', handle: 'h', hostPid: 10, hostStart: 'T', hostMachine: null, hostLabel: null, hostFingerprint: null, transcriptPath: '/t', cwd: '/w', now: 5,
     });
     const b = store.insertSession({
-      client: 'codex', cliSessionId: null, handle: 'h', hostPid: 10, hostStart: 'T', transcriptPath: null, cwd: null, now: 9,
+      client: 'codex', cliSessionId: null, handle: 'h', hostPid: 10, hostStart: 'T', hostMachine: null, hostLabel: null, hostFingerprint: null, transcriptPath: null, cwd: null, now: 9,
     });
     expect(store.sessionById(a)).toEqual({
-      id: a, client: 'claude', cliSessionId: 'c1', handle: 'h', hostPid: 10, hostStart: 'T',
+      id: a, client: 'claude', cliSessionId: 'c1', handle: 'h', hostPid: 10, hostStart: 'T', hostMachine: null, hostLabel: null, hostFingerprint: null,
       transcriptPath: '/t', cwd: '/w', state: null, stateAt: null, pinned: false, startedAt: 5, updatedAt: 5,
     });
     expect(store.sessionById(999)).toBeNull();
     expect(store.sessionByCliId('claude', 'c1')?.id).toBe(a);
     expect(store.sessionByCliId('codex', 'c1')).toBeNull();
-    expect(store.sessionByHost(10, 'T')?.id).toBe(b);
-    expect(store.sessionByHost(10, 'other')).toBeNull();
+    expect(store.sessionByHost(10, 'T', null)?.id).toBe(b);
+    expect(store.sessionByHost(10, 'other', null)).toBeNull();
+    expect(store.sessionByHost(10, 'T', 'mac#1')).toBeNull();
+    // Any machine: the newest row of that pid and start, or all of them newest first.
+    expect(store.sessionOfHost(10, 'T')?.id).toBe(b);
+    expect(store.sessionOfHost(10, 'other')).toBeNull();
+    expect(store.sessionsOfHost(10, 'T').map((r) => r.id)).toEqual([b, a]);
+    expect(store.sessionsOfHost(10, 'other')).toEqual([]);
     expect(store.sessionsForHandle('h').map((r) => r.id)).toEqual([b, a]);
     expect(store.sessionsForHandle('nobody')).toEqual([]);
     expect(store.listSessions().map((r) => r.id)).toEqual([b, a]);
     store.updateSession(a, {});
     expect(store.sessionById(a)?.client).toBe('claude');
     store.updateSession(a, {
-      client: 'gemini', cliSessionId: 'c2', hostPid: 11, hostStart: 'U', transcriptPath: null, cwd: null,
+      client: 'gemini', cliSessionId: 'c2', hostPid: 11, hostStart: 'U', hostMachine: 'mac#1', hostLabel: 'mac', hostFingerprint: 'f'.repeat(32), transcriptPath: null, cwd: null,
       state: 'busy', stateAt: 20, pinned: 1, updatedAt: 30,
     });
     expect(store.sessionById(a)).toEqual({
-      id: a, client: 'gemini', cliSessionId: 'c2', handle: 'h', hostPid: 11, hostStart: 'U',
+      id: a, client: 'gemini', cliSessionId: 'c2', handle: 'h', hostPid: 11, hostStart: 'U', hostMachine: 'mac#1', hostLabel: 'mac', hostFingerprint: 'f'.repeat(32),
       transcriptPath: null, cwd: null, state: 'busy', stateAt: 20, pinned: true, startedAt: 5, updatedAt: 30,
     });
   });

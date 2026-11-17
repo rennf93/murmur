@@ -24,6 +24,13 @@ export interface SessionRow {
   handle: string;
   hostPid: number;
   hostStart: string;
+  // The machine of the host process, or null for the broker's own (and for a
+  // row written before machines existed).
+  hostMachine: string | null;
+  // The host name of that machine when the row was last written, a label.
+  hostLabel: string | null;
+  // A hash that names that machine across reboots; never shown to a client.
+  hostFingerprint: string | null;
   transcriptPath: string | null;
   cwd: string | null;
   // busy, idle or ended; null until a lifecycle event says otherwise.
@@ -125,6 +132,9 @@ interface SessionRecord {
   handle: string;
   host_pid: number;
   host_start: string;
+  host_machine: string | null;
+  host_label: string | null;
+  host_fingerprint: string | null;
   transcript_path: string | null;
   cwd: string | null;
   state: string | null;
@@ -247,6 +257,9 @@ CREATE INDEX IF NOT EXISTS idx_sessions_host ON sessions (host_pid, host_start, 
 const ADDED_COLUMNS: Array<[table: string, column: string, ddl: string]> = [
   ['messages', 'via', 'TEXT'],
   ['sessions', 'pinned', 'INTEGER NOT NULL DEFAULT 0'],
+  ['sessions', 'host_machine', 'TEXT'],
+  ['sessions', 'host_label', 'TEXT'],
+  ['sessions', 'host_fingerprint', 'TEXT'],
 ];
 
 // Delivery states that still count as unread for inbox purposes.
@@ -273,6 +286,9 @@ function toSessionRow(r: SessionRecord): SessionRow {
     handle: r.handle,
     hostPid: r.host_pid,
     hostStart: r.host_start,
+    hostMachine: r.host_machine,
+    hostLabel: r.host_label,
+    hostFingerprint: r.host_fingerprint,
     transcriptPath: r.transcript_path,
     cwd: r.cwd,
     state: r.state,
@@ -728,11 +744,42 @@ export class Store {
     return rec === undefined ? null : toSessionRow(rec);
   }
 
-  // The newest session recorded for this exact host process.
-  sessionByHost(hostPid: number, hostStart: string): SessionRow | null {
+  // The newest session recorded for this exact host process: pid, start and
+  // machine (null is the broker's own machine).
+  sessionByHost(hostPid: number, hostStart: string, hostMachine: string | null): SessionRow | null {
+    const rec = this.stmt('SELECT * FROM sessions WHERE host_pid = ? AND host_start = ? AND host_machine IS ? ORDER BY updated_at DESC, id DESC LIMIT 1')
+      .get(hostPid, hostStart, hostMachine) as SessionRecord | undefined;
+    return rec === undefined ? null : toSessionRow(rec);
+  }
+
+  // The newest session recorded for this pid and start on any machine.
+  sessionOfHost(hostPid: number, hostStart: string): SessionRow | null {
     const rec = this.stmt('SELECT * FROM sessions WHERE host_pid = ? AND host_start = ? ORDER BY updated_at DESC, id DESC LIMIT 1')
       .get(hostPid, hostStart) as SessionRecord | undefined;
     return rec === undefined ? null : toSessionRow(rec);
+  }
+
+  // Every session recorded for this pid and start on any machine, newest first.
+  sessionsOfHost(hostPid: number, hostStart: string): SessionRow[] {
+    const recs = this.stmt('SELECT * FROM sessions WHERE host_pid = ? AND host_start = ? ORDER BY updated_at DESC, id DESC').all(hostPid, hostStart) as SessionRecord[];
+    return recs.map(toSessionRow);
+  }
+
+  // The sessions that have not ended, of the machine with this fingerprint and
+  // host name label, recorded under a boot id other than `machine`: a reboot
+  // ended them.
+  rebootedSessions(fingerprint: string, label: string, machine: string, exceptId: number): SessionRow[] {
+    const recs = this.stmt(
+      "SELECT * FROM sessions WHERE host_fingerprint = ? AND host_label = ? AND host_machine IS NOT NULL AND host_machine != ? AND id != ? AND (state IS NULL OR state != 'ended')",
+    ).all(fingerprint, label, machine, exceptId) as SessionRecord[];
+    return recs.map(toSessionRow);
+  }
+
+  // The sessions recorded under this machine are the broker's own: it learned
+  // its boot id after they were written. Their machine, label and fingerprint
+  // go back to the own-machine form (NULL), which the process table judges.
+  rekeyMachine(machine: string): void {
+    this.stmt('UPDATE sessions SET host_machine = NULL, host_label = NULL, host_fingerprint = NULL WHERE host_machine = ?').run(machine);
   }
 
   // Points one session at another, existing handle and moves its native
@@ -791,14 +838,17 @@ export class Store {
     handle: string;
     hostPid: number;
     hostStart: string;
+    hostMachine: string | null;
+    hostLabel: string | null;
+    hostFingerprint: string | null;
     transcriptPath: string | null;
     cwd: string | null;
     now: number;
   }): number {
     const info = this.stmt(
-      `INSERT INTO sessions (client, cli_session_id, handle, host_pid, host_start, transcript_path, cwd, state, state_at, started_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
-    ).run(arg.client, arg.cliSessionId, arg.handle, arg.hostPid, arg.hostStart, arg.transcriptPath, arg.cwd, arg.now, arg.now);
+      `INSERT INTO sessions (client, cli_session_id, handle, host_pid, host_start, host_machine, host_label, host_fingerprint, transcript_path, cwd, state, state_at, started_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
+    ).run(arg.client, arg.cliSessionId, arg.handle, arg.hostPid, arg.hostStart, arg.hostMachine, arg.hostLabel, arg.hostFingerprint, arg.transcriptPath, arg.cwd, arg.now, arg.now);
     return Number(info.lastInsertRowid);
   }
 
@@ -810,6 +860,9 @@ export class Store {
       cliSessionId?: string | null;
       hostPid?: number;
       hostStart?: string;
+      hostMachine?: string | null;
+      hostLabel?: string | null;
+      hostFingerprint?: string | null;
       transcriptPath?: string | null;
       cwd?: string | null;
       state?: string;
@@ -823,6 +876,9 @@ export class Store {
       ['cliSessionId', 'cli_session_id'],
       ['hostPid', 'host_pid'],
       ['hostStart', 'host_start'],
+      ['hostMachine', 'host_machine'],
+      ['hostLabel', 'host_label'],
+      ['hostFingerprint', 'host_fingerprint'],
       ['transcriptPath', 'transcript_path'],
       ['cwd', 'cwd'],
       ['state', 'state'],
